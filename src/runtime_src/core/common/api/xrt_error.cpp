@@ -24,6 +24,7 @@
 #include "native_profile.h"
 #include "device_int.h"
 #include "error_int.h"
+#include "core/include/xclerr_int.h"
 #include "core/common/error.h"
 #include "core/common/system.h"
 #include "core/common/device.h"
@@ -111,6 +112,8 @@ error_module_to_string(xrtErrorModule err)
     {XRT_ERROR_MODULE_AIE_CORE,   "MODULE_AIE_CORE"},
     {XRT_ERROR_MODULE_AIE_MEMORY, "MODULE_AIE_MEMORY"},
     {XRT_ERROR_MODULE_AIE_SHIM,   "MODULE_AIE_SHIM"},
+    {XRT_ERROR_MODULE_AIE_NOC,    "MODULE_AIE_NOC"},
+    {XRT_ERROR_MODULE_AIE_PL,     "MODULE_AIE_PL"},
   };
 
   return code_to_string(map, err, "Unknown error module");
@@ -182,7 +185,7 @@ alloc_error_from_code(xrtErrorCode ecode, xrtErrorTime timestamp)
 
 } // namespace
 
-namespace xrt_core { namespace error_int {
+namespace xrt_core::error_int {
 
 void
 get_error_code_to_json(xrtErrorCode ecode, boost::property_tree::ptree &pt)
@@ -190,7 +193,7 @@ get_error_code_to_json(xrtErrorCode ecode, boost::property_tree::ptree &pt)
   return error_code_to_json(ecode, pt);
 }
 
-}} // namespace error_int, xrt_core
+} // xrt_core::error_int
 
 namespace xrt {
 
@@ -205,6 +208,19 @@ class error_impl
 public:
   error_impl(const xrt_core::device* device, xrtErrorClass ecl)
   {
+    //Code for new format; Binary array of error structs in sysfs
+    try {
+      auto buf = xrt_core::device_query<xrt_core::query::xocl_errors>(device);
+      if (buf.empty())
+        return;
+      auto ect = xrt_core::query::xocl_errors::to_value(buf, ecl);
+      std::tie(m_errcode, m_timestamp) = ect;
+      return;
+    } catch (const xrt_core::query::no_such_key&) {
+      // Ignoring for now. Check below for edge if not available
+      // query table of zocl doesn't have xocl_errors key
+    }
+    //Below code will be removed after zocl changes for new format
     auto errors = xrt_core::device_query<xrt_core::query::error>(device);
     for (auto& line : errors) {
       auto ect = xrt_core::query::error::to_value(line);
@@ -220,13 +236,13 @@ public:
     : m_errcode(ecode), m_timestamp(timestamp)
   {}
 
-  xrtErrorCode
+  [[nodiscard]] xrtErrorCode
   get_error_code() const
   {
     return m_errcode;
   }
 
-  xrtErrorTime
+  [[nodiscard]] xrtErrorTime
   get_timestamp() const
   {
     return m_timestamp;
@@ -235,6 +251,9 @@ public:
   std::string
   to_string()
   {
+    if (!m_errcode)
+      return "No async error was detected";
+
     auto fmt = boost::format
       ("%s\n"
        "Timestamp: %s")

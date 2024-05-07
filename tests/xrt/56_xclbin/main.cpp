@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2021 Xilinx, Inc
+ * Copyright (C) 2021-2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -25,8 +25,11 @@
 #include "xrt/xrt_kernel.h"
 #include "xrt/xrt_bo.h"
 
+// % g++ -g -std=c++14 -I$XILINX_XRT/include -L$XILINX_XRT/lib -o xclbin.exe main.cpp -lxrt_coreutil -luuid -pthread
+
+
 // This value is shared with worgroup size in kernel.cl
-constexpr auto COUNT = 1024;
+static constexpr auto COUNT = 1024;
 
 static void
 usage()
@@ -66,10 +69,29 @@ operator << (std::ostream& ostr, const xrt::xclbin::arg& arg)
 }
 
 std::ostream&
+operator << (std::ostream& ostr, xrt::xclbin::ip::ip_type ip_type)
+{
+  switch (ip_type) {
+  case xrt::xclbin::ip::ip_type::pl :
+    ostr << "pl";
+    return ostr;
+  case xrt::xclbin::ip::ip_type::ps :
+    ostr << "ps";
+    return ostr;
+  default:
+    ostr << "not defined";
+    return ostr;
+  }
+
+  return ostr;
+}
+
+std::ostream&
 operator << (std::ostream& ostr, const xrt::xclbin::ip& cu)
 {
-  ostr << "instance name:    " << cu.get_name() << "\n";
-  ostr << "base address:     0x" << std::hex << cu.get_base_address() << std::dec << "\n";
+  ostr << "instance name:  " << cu.get_name() << "\n";
+  ostr << "base address:   0x" << std::hex << cu.get_base_address() << std::dec << "\n";
+  ostr << "cu type:        " << cu.get_type() << "\n";
 
   // ip arguments
   for (const auto& arg : cu.get_args())
@@ -79,9 +101,34 @@ operator << (std::ostream& ostr, const xrt::xclbin::ip& cu)
 }
 
 std::ostream&
+operator << (std::ostream& ostr, xrt::xclbin::kernel::kernel_type kernel_type)
+{
+  switch (kernel_type) {
+  case xrt::xclbin::kernel::kernel_type::none :
+    ostr << "none";
+    return ostr;
+  case xrt::xclbin::kernel::kernel_type::pl :
+    ostr << "pl";
+    return ostr;
+  case xrt::xclbin::kernel::kernel_type::ps :
+    ostr << "ps";
+    return ostr;
+  case xrt::xclbin::kernel::kernel_type::dpu :
+    ostr << "dpu";
+    return ostr;
+  default:
+    ostr << "not defined";
+    return ostr;
+  }
+
+  return ostr;
+}
+
+std::ostream&
 operator << (std::ostream& ostr, const xrt::xclbin::kernel& kernel)
 {
   // kernel function
+  ostr << "kernel type: " << kernel.get_type() << "\n";
   ostr << kernel.get_name() << "(\n";
   size_t argidx = 0;
   for (const auto& arg : kernel.get_args()) {
@@ -98,6 +145,33 @@ operator << (std::ostream& ostr, const xrt::xclbin::kernel& kernel)
   return ostr;
 }
 
+std::ostream&
+operator << (std::ostream& ostr, const xrt::xclbin::aie_partition& aiep)
+{
+  ostr << "aie_partition\n";
+  ostr << "operations_per_cycle: " << aiep.get_operations_per_cycle() << '\n';
+  ostr << "inference_fingerprint: " << aiep.get_inference_fingerprint() << '\n';
+  ostr << "pre_post_fingerprint: " << aiep.get_pre_post_fingerprint() << '\n';
+
+  return ostr;
+}
+
+static void
+list_xclbins_in_repo()
+{
+  // List all xclbins
+  std::cout << "============================ XCLBINS ==========================\n";
+  xrt::xclbin_repository repo{}; // repository, current directory, or ini
+  auto end = repo.end();
+  std::cout << "number of xclbins: " << std::distance(repo.begin(), end) << '\n';
+  for (auto itr = repo.begin(); itr != end; ++itr) {
+    std::cout << "xclbin: " << itr.path() << '\n';
+    auto xclbin = (*itr);
+    std::cout << "xsa(" << xclbin.get_xsa_name() << ")\n";
+    std::cout << "uuid(" << xclbin.get_uuid().to_string() << ")\n";
+  }
+}
+
 void
 run_cpp(const std::string& xclbin_fnm)
 {
@@ -107,13 +181,17 @@ run_cpp(const std::string& xclbin_fnm)
   auto uuid = xclbin.get_uuid();
   std::cout << xclbin_fnm << "\n";
   std::cout << "xsa(" << xclbin.get_xsa_name() << ")\n";
-  std::cout << "uuid(" << uuid.to_string() << ")\n\n";
+  std::cout << "uuid(" << uuid.to_string() << ")\n";
+  std::cout << "fpga(" << xclbin.get_fpga_device_name() << ")\n\n";
 
   for (auto& kernel : xclbin.get_kernels())
     std::cout << kernel << '\n';
 
   for (auto& mem : xclbin.get_mems())
     std::cout << mem << '\n';
+
+  for (auto& aiep : xclbin.get_aie_partitions())
+    std::cout << aiep << '\n';
 }
 
 void
@@ -127,7 +205,7 @@ run_c(const std::string& xclbin_fnm)
   xrtXclbinFreeHandle(xhdl);
 }
 
-int 
+static int
 run(int argc, char** argv)
 {
   if (argc < 3) {
@@ -163,13 +241,15 @@ run(int argc, char** argv)
   if (xclbin_fnm.empty())
     throw std::runtime_error("FAILED_TEST\nNo xclbin specified");
 
+  list_xclbins_in_repo();
   run_cpp(xclbin_fnm);
   run_c(xclbin_fnm);
 
   return 0;
 }
 
-int main(int argc, char** argv)
+int
+main(int argc, char** argv)
 {
   try {
     if (!run(argc, argv))
@@ -186,6 +266,6 @@ int main(int argc, char** argv)
   }
   catch (...) {
     std::cout << "TEST FAILED for unknown reason\n";
-    return EXIT_FAILURE; 
+    return EXIT_FAILURE;
   }
 }

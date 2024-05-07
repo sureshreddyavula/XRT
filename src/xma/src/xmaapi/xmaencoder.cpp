@@ -27,6 +27,7 @@
 #include "app/xma_utils.hpp"
 #include "lib/xma_utils.hpp"
 #include "xmaplugin.h"
+#include "core/common/device.h"
 #include <bitset>
 
 char    g_stat_fmt[] = "last_pid_in_use          :%d\n"
@@ -179,7 +180,7 @@ xma_enc_session_create(XmaEncoderProperties *enc_props)
         }
     }
 
-    void* dev_handle = hwcfg->devices[hwcfg_dev_index].handle;
+    auto dev_handle = hwcfg->devices[hwcfg_dev_index].xrt_device;
     XmaHwKernel* kernel_info = &hwcfg->devices[hwcfg_dev_index].kernels[cu_index];
     enc_session->base.hw_session.dev_index = hwcfg->devices[hwcfg_dev_index].dev_index;
 
@@ -188,16 +189,6 @@ xma_enc_session_create(XmaEncoderProperties *enc_props)
         enc_session->base.hw_session.bank_index, XMA_ENCODER_MOD) != XMA_SUCCESS) {
         free(enc_session);
         return nullptr;
-    }
-
-    if (kernel_info->kernel_channels) {
-        if (enc_session->base.channel_id > (int32_t)kernel_info->max_channel_id) {
-            xma_logmsg(XMA_ERROR_LOG, XMA_ENCODER_MOD,
-                "Selected dataflow CU with channels has ini setting with max channel_id of %d. Cannot create session with higher channel_id of %d\n", kernel_info->max_channel_id, enc_session->base.channel_id);
-            
-            free(enc_session);
-            return nullptr;
-        }
     }
 
     // Call the plugins initialization function with this session data
@@ -219,7 +210,6 @@ xma_enc_session_create(XmaEncoderProperties *enc_props)
         return nullptr;
     }
 
-    XmaHwDevice& dev_tmp1 = hwcfg->devices[hwcfg_dev_index];
     // Allocate the private data
     enc_session->base.plugin_data =
         calloc(enc_session->encoder_plugin->plugin_data_size, sizeof(uint8_t));
@@ -236,6 +226,7 @@ xma_enc_session_create(XmaEncoderProperties *enc_props)
     priv1->kernel_execbos.reserve(num_execbo);
     priv1->num_execbo_allocated = num_execbo;
     if (xma_core::create_session_execbo(priv1, num_execbo, XMA_ENCODER_MOD) != XMA_SUCCESS) {
+        kernel_info->context_opened = false;
         free(enc_session->base.plugin_data);
         free(enc_session);
         delete priv1;
@@ -248,17 +239,7 @@ xma_enc_session_create(XmaEncoderProperties *enc_props)
     //Obtain lock only for a) singleton changes & b) kernel_info changes
     std::unique_lock<std::mutex> guard1(g_xma_singleton->m_mutex);
     //Singleton lock acquired
-
-    if (!kernel_info->soft_kernel && !kernel_info->in_use && !kernel_info->context_opened) {
-        if (xclOpenContext(dev_handle, dev_tmp1.uuid, kernel_info->cu_index_ert, true) != 0) {
-            xma_logmsg(XMA_ERROR_LOG, XMA_ENCODER_MOD, "Failed to open context to CU %s for this session\n", kernel_info->name);
-            free(enc_session->base.plugin_data);
-            free(enc_session);
-            delete priv1;
-            return nullptr;
-        }
-    }
-
+     
     enc_session->base.session_id = g_xma_singleton->num_of_sessions + 1;
     xma_logmsg(XMA_INFO_LOG, XMA_ENCODER_MOD,
                 "XMA session channel_id: %d; session_id: %d\n", enc_session->base.channel_id, enc_session->base.session_id);

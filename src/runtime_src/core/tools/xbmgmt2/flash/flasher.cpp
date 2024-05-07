@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2019-2020 Xilinx, Inc
+ * Copyright (C) 2019-2021 Xilinx, Inc
+ * Copyright (C) 2022 Advanced Micro Devices, Inc.
  *
  * This is a wrapper class that does the prep work required to program a flash
  * device. Flasher will create a specific flash object determined by the program
@@ -24,12 +25,12 @@
 #include <limits>
 #include <cstddef>
 #include <cassert>
+#include <filesystem>
 #include <vector>
 #include <cstring>
 #include <cstdarg>
 #include "boost/format.hpp"
 #include <boost/algorithm/string.hpp>
-#include "boost/filesystem.hpp"
 
 #define INVALID_ID      0xffff
 
@@ -58,6 +59,9 @@ Flasher::E_FlasherType Flasher::typeStr_to_E_FlasherType(const std::string& type
     }
     else if (typeStr.compare("qspi_versal") == 0) {
         type = E_FlasherType::QSPIVERSAL;
+    }
+    else if (typeStr.compare("ospi_xgq") == 0) {
+        type = E_FlasherType::OSPI_XGQ;
     }
     return type;
 }
@@ -93,13 +97,12 @@ Flasher::E_FlasherType Flasher::getFlashType(std::string typeStr)
 /*
  * upgradeFirmware
  */
-int Flasher::upgradeFirmware(const std::string& flasherType,
-    firmwareImage *primary, firmwareImage *secondary)
+int Flasher::upgradeFirmware(E_FlasherType flash_type,
+    firmwareImage *primary, firmwareImage *secondary, firmwareImage* stripped)
 {
     int retVal = -EINVAL;
-    E_FlasherType type = getFlashType(flasherType);
 
-    switch(type)
+    switch(flash_type)
     {
     case SPI:
     {
@@ -110,13 +113,21 @@ int Flasher::upgradeFirmware(const std::string& flasherType,
         }
         else if(secondary == nullptr)
         {
-            retVal = xspi.xclUpgradeFirmware1(*primary);
+            retVal = xspi.xclUpgradeFirmware1(*primary, *stripped);
         }
         else
         {
-            retVal = xspi.xclUpgradeFirmware2(*primary, *secondary);
+            retVal = xspi.xclUpgradeFirmware2(*primary, *secondary, *stripped);
         }
-        break;
+
+        // program icap controller for webstar flow. Required only for U.2
+        try {
+            uint32_t enable = 1;
+            xrt_core::device_update<xrt_core::query::ic_enable>(m_device.get(), enable);
+            std::cout << "Successfully enabled icap controller ip for wbstar flow" << std::endl;
+        } catch (...) {}
+
+	break;
     }
     case BPI:
     {
@@ -179,6 +190,17 @@ int Flasher::upgradeFirmware(const std::string& flasherType,
         }
         break;
     }
+    case OSPI_XGQ:
+    {
+        XGQ_VMR_Flasher xgq_flasher(m_device);
+        if (primary == nullptr)
+            std::cout << "ERROR: OSPI XGQ mode does not support reverting to MFG." << std::endl;
+        else if(secondary != nullptr)
+            std::cout << "ERROR: OSPI XGQ mode does not support two mcs files." << std::endl;
+        else
+            retVal = xgq_flasher.xclUpgradeFirmware(*primary);
+        break;
+    }
     default:
         break;
     }
@@ -210,15 +232,13 @@ void Flasher::readBack(const std::string& output)
     {
         XQSPIPS_Flasher xqspi_ps(m_device);
         xqspi_ps.readBack(output);
-        return;
+	return;
     }
     case SPI:
     case OSPIVERSAL:
-        std::cout << "ERROR: flash read back is not supported" << std::endl;
-        return;
+        throw xrt_core::error(-ECANCELED,"Flash read back is not supported");
     default:
-        std::cout << "ERROR: flash type is not supported" << std::endl;
-        return;
+	throw xrt_core::error(-EOPNOTSUPP,"Flash type is not supported");
     }
 }
 
@@ -246,6 +266,7 @@ std::string int2PowerString(unsigned int lvl)
 int Flasher::getBoardInfo(BoardInfo& board)
 {
     std::map<char, std::vector<char>> info;
+    std::string unassigned_mac = "FF:FF:FF:FF:FF:FF";
     XMC_Flasher flasher(m_device->get_device_id());
 
     if (!flasher.probingErrMsg().empty())
@@ -255,10 +276,29 @@ int Flasher::getBoardInfo(BoardInfo& board)
     }
 
     int ret = flasher.xclGetBoardInfo(info);
+    if (ret == -EOPNOTSUPP) {
+        //Check if we can get data from vmr
+        std::map<char, std::string> sdr_info;
+        XGQ_VMR_Flasher xgq_flasher(m_device);
+        ret = xgq_flasher.xclGetBoardInfo(sdr_info);
+        if (ret != 0)
+            return ret;
+        board.mBMCVer = sdr_info[BDINFO_BMC_VER];
+        board.mSerialNum = sdr_info[BDINFO_SN];
+        board.mName = sdr_info[BDINFO_NAME];
+        board.mRev = sdr_info[BDINFO_REV];
+        board.mFanPresence = sdr_info[BDINFO_FAN_PRESENCE][0];
+        board.mMacAddr0 = sdr_info[BDINFO_MAC0].compare(unassigned_mac) ?
+            sdr_info[BDINFO_MAC0] : std::move(std::string("Unassigned"));
+        board.mMacAddr1 = sdr_info[BDINFO_MAC1].compare(unassigned_mac) ?
+            sdr_info[BDINFO_MAC1] : std::move(std::string("Unassigned"));
+        board.mConfigMode = 0;
+        board.mMaxPower = "";
+        return 0;
+    }
     if (ret != 0)
         return ret;
 
-    std::string unassigned_mac = "FF:FF:FF:FF:FF:FF";
     board.mBMCVer = std::move(charVec2String(info[BDINFO_BMC_VER]));
     if (flasher.fixedSC())
         board.mBMCVer += "(FIXED)";
@@ -461,7 +501,7 @@ std::string Flasher::getQspiGolden()
     std::string start = FORMATTED_FW_DIR;
     start += "/";
     start += board_name;
-    boost::filesystem::recursive_directory_iterator dir(start), end;
+    std::filesystem::recursive_directory_iterator dir(start), end;
     while (dir != end) {
         std::string fn = dir->path().filename().string();
         if (!fn.compare(QSPI_GOLDEN_IMAGE)) {

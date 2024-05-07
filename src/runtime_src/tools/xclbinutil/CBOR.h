@@ -20,6 +20,7 @@
 // ----------------------- I N C L U D E S -----------------------------------
 
 // #includes here - please keep these to a bare minimum!
+#include <cstdint>
 #include <string>
 #include <sstream>
 
@@ -29,7 +30,7 @@
 
 namespace XclBinUtilities {
 
-enum class MajorTypes{
+enum class MajorTypes {
   positive_integer = 0,
   negative_integer = 1,
   byte_string      = 2,

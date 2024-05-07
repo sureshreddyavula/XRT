@@ -1,24 +1,11 @@
-/*
- * Copyright (C) 2019-2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2022 Xilinx, Inc.  All rights reserved.
+// Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
 #ifndef XRT_CORE_DEVICE_H
 #define XRT_CORE_DEVICE_H
 
 #include "config.h"
-
+#include "cuidx_type.h"
 #include "error.h"
 #include "ishim.h"
 #include "query.h"
@@ -26,14 +13,17 @@
 #include "scope_guard.h"
 #include "uuid.h"
 
+#include "core/common/shim/hwctx_handle.h"
+#include "core/common/usage_metrics.h"
 #include "core/include/xrt.h"
 #include "core/include/experimental/xrt_xclbin.h"
 
+#include <any>
 #include <cstdint>
 #include <vector>
 #include <string>
 #include <map>
-#include <boost/any.hpp>
+#include <memory>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/optional/optional.hpp>
 
@@ -51,9 +41,74 @@ using device_collection = std::vector<std::shared_ptr<xrt_core::device>>;
  */
 class device : public ishim
 {
+  // class xclbin_map - container for loaded xclbins
+  //
+  // Manages xclbins loaded into specific slots
+  class xclbin_map
+  {
+  public:
+    using slot_id = hwctx_handle::slot_id;
+
+  private:
+    std::map<slot_id, xrt::uuid> m_slot2uuid;
+    std::map<xrt::uuid, xrt::xclbin> m_xclbins;
+
+  public:
+    // Reset the slot -> uuid mapping based on quieried slot info data
+    void
+    reset(std::map<slot_id, xrt::uuid>&& slot2uuid)
+    {
+      m_slot2uuid = std::move(slot2uuid);
+    }
+
+    // Cache an xclbin
+    void
+    insert(xrt::xclbin xclbin)
+    {
+      m_xclbins[xclbin.get_uuid()] = std::move(xclbin);
+    }
+
+    // Get an xclbin with specified uuid
+    const xrt::xclbin&
+    get(const xrt::uuid& uuid) const
+    {
+      auto itr = m_xclbins.find(uuid);
+      if (itr == m_xclbins.end())
+        throw error("No xclbin with uuid '" + uuid.to_string() + "'");
+
+      return (*itr).second;
+    }
+
+    // Get the xclbin stored in specified slot
+    // It is an error if the xclbin has not been explicitly loaded.
+    const xrt::xclbin&
+    get(slot_id slot) const
+    {
+      auto itr = m_slot2uuid.find(slot);
+      if (itr == m_slot2uuid.end())
+        throw error("No xclbin in slot");
+
+      return get((*itr).second);
+    }
+
+    // Return slot indices sorted
+    std::vector<slot_id>
+    get_slots(const xrt::uuid& uuid) const
+    {
+      std::vector<slot_id> slots;
+      for (auto& su : m_slot2uuid)
+        if (su.second == uuid)
+          slots.push_back(su.first);
+
+      std::sort(slots.begin(), slots.end());
+      return slots;
+    }
+  };
+
 public:
   // device index type
   using id_type = unsigned int;
+  using slot_id = xclbin_map::slot_id;
   using handle_type = xclDeviceHandle;
   using memory_type = xrt::xclbin::mem::memory_type;
 
@@ -150,10 +205,10 @@ public:
    * query() - Query the device for specific property
    *
    * @QueryRequestType: Template parameter identifying a specific query request
-   * Return: QueryRequestType::result_type value wrapped as boost::any.
+   * Return: QueryRequestType::result_type value wrapped as std::any.
    */
   template <typename QueryRequestType>
-  boost::any
+  std::any
   query() const
   {
     auto& qr = lookup_query(QueryRequestType::key);
@@ -165,10 +220,10 @@ public:
    *
    * @QueryRequestType: Template parameter identifying a specific query request
    * @args:  Variadic arguments forwarded the QueryRequestType
-   * Return: QueryRequestType::result_type value wrapped as boost::any.
+   * Return: QueryRequestType::result_type value wrapped as std::any.
    */
   template <typename QueryRequestType, typename ...Args>
-  boost::any
+  std::any
   query(Args&&... args) const
   {
     auto& qr = lookup_query(QueryRequestType::key);
@@ -189,6 +244,19 @@ public:
     return qr.put(this, std::forward<Args>(args)...);
   }
 
+  // record_xclbin() - Registers an xclbin with the device
+  //
+  // This function records/registers an xclbin without loading it onto
+  // hardware resource.  Once registered, a hardware context can be
+  // created once or more times, which will assign the xclbin to
+  // hardware resources.
+  //
+  // Naming of "record" as in record_xclbin is to compensate for
+  // virtual register_xclbin which is defined by shim.
+  XRT_CORE_COMMON_EXPORT
+  void
+  record_xclbin(const xrt::xclbin& xclbin);
+
   /**
    * load_xclbin() - Load an xclbin object on this device
    *
@@ -204,14 +272,31 @@ public:
   void
   load_xclbin(const uuid& xclbin_id);
 
-  /**
-   * register_axlf() - Callback from shim after AXLF succesfully loaded
-   *
-   * This function is called after an axlf has been succesfully loaded
-   * by the shim layer API xclLoadXclBin().  Since xclLoadXclBin() can
-   * be called explicitly by end-user code, the callback is necessary
-   * in order to register current axlf with the device object
-   */
+  // Get the currently loaded xclbin
+  // Throws if xclbin uuid does match
+  XRT_CORE_COMMON_EXPORT
+  xrt::xclbin
+  get_xclbin(const uuid& xclbin_id) const;
+
+  // Get all slots that match xclbin uuid
+  std::vector<xclbin_map::slot_id>
+  get_slots(const uuid& xclbin_id) const
+  {
+    return m_xclbins.get_slots(xclbin_id);
+  }
+
+  // Updates cached xclbin data based in data queried from driver
+  void
+  update_xclbin_info();
+
+  // Updates cached compute unit data based in data queried from driver
+  void
+  update_cu_info();
+
+  // This function is called after an axlf has been succesfully loaded
+  // by the shim layer API xclLoadXclBin().  Since xclLoadXclBin() can
+  // be called explicitly by end-user code, the callback is necessary
+  // in order to register current axlf with the device object
   XRT_CORE_COMMON_EXPORT
   void
   register_axlf(const axlf*);
@@ -260,20 +345,55 @@ public:
   }
 
   /**
-   * get_memidx_encoding() - An encoding compressing mem topology indices
+   * get_axlf_sections() - Get sections from currently loaded axlf
    *
-   * Returned container is indexed by mem_topology index and maps to
-   * encoded index.
+   * xclbin_id:  Check that xclbin_id matches currently cached
+   * Return:     Vectors of Pair of section data and size in bytes
+   *
+   * This function provides access to meta data sections that are
+   * from currently loaded xclbin.  The returned sections are from when the
+   * xclbin was loaded by this process.  The function cannot be used
+   * unless this process loaded the xclbin.
+   *
+   * The function returns {nullptr, 0} if section is not cached.
+   *
+   * Same behavior as other get_axlf_sections()
    */
-  const std::vector<size_t>&
-  get_memidx_encoding(const uuid& xclbin_id = uuid()) const;
+  XRT_CORE_COMMON_EXPORT
+  std::vector<std::pair<const char*, size_t>>
+  get_axlf_sections(axlf_section_kind section, const uuid& xclbin_id = uuid()) const;
+
+  std::vector<std::pair<const char*, size_t>>
+  get_axlf_sections_or_error(axlf_section_kind section, const uuid& xclbin_id = uuid()) const;
 
   memory_type
   get_memory_type(size_t memidx) const;
 
-  // get_cus() - Get list cu base addresses sorted by cu inidex
+  // get_cus() - Get list cu base addresses sorted by cu indices
+  // This is a legacy single slot function.
+  // An exception is thrown if called in multi-xclbin flow
+  XRT_CORE_COMMON_EXPORT
   const std::vector<uint64_t>&
-  get_cus(const uuid& xclbin_id = uuid()) const;
+  get_cus() const;
+
+  // get_cuidx() - Get index of cu identified by name and slot
+  //
+  // slot:   Slot for CU
+  // cuname:  Name of CU
+  // Return:  The index of the CU represented as cuidx_type per
+  //          defintion in xrt_core::xclbin
+  //
+  // The index is used when opening a context on this device
+  // and it is used to specify the cumask in commands send
+  // for execution
+  XRT_CORE_COMMON_EXPORT
+  cuidx_type
+  get_cuidx(slot_id slot, const std::string& cuname) const;
+
+  // get_cuidx() - As const version, but update cu indices if necessary
+  XRT_CORE_COMMON_EXPORT
+  cuidx_type
+  get_cuidx(slot_id slot, const std::string& cuname);
 
   /**
    * get_ert_slots() - Get number of ERT CQ slots
@@ -286,7 +406,7 @@ public:
 
   XRT_CORE_COMMON_EXPORT
   std::pair<size_t, size_t>
-  get_ert_slots() const;
+  get_ert_slots(const uuid& xclbin_id = uuid()) const;
 
   // Move all these 'pt' functions out the class interface
   virtual void get_info(boost::property_tree::ptree&) const {}
@@ -307,6 +427,16 @@ public:
    * xclmgmt_load_xclbin() - loads the xclbin through the mgmt pf
    */
   virtual void xclmgmt_load_xclbin(const char*) const{}
+
+  /**
+   * shutdown_device() - hot reset the device, stop ongoing transactions
+   */
+  virtual void device_shutdown() const {}
+
+  /**
+   * online_device() - bring back the device online
+   */
+  virtual void device_online() const {}
 
   /**
    * open() - opens a device with an fd which can be used for non pcie read/write
@@ -334,13 +464,27 @@ public:
     return {fd, std::bind(&device::close, this, fd)};
   }
 
+  /**
+   * get_usage_logger() - get usage metrics logger
+   */
+  usage_metrics::base_logger*
+  get_usage_logger()
+  {
+    return m_usage_logger.get();
+  }
+
  private:
   id_type m_device_id;
   mutable boost::optional<bool> m_nodma = boost::none;
 
-  std::vector<size_t> m_memidx_encoding; // compressed mem_toplogy indices
-  std::vector<uint64_t> m_cus;           // cu base addresses in expeced sort order
-  xrt::xclbin m_xclbin;                  // currently loaded xclbin
+  using name2idx_type = std::map<std::string, cuidx_type>;
+  std::map<slot_id, name2idx_type> m_cu2idx;  // slot -> cu name mapping to cuidx
+  std::map<slot_id, name2idx_type> m_scu2idx;  // slot -> scu name mapping to scuidx
+  std::vector<uint64_t> m_cus;                // cu base addresses in expeced sort order
+  xrt::xclbin m_xclbin;                       // currently loaded xclbin  (single-slot, default)
+  xclbin_map m_xclbins;                       // currently loaded xclbins (multi-slot)
+  mutable std::mutex m_mutex;
+  std::shared_ptr<usage_metrics::base_logger> m_usage_logger = usage_metrics::get_usage_metrics_logger();
 };
 
 /**
@@ -355,7 +499,7 @@ inline typename QueryRequestType::result_type
 device_query(const device* device)
 {
   auto ret = device->query<QueryRequestType>();
-  return boost::any_cast<typename QueryRequestType::result_type>(ret);
+  return std::any_cast<typename QueryRequestType::result_type>(ret);
 }
 
 template <typename QueryRequestType, typename ...Args>
@@ -363,7 +507,7 @@ inline typename QueryRequestType::result_type
 device_query(const device* device, Args&&... args)
 {
   auto ret = device->query<QueryRequestType>(std::forward<Args>(args)...);
-  return boost::any_cast<typename QueryRequestType::result_type>(ret);
+  return std::any_cast<typename QueryRequestType::result_type>(ret);
 }
 
 template <typename QueryRequestType>
@@ -378,7 +522,37 @@ inline typename QueryRequestType::result_type
 device_query(const std::shared_ptr<device>& device, Args&&... args)
 {
   auto ret = device->query<QueryRequestType>(std::forward<Args>(args)...);
-  return boost::any_cast<typename QueryRequestType::result_type>(ret);
+  return std::any_cast<typename QueryRequestType::result_type>(ret);
+}
+
+template <typename QueryRequestType>
+inline typename QueryRequestType::result_type
+device_query_default(const device* device, const typename QueryRequestType::result_type& default_value)
+{
+  try {
+    return device_query<QueryRequestType>(device);
+  }
+  catch (const query::no_such_key&) {
+    return default_value;
+  }
+  catch (const query::sysfs_error&) {
+    return default_value;
+  }
+}
+
+template <typename QueryRequestType>
+inline typename QueryRequestType::result_type
+device_query_default(const std::shared_ptr<device>& device, const typename QueryRequestType::result_type& default_value)
+{
+  try {
+    return device_query<QueryRequestType>(device);
+  }
+  catch (const query::no_such_key&) {
+    return default_value;
+  }
+  catch (const query::sysfs_error&) {
+    return default_value;
+  }
 }
 
 template <typename QueryRequestType, typename ...Args>

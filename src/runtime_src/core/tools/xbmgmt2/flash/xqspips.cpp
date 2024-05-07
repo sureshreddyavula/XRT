@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2021 Xilinx, Inc
+ * Copyright (C) 2021-2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -24,6 +24,7 @@
 #include "core/common/query_requests.h"
 #include "core/pcie/driver/linux/include/mgmt-reg.h"
 #include "flasher.h"
+#include "tools/common/XBUtilitiesCore.h"
 #include "core/tools/common/XBUtilities.h"
 #include "core/tools/common/ProgressBar.h"
 namespace XBU = XBUtilities;
@@ -245,7 +246,7 @@ XQSPIPS_Flasher::XQSPIPS_Flasher(std::shared_ptr<xrt_core::device> dev)
     try{
         flash_base = xrt_core::device_query<xrt_core::query::flash_bar_offset>(mDev.get());
     } catch(...) { }
-	if (flash_base == 0)
+    if (flash_base == 0)
         flash_base = FLASH_BASE;
 
     // maybe initialized QSPI here
@@ -481,12 +482,23 @@ unsigned int XQSPIPS_Flasher::getFlashSize()
 
 void XQSPIPS_Flasher::readBack(const std::string& output, unsigned int base)
 {
+    initQSpiPS();
+
+    uint32_t StatusReg = XQSpiPS_GetStatusReg();
+    if (StatusReg == 0xFFFFFFFF)
+        throw xrt_core::error(-ECANCELED, "Cannot get QSPI status.");
+
+    /* Make sure it is ready to receive commands. */
+    resetQSpiPS();
+    XQSpiPS_Enable_GQSPI();
+
+    if (!getFlashID())
+	throw xrt_core::error(-ECANCELED, "Could not get Flash ID.");
+
     std::ofstream of_flash;
     of_flash.open(output, std::ofstream::out);
-    if (!of_flash.is_open()) {
-        std::cout << "[ERROR]: Could not open " << output << std::endl;
-        return;
-    }
+    if (!of_flash.is_open())
+        throw xrt_core::error(-ECANCELED, "Could not open " + output + ".");
 
     const unsigned int total_size = getFlashSize();
     std::cout << "Output file: " << output << std::endl;

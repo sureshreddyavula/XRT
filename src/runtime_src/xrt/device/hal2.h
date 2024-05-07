@@ -1,27 +1,17 @@
-/**
- * Copyright (C) 2016-2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2016-2022 Xilinx, Inc
+// Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
 #ifndef xrt_device_hal2_h
 #define xrt_device_hal2_h
 
 #include "xrt/device/hal.h"
-#include "xrt/device/halops2.h"
 
 #include "experimental/xrt_device.h"
 #include "experimental/xrt_bo.h"
+
+#include "core/common/device.h"
+#include "core/common/shim/buffer_handle.h"
+#include "core/common/query_requests.h"
 
 #include "ert.h"
 
@@ -47,6 +37,10 @@ using svmbomap_type = std::map<void *, buffer_object_handle>;
 using svmbomap_value_type = svmbomap_type::value_type;
 using svmbomap_iterator_type = svmbomap_type::iterator;
 
+using verbosity_level = xclVerbosityLevel;
+using device_handle = xclDeviceHandle;
+using device_info = xclDeviceInfo2;
+
 /**
  * HAL device for hal 2.0.
  *
@@ -69,8 +63,8 @@ class device : public xrt_xocl::hal::device
   std::vector<std::thread> m_workers;
   svmbomap_type m_svmbomap;
 
-  std::shared_ptr<hal2::operations> m_ops;
   unsigned int m_idx;
+  std::string m_filename;
 
   xrt::device m_handle;
   mutable boost::optional<hal2::device_info> m_devinfo;
@@ -79,7 +73,7 @@ class device : public xrt_xocl::hal::device
 
   struct ExecBufferObject : hal::exec_buffer_object
   {
-    xclBufferHandle handle;
+    std::unique_ptr<xrt_core::buffer_handle> handle;
     void* data = nullptr;
     size_t size = 0;
     hal2::device_handle owner = nullptr;
@@ -104,6 +98,19 @@ class device : public xrt_xocl::hal::device
   get_queue(hal::queue_type qt)
   {
     return m_queue[static_cast<qtype>(qt)];
+  }
+
+  // helper function
+  template<typename returnType, typename func>
+  returnType
+  return_or_default_on_throw(func&& f)
+  {
+    try {
+      return std::forward<func>(f)();
+    }   
+    catch (...) {
+      return {}; 
+    }   
   }
 
 public:
@@ -147,7 +154,7 @@ public:
 # pragma GCC diagnostic pop
 #endif
 public:
-  device(std::shared_ptr<hal2::operations> ops, unsigned int idx);
+  device(unsigned int idx, std::string dll);
   ~device();
 
   /**
@@ -156,8 +163,8 @@ public:
    * If the device supports DMA threads then they are started by
    * this function.
    */
-  void
-  setup();
+  virtual void
+  setup() override;
 
   /**
    * Open the device.
@@ -167,55 +174,55 @@ public:
    * Throws if device could not be opened
    */
   virtual bool
-  open();
+  open() override;
 
   virtual void
-  close();
+  close() override;
 
   virtual xclDeviceHandle
-  get_xcl_handle() const
+  get_xcl_handle() const override
   {
     return m_handle; // cast to xclDeviceHandle
   }
 
   xrt::device
-  get_xrt_device() const
+  get_xrt_device() const override
   {
     return m_handle;
   }
 
   std::shared_ptr<xrt_core::device>
-  get_core_device() const;
+  get_core_device() const override;
 
   bool
   is_nodma() const;
 
   virtual void
-  acquire_cu_context(const uuid& uuid,size_t cuidx,bool shared);
+  acquire_cu_context(const uuid& uuid,size_t cuidx,bool shared) override;
 
   virtual void
-  release_cu_context(const uuid& uuid,size_t cuidx);
+  release_cu_context(const uuid& uuid,size_t cuidx) override;
 
   virtual task::queue*
-  getQueue(hal::queue_type qt)
+  getQueue(hal::queue_type qt) override
   {
     return &m_queue[static_cast<qtype>(qt)];
   }
 
   virtual std::string
-  getDriverLibraryName() const
+  getDriverLibraryName() const override
   {
-    return m_ops->getFileName();
+    return m_filename;
   }
 
   virtual std::string
-  getName() const
+  getName() const override
   {
     return get_device_info()->mName;
   }
 
   virtual unsigned int
-  getBankCount() const
+  getBankCount() const override
   {
     return get_device_info()->mDDRBankCount;
   }
@@ -227,135 +234,99 @@ public:
   }
 
   virtual size_t
-  getAlignment() const
+  getAlignment() const override
   {
     return get_device_info()->mDataAlignment;
   }
 
   virtual range<const unsigned short*>
-  getClockFrequencies() const
+  getClockFrequencies() const override
   {
     return {get_device_info()->mOCLFrequency,get_device_info()->mOCLFrequency+4};
   }
 
   virtual std::ostream&
-  printDeviceInfo(std::ostream& ostr) const;
+  printDeviceInfo(std::ostream& ostr) const override;
 
   virtual size_t
-  get_cdma_count() const
+  get_cdma_count() const override
   {
     return get_device_info()->mNumCDMA;
   }
 
   virtual execbuffer_object_handle
-  allocExecBuffer(size_t sz);
+  allocExecBuffer(size_t sz) override;
 
   virtual buffer_object_handle
-  alloc(size_t sz, Domain domain, uint64_t memoryIndex, void* user_ptr);
+  alloc(size_t sz, Domain domain, uint64_t memoryIndex, void* user_ptr) override;
 
   virtual buffer_object_handle
-  alloc(const buffer_object_handle& bo, size_t sz, size_t offset);
+  alloc(const buffer_object_handle& bo, size_t sz, size_t offset) override;
 
   buffer_object_handle
   alloc_nodma(size_t sz, Domain domain, uint64_t memory_index, void* userptr);
 
   virtual void*
-  alloc_svm(size_t sz);
+  alloc_svm(size_t sz) override;
 
   virtual void
-  free_svm(void* svm_ptr);
+  free_svm(void* svm_ptr) override;
 
   virtual event
-  write(const buffer_object_handle& bo, const void* buffer, size_t sz, size_t offset,bool async);
+  write(const buffer_object_handle& bo, const void* buffer, size_t sz, size_t offset,bool async) override;
 
   virtual event
-  read(const buffer_object_handle& bo, void* buffer, size_t sz, size_t offset,bool async);
+  read(const buffer_object_handle& bo, void* buffer, size_t sz, size_t offset,bool async) override;
 
   virtual event
-  sync(const buffer_object_handle& bo, size_t sz, size_t offset, direction dir, bool async);
+  sync(const buffer_object_handle& bo, size_t sz, size_t offset, direction dir, bool async) override;
 
   virtual event
-  copy(const buffer_object_handle& dst_bo, const buffer_object_handle& src_bo, size_t sz, size_t dst_offset, size_t src_offset);
-
-  virtual void
-  fill_copy_pkt(const buffer_object_handle& dst_boh, const buffer_object_handle& src_boh
-                ,size_t sz, size_t dst_offset, size_t src_offset,ert_start_copybo_cmd* pkt);
+  copy(const buffer_object_handle& dst_bo, const buffer_object_handle& src_bo, size_t sz, size_t dst_offset, size_t src_offset) override;
 
   virtual size_t
-  read_register(size_t offset, void* buffer, size_t size);
+  read_register(size_t offset, void* buffer, size_t size) override;
 
   virtual size_t
-  write_register(size_t offset, const void* buffer, size_t size);
+  write_register(size_t offset, const void* buffer, size_t size) override;
 
   virtual void*
-  map(const buffer_object_handle& bo);
+  map(const buffer_object_handle& bo) override;
 
   virtual void
-  unmap(const buffer_object_handle& bo);
+  unmap(const buffer_object_handle& bo) override;
 
   virtual void*
-  map(const execbuffer_object_handle& bo);
+  map(const execbuffer_object_handle& bo) override;
 
   virtual void
-  unmap(const execbuffer_object_handle& bo);
+  unmap(const execbuffer_object_handle& bo) override;
 
   virtual int
-  exec_buf(const execbuffer_object_handle& bo);
+  exec_buf(const execbuffer_object_handle& bo) override;
 
   virtual int
-  exec_wait(int timeout_ms) const;
-
-public:
-
-  virtual int
-  createWriteStream(hal::StreamFlags flags, hal::StreamAttributes attr, uint64_t route, uint64_t flow, hal::StreamHandle *stream);
-
-  virtual int
-  createReadStream(hal::StreamFlags flags, hal::StreamAttributes attr, uint64_t route, uint64_t flow, hal::StreamHandle *stream);
-
-  virtual int
-  closeStream(hal::StreamHandle stream);
-
-  virtual hal::StreamBuf
-  allocStreamBuf(size_t size, hal::StreamBufHandle *buf);
-
-  virtual int
-  freeStreamBuf(hal::StreamBufHandle buf);
-
-  virtual ssize_t
-  writeStream(hal::StreamHandle stream, const void* ptr, size_t size, hal::StreamXferReq* req);
-
-  virtual ssize_t
-  readStream(hal::StreamHandle stream, void* ptr, size_t size, hal::StreamXferReq* req);
-
-  virtual int
-  pollStreams(hal::StreamXferCompletions* comps, int min, int max, int* actual, int timeout);
-
-  virtual int
-  pollStream(hal::StreamHandle stream, hal::StreamXferCompletions* comps, int min, int max, int* actual, int timeout);
-
-  virtual int
-  setStreamOpt(hal::StreamHandle stream, int type, uint32_t val);
+  exec_wait(int timeout_ms) const override;
 
 public:
   virtual bool
-  is_imported(const buffer_object_handle& boh) const;
+  is_imported(const buffer_object_handle& boh) const override;
 
   virtual uint64_t
-  getDeviceAddr(const buffer_object_handle& boh);
+  getDeviceAddr(const buffer_object_handle& boh) override;
 
   virtual int
-  getMemObjectFd(const buffer_object_handle& boh);
+  getMemObjectFd(const buffer_object_handle& boh) override;
 
   virtual buffer_object_handle
-  getBufferFromFd(const int fd, size_t& size, unsigned flags);
+  getBufferFromFd(const int fd, size_t& size, unsigned flags) override;
 
 public:
   virtual hal::operations_result<int>
-  loadXclBin(const xclBin* xclbin);
+  loadXclBin(const xclBin* xclbin) override;
 
   virtual bool
-  hasBankAlloc() const
+  hasBankAlloc() const override
   {
     // PCIe DSAs have device DDRs which allow bank allocation/selection
     // Zynq PL based devices set device id to 0xffff.
@@ -363,292 +334,283 @@ public:
   }
 
   virtual hal::operations_result<ssize_t>
-  readKernelCtrl(uint64_t offset,void* hbuf,size_t size)
+  readKernelCtrl(uint64_t offset,void* hbuf,size_t size) override
   {
-    if (!m_ops->mRead)
-      return hal::operations_result<ssize_t>();
-    return m_ops->mRead(m_handle,XCL_ADDR_KERNEL_CTRL,offset,hbuf,size);
+    return return_or_default_on_throw<ssize_t>([&]() {
+        get_core_device()->xread(XCL_ADDR_KERNEL_CTRL, offset, hbuf, size);
+        return static_cast<ssize_t>(size);
+      }
+    );
   }
 
   virtual hal::operations_result<ssize_t>
-  writeKernelCtrl(uint64_t offset,const void* hbuf,size_t size)
+  writeKernelCtrl(uint64_t offset,const void* hbuf,size_t size) override
   {
-    if (!m_ops->mWrite)
-      return hal::operations_result<ssize_t>();
-    return m_ops->mWrite(m_handle,XCL_ADDR_KERNEL_CTRL,offset,hbuf,size);
+    return return_or_default_on_throw<ssize_t>([&]() {
+        get_core_device()->xwrite(XCL_ADDR_KERNEL_CTRL, offset, hbuf, size);
+        return static_cast<ssize_t>(size);
+      }
+    );
   }
 
   virtual hal::operations_result<int>
-  reClock2(unsigned short region, unsigned short *freqMHz)
+  reClock2(unsigned short region, unsigned short *freqMHz) override
   {
-    if (!m_ops->mReClock2)
-      return hal::operations_result<int>();
-    return m_ops->mReClock2(m_handle, region, freqMHz);
+    return return_or_default_on_throw<int>([&]() {
+        get_core_device()->reclock(freqMHz);
+        return 0;
+      }
+    );
   }
 
   // Following functions are profiling functions
   virtual hal::operations_result<size_t>
-  clockTraining(xclPerfMonType type)
+  clockTraining(xdp::MonitorType type) override
   {
-    if (!m_ops->mClockTraining)
-      return hal::operations_result<size_t>();
-    return m_ops->mClockTraining(m_handle,type);
+    // xcl api of this function does nothing
+    return {};
   }
 
   virtual hal::operations_result<uint32_t>
-  countTrace(xclPerfMonType type)
+  countTrace(xdp::MonitorType type) override
   {
-    if (!m_ops->mCountTrace)
-      return hal::operations_result<uint32_t>();
-    return m_ops->mCountTrace(m_handle,type);
+    // xcl api of this function does nothing
+    return {};
   }
 
   virtual hal::operations_result<double>
-  getDeviceClock()
+  getDeviceClock() override
   {
-    if (!m_ops->mGetDeviceClock)
-      return hal::operations_result<double>();
-    return m_ops->mGetDeviceClock(m_handle);
-  }
-
-  virtual hal::operations_result<size_t>
-  getDeviceTime()
-  {
-    if (!m_ops->mGetDeviceTime)
-      return hal::operations_result<size_t>();
-    return m_ops->mGetDeviceTime(m_handle);
+    return return_or_default_on_throw<double>([&]() {
+        return xrt_core::device_query<xrt_core::query::device_clock_freq_mhz>(get_core_device());
+      }
+    );
   }
 
   virtual hal::operations_result<double>
-  getDeviceMaxRead()
+  getHostMaxRead() override
   {
-    if (!m_ops->mGetDeviceMaxRead)
-      return hal::operations_result<double>();
-    return m_ops->mGetDeviceMaxRead(m_handle);
+    return return_or_default_on_throw<double>([&]() {
+        return xrt_core::device_query<xrt_core::query::host_max_bandwidth_mbps>(get_core_device(), true);
+      }
+    );
   }
 
   virtual hal::operations_result<double>
-  getDeviceMaxWrite()
+  getHostMaxWrite() override
   {
-    if (!m_ops->mGetDeviceMaxWrite)
-      return hal::operations_result<double>();
-    return m_ops->mGetDeviceMaxWrite(m_handle);
+    return return_or_default_on_throw<double>([&]() {
+        return xrt_core::device_query<xrt_core::query::host_max_bandwidth_mbps>(get_core_device(), false);
+      }
+    );
   }
 
-  virtual hal::operations_result<size_t>
-  readCounters(xclPerfMonType type, xclCounterResults& results)
+  virtual hal::operations_result<double>
+  getKernelMaxRead() override
   {
-    if (!m_ops->mReadCounters)
-      return hal::operations_result<size_t>();
-    return m_ops->mReadCounters(m_handle,type,results);
+    return return_or_default_on_throw<double>([&]() {
+        return xrt_core::device_query<xrt_core::query::kernel_max_bandwidth_mbps>(get_core_device(), true);
+      }
+    );
   }
 
-  virtual hal::operations_result<size_t>
-  debugReadIPStatus(xclDebugReadType type, void* results)
+  virtual hal::operations_result<double>
+  getKernelMaxWrite() override
   {
-    if (!m_ops->mDebugReadIPStatus)
-      return hal::operations_result<size_t>();
-    return m_ops->mDebugReadIPStatus(m_handle, type, (void*)results);
-  }
-
-  virtual hal::operations_result<size_t>
-  readTrace(xclPerfMonType type, xclTraceResultsVector& vec)
-  {
-    if (!m_ops->mReadTrace)
-      return hal::operations_result<size_t>();
-    return m_ops->mReadTrace(m_handle,type, vec);
+    return return_or_default_on_throw<double>([&]() {
+        return xrt_core::device_query<xrt_core::query::kernel_max_bandwidth_mbps>(get_core_device(), false);
+      }
+    );
   }
 
   virtual hal::operations_result<void>
-  xclRead(xclAddressSpace space, uint64_t offset, void *hostBuf, size_t size)
+  xclRead(xclAddressSpace space, uint64_t offset, void *hostBuf, size_t size) override
   {
-    if (!m_ops->mRead)
-      return hal::operations_result<void>();
-    m_ops->mRead(m_handle, space, offset, hostBuf, size);
-    return hal::operations_result<void>(0);
+    return return_or_default_on_throw<int>([&]() {
+        get_core_device()->xread(space, offset, hostBuf, size);
+        return static_cast<int>(size);
+      }
+    );
   }
 
   virtual hal::operations_result<void>
-  xclWrite(xclAddressSpace space, uint64_t offset, const void *hostBuf, size_t size)
+  xclWrite(xclAddressSpace space, uint64_t offset, const void *hostBuf, size_t size) override
   {
-    if (!m_ops->mWrite)
-      return hal::operations_result<void>();
-    m_ops->mWrite(m_handle, space, offset, hostBuf, size);
-    return hal::operations_result<void>(0);
+    return return_or_default_on_throw<int>([&]() {
+        get_core_device()->xwrite(space, offset, hostBuf, size);
+        return static_cast<int>(size);
+      }
+    );
   }
 
   virtual hal::operations_result<ssize_t>
-  xclUnmgdPread(unsigned flags, void *buf, size_t count, uint64_t offset)
+  xclUnmgdPread(unsigned /*flags*/, void *buf, size_t count, uint64_t offset) override
   {
-    if (!m_ops->mUnmgdPread)
-      return hal::operations_result<ssize_t>();
-    return m_ops->mUnmgdPread(m_handle, flags, buf, count, offset);
+    return return_or_default_on_throw<ssize_t>([&]() {
+        get_core_device()->unmgd_pread(buf, count, offset);
+        return 0;
+      }
+    );
+  }
+
+  virtual hal::operations_result<size_t>
+  stopCounters(xdp::MonitorType type) override
+  {
+    // xcl api for this function does nothingm
+    return {};
+  }
+
+  virtual hal::operations_result<size_t>
+  stopTrace(xdp::MonitorType type) override
+  {
+    // xcl api for this function does nothing
+    return {};
   }
 
   virtual hal::operations_result<void>
-  setProfilingSlots(xclPerfMonType type, uint32_t slots)
+  setProfilingSlots(xdp::MonitorType type, uint32_t slots) override
   {
-    if (!m_ops->mSetProfilingSlots)
-      return hal::operations_result<void>();
-    m_ops->mSetProfilingSlots(m_handle,type,slots);
-    return hal::operations_result<void>(0);
+    // xcl api for this function does nothing
+    return {};
   }
 
   virtual hal::operations_result<uint32_t>
-  getProfilingSlots(xclPerfMonType type)
+  getProfilingSlots(xdp::MonitorType type) override
   {
-    if (!m_ops->mGetProfilingSlots)
-      return hal::operations_result<uint32_t>();
-    return m_ops->mGetProfilingSlots(m_handle,type);
+    // xcl api for this function does nothing
+    return {};
   }
 
   virtual hal::operations_result<void>
-  getProfilingSlotName(xclPerfMonType type, uint32_t slotnum,
-                       char* slotName, uint32_t length)
+  getProfilingSlotName(xdp::MonitorType type, uint32_t slotnum,
+                       char* slotName, uint32_t length) override
   {
-    if (!m_ops->mGetProfilingSlotName)
-      return hal::operations_result<void>();
-    m_ops->mGetProfilingSlotName(m_handle,type,slotnum,slotName,length);
-    return hal::operations_result<void>(0);
+    // xcl api for this function does nothing
+    return {};
   }
 
   virtual hal::operations_result<uint32_t>
-  getProfilingSlotProperties(xclPerfMonType type, uint32_t slotnum)
+  getProfilingSlotProperties(xdp::MonitorType type, uint32_t slotnum) override
   {
-    if (!m_ops->mGetProfilingSlotProperties)
-      return hal::operations_result<uint32_t>();
-    return m_ops->mGetProfilingSlotProperties(m_handle,type,slotnum);
+    // xcl api for this function does nothing
+    return {};
   }
 
   virtual hal::operations_result<void>
-  configureDataflow(xclPerfMonType type, unsigned *ip_config)
+  configureDataflow(xdp::MonitorType type, unsigned *ip_config) override
   {
-    if (!m_ops->mConfigureDataflow)
-      return hal::operations_result<void>();
-    m_ops->mConfigureDataflow(m_handle,type, ip_config);
-    return hal::operations_result<void>(0);
+    // xcl api for this function does nothing
+    return {};
+  }
+
+
+  virtual hal::operations_result<size_t>
+  startCounters(xdp::MonitorType type) override
+  {
+    // xcl api for this function does nothing
+    return {};
   }
 
   virtual hal::operations_result<size_t>
-  startCounters(xclPerfMonType type)
+  startTrace(xdp::MonitorType type, uint32_t options) override
   {
-    if (!m_ops->mStartCounters)
-      return hal::operations_result<size_t>();
-    return m_ops->mStartCounters(m_handle,type);
-  }
-
-  virtual hal::operations_result<size_t>
-  startTrace(xclPerfMonType type, uint32_t options)
-  {
-    if (!m_ops->mStartTrace)
-      return hal::operations_result<size_t>();
-    return m_ops->mStartTrace(m_handle,type,options);
-  }
-
-  virtual hal::operations_result<size_t>
-  stopCounters(xclPerfMonType type)
-  {
-    if (!m_ops->mStopCounters)
-      return hal::operations_result<size_t>();
-    return m_ops->mStopCounters(m_handle,type);
-  }
-
-  virtual hal::operations_result<size_t>
-  stopTrace(xclPerfMonType type)
-  {
-    if (!m_ops->mStopTrace)
-      return hal::operations_result<size_t>();
-    return m_ops->mStopTrace(m_handle,type);
+    // xcl api for this function does nothing
+    return {};
   }
 
   virtual void*
-  getHalDeviceHandle() {
+  getHalDeviceHandle() override {
     return m_handle;
   }
 
   virtual hal::operations_result<uint32_t>
-  getNumLiveProcesses()
+  getNumLiveProcesses() override
   {
-    if(!m_ops->mGetNumLiveProcesses)
-      return hal::operations_result<uint32_t>();
-    return m_ops->mGetNumLiveProcesses(m_handle);
+    return return_or_default_on_throw<uint32_t>([&]() {
+        return xrt_core::device_query<xrt_core::query::num_live_processes>(get_core_device());
+      }
+    );
   }
 
   virtual hal::operations_result<std::string>
-  getSysfsPath(const std::string& subdev, const std::string& entry)
+  getSubdevPath(const std::string& subdev, uint32_t idx) override
   {
-    if (!m_ops->mGetSysfsPath)
-      return hal::operations_result<std::string>();
-    constexpr size_t max_path = 256;
-    char path_buf[max_path];
-    if (m_ops->mGetSysfsPath(m_handle, subdev.c_str(), entry.c_str(), path_buf, max_path)) {
-      return hal::operations_result<std::string>();
-    }
-    path_buf[max_path - 1] = '\0';
-    std::string sysfs_path = std::string(path_buf);
-    return sysfs_path;
+    return return_or_default_on_throw<std::string>([&]() {
+        xrt_core::query::sub_device_path::args arg = {subdev, idx};
+        return xrt_core::device_query<xrt_core::query::sub_device_path>(get_core_device(), arg);
+      }
+    );
   }
 
   virtual hal::operations_result<std::string>
-  getSubdevPath(const std::string& subdev, uint32_t idx)
+  getDebugIPlayoutPath() override
   {
-    if (!m_ops->mGetSubdevPath)
-      return hal::operations_result<std::string>();
-    constexpr size_t max_path = 256;
-    char path_buf[max_path];
-    if (m_ops->mGetSubdevPath(m_handle, subdev.c_str(), idx, path_buf, max_path)) {
-      return hal::operations_result<std::string>();
-    }
-    path_buf[max_path - 1] = '\0';
-    std::string path = std::string(path_buf);
-    return path;
-  }
-
-  virtual hal::operations_result<std::string>
-  getDebugIPlayoutPath()
-  {
-    if(!m_ops->mGetDebugIPlayoutPath)
-      return hal::operations_result<std::string>();
-
-    const size_t maxLen = 512;
-    char path[maxLen];
-    if(m_ops->mGetDebugIPlayoutPath(m_handle, path, maxLen)) {
-      return hal::operations_result<std::string>();
-    }
-    path[maxLen - 1] = '\0';
-    std::string pathStr(path);
-    return pathStr;
+    return return_or_default_on_throw<std::string>([&]() {
+        constexpr unsigned int sysfs_max_path_length = 512;
+        return xrt_core::device_query<xrt_core::query::debug_ip_layout_path>(get_core_device(), sysfs_max_path_length);
+      }
+    );
   }
 
   virtual hal::operations_result<int>
-  getTraceBufferInfo(uint32_t nSamples, uint32_t& traceSamples, uint32_t& traceBufSz)
+  getTraceBufferInfo(uint32_t nSamples, uint32_t& traceSamples, uint32_t& traceBufSz) override
   {
-    if(!m_ops->mGetTraceBufferInfo)
-      return hal::operations_result<int>();
-    return m_ops->mGetTraceBufferInfo(m_handle, nSamples, traceSamples, traceBufSz);
+    return return_or_default_on_throw<int>([&]() {
+        auto result = xrt_core::device_query<xrt_core::query::trace_buffer_info>(get_core_device(), nSamples);
+        traceSamples = result.samples;
+        traceBufSz = result.buf_size;
+        return 0;
+      }
+    );
   }
 
   hal::operations_result<int>
-  readTraceData(void* traceBuf, uint32_t traceBufSz, uint32_t numSamples, uint64_t ipBaseAddress, uint32_t& wordsPerSample)
+  readTraceData(void* traceBuf, uint32_t traceBufSz, uint32_t numSamples, uint64_t ipBaseAddress, uint32_t& wordsPerSample) override
   {
-    if(!m_ops->mReadTraceData)
-      return hal::operations_result<int>();
-    return m_ops->mReadTraceData(m_handle, traceBuf, traceBufSz, numSamples, ipBaseAddress, wordsPerSample);
+    const int size = traceBufSz / 4;  // traceBufSz is in number of bytes
+    std::vector<uint32_t> trace_data(size);
+    xrt_core::query::read_trace_data::args arg = {traceBufSz, numSamples, ipBaseAddress, wordsPerSample};
+
+    return return_or_default_on_throw<int>([&]() {
+        trace_data = xrt_core::device_query<xrt_core::query::read_trace_data>(get_core_device(), arg);
+        std::copy(trace_data.data(), trace_data.data() + size, static_cast<uint32_t*>(traceBuf));
+        return static_cast<int>(traceBufSz);
+      }
+    );
   }
 
   hal::operations_result<void>
-  getDebugIpLayout(char* buffer, size_t size, size_t* size_ret)
+  getDebugIpLayout(char* buffer, size_t size, size_t* size_ret) override
   {
-    if(!m_ops->mGetDebugIpLayout) {
-      return hal::operations_result<void>();
-    }
-    m_ops->mGetDebugIpLayout(m_handle, buffer, size, size_ret);
-    return hal::operations_result<void>(0);
+    return return_or_default_on_throw<int>([&]() {
+        auto vec_data = xrt_core::device_query<xrt_core::query::debug_ip_layout_raw>(get_core_device());
+        std::copy(vec_data.data(), vec_data.data() + size, buffer);
+        return 0;
+      }
+    );
   }
 
+  // Functions that use Hal operations
+  // TODO : cleanup and remove these functions
+  //        to completely remove Hal operations
 
+  virtual hal::operations_result<size_t>
+  getDeviceTime() override
+  {
+    return return_or_default_on_throw<ssize_t>([&]() {
+        return get_core_device()->get_device_timestamp();
+      }
+    );
+  }
 
-
+  virtual hal::operations_result<std::string>
+  getSysfsPath(const std::string& subdev, const std::string& entry) override
+  {
+    return return_or_default_on_throw<std::string>([&]() {
+        return get_core_device()->get_sysfs_path(subdev, entry);
+      }
+    );
+  }
 };
 
 }} // hal2,xrt

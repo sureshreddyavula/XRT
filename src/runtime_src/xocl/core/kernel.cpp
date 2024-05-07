@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2021 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -21,6 +21,7 @@
 #include "compute_unit.h"
 
 #include "core/common/api/kernel_int.h"
+#include "core/common/api/xclbin_int.h"
 #include "core/common/xclbin_parser.h"
 
 #include <sstream>
@@ -147,8 +148,11 @@ set(const void* cvalue, size_t sz)
 }
 
 kernel::
-kernel(program* prog, const std::string& name, const xclbin::symbol& symbol)
-  : m_program(prog), m_name(kernel_utils::normalize_kernel_name(name)), m_symbol(symbol)
+kernel(program* prog, const std::string& name, xrt::xclbin::kernel xk)
+  : m_program(prog)
+  , m_name(kernel_utils::normalize_kernel_name(name))
+  , m_xkernel(std::move(xk))
+  , m_properties(xrt_core::xclbin_int::get_properties(m_xkernel))
 {
   static unsigned int uid_count = 0;
   m_uid = uid_count++;
@@ -158,7 +162,25 @@ kernel(program* prog, const std::string& name, const xclbin::symbol& symbol)
   // Construct kernel run object for each device
   for (auto device: prog->get_device_range()) {
     xrt::kernel xkernel(device->get_xrt_device(), prog->get_xclbin_uuid(device), name);
-    m_xruns.emplace(std::make_pair(device, xkr{xkernel, xrt::run(xkernel)})); // {device, xrt::run(xkernel)});
+
+    // The run object must limit the CUs to those of the OpenCL device,
+    // which could be a sub-device.  Since kernel is not tied to a particular
+    // device, we have to construct a kernel, run pair per device
+    xrt::run xrun{xkernel};
+    std::bitset<128> cumask; // magic 128 for max_cus
+    for (auto& cu : device->get_cus())
+      cumask.set(cu->get_index());
+
+    // Limiting the CUs for this kernel object may fail if the device
+    // CUs are different from the kernel CUs. The kernel CUs could be
+    // constrained through the kernel name.  In this case set_cus
+    // throws and the kernel should be ignored
+    try {
+      xrt_core::kernel_int::set_cus(xrun, cumask);
+      m_xruns.emplace(std::make_pair(device, xkr{xkernel, xrun}));
+    }
+    catch (const std::exception&) {
+    }
   }
 
   // Iterate all kernel args and process runtime infomational
@@ -291,7 +313,7 @@ get_xrt_run(const device* device) const
     throw std::runtime_error("No kernel run object for device");
   return (*itr).second.xrun;
 }
- 
+
 kernel::memidx_bitmask_type
 kernel::
 get_memidx(const device* device, unsigned int argidx) const

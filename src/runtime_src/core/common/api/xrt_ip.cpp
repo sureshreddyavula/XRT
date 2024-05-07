@@ -1,31 +1,24 @@
-/*
- * Copyright (C) 2021, Xilinx Inc - All rights reserved
- * Xilinx Runtime (XRT) Experimental APIs
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2021-2022 Xilinx Inc. All rights reserved
+// Copyright (C) 2024 Advanced Micro Devices, Inc. All rights reserved.
 
 // This file implements XRT IP APIs as declared in
 // core/include/experimental/xrt_ip.h
 #define XCL_DRIVER_DLL_EXPORT  // exporting xrt_ip.h
-#define XRT_CORE_COMMON_SOURCE // in same dll as core_common
+#define XRT_CORE_COMMON_SOURCE // in same dll as coreutil
+#define XRT_API_SOURCE         // in same dll as coreutil
 #include "core/include/experimental/xrt_ip.h"
+#include "core/include/experimental/xrt_xclbin.h"
+
+#include "core/common/api/hw_context_int.h"
+#include "core/common/api/ip_int.h"
+#include "core/common/api/native_profile.h"
 
 #include "core/common/device.h"
 #include "core/common/config_reader.h"
+#include "core/common/cuidx_type.h"
 #include "core/common/debug.h"
 #include "core/common/error.h"
-#include "core/common/xclbin_parser.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -57,6 +50,17 @@ has_reg_read_write()
 #else
   return !is_sw_emulation();
 #endif
+}
+
+// Determine the QoS value to use when constructing xrt::hw_context in
+// legacy constructor.  The default is exclusive context, but if
+// xrt.ini:get_rw_shared() is set then access should be shared.
+static xrt::hw_context::access_mode
+hwctx_access_mode()
+{
+  return (xrt_core::config::get_rw_shared())
+    ? xrt::hw_context::access_mode::shared
+    : xrt::hw_context::access_mode::exclusive;
 }
 
 } // namespace
@@ -110,6 +114,13 @@ public:
     device->wait_ip_interrupt(handle);
     enable(); // re-enable interrupts
   }
+
+  [[nodiscard]] std::cv_status
+  wait(const std::chrono::milliseconds& timeout) const
+  {
+    // Waits for interrupt, or return on timeout
+    return device->wait_ip_interrupt(handle, static_cast<int32_t>(timeout.count()));
+  }
 };
 
 // struct ip_impl - The internals of an xrt::ip
@@ -122,43 +133,55 @@ class ip_impl
   // context is closed.
   struct ip_context
   {
-    std::shared_ptr<xrt_core::device> device;
-    xrt::uuid xclbin_uuid;         //
-    unsigned int idx;      // index of ip per driver
-    const ip_data* ip;
-    uint64_t size;         // address range of ip, To-Be-Computed
+    std::shared_ptr<xrt_core::device> m_device;
+    xrt::hw_context m_hwctx;
+    xrt_core::cuidx_type m_idx; // index of ip per driver, for open context
+    xrt::xclbin::ip m_ip;
+    uint64_t m_size;            // address range of ip
 
-    ip_context(std::shared_ptr<xrt_core::device> dev, xrt::uuid xid, const std::string& nm, size_t range)
-      : device(std::move(dev))
-      , xclbin_uuid(std::move(xid))
-      , size(range)
+    std::pair<uint32_t, uint32_t> m_readrange = {0,0};  // start address, size
+
+    ip_context(xrt::hw_context xhwctx, const std::string& nm)
+      : m_device(xrt_core::hw_context_int::get_core_device(xhwctx))
+      , m_hwctx(std::move(xhwctx))
+      , m_idx{0} // intialized in ctor
     {
-      auto ip_section = device->get_axlf_section(IP_LAYOUT, xclbin_uuid);
-      if (!ip_section.first)
-        throw std::runtime_error("No ip layout available to construct ip, make sure xclbin is loaded");
-      auto ip_layout = reinterpret_cast<const ::ip_layout*>(ip_section.first);
+      auto xclbin = m_hwctx.get_xclbin();
 
-      auto ips = xrt_core::xclbin::get_cus(ip_layout, nm);
-      if (ips.empty())
+      // nm can be in three forms, but must identify exactly one IP
+      // 1. base name (kname) without an embedded ":"
+      // 2. curly brace syntax (kname:{inst})
+      // 3. fully qualified / canonical ip name (kname:inst)
+      if (nm.find(":") == std::string::npos || nm.find(":{") != std::string::npos) {
+        // case 1 and 2 use get_ips to do name matching
+        auto ips = xclbin.get_ips(nm);
+
+        if (ips.size() > 1)
+          throw xrt_core::error(EINVAL, "More than one IP matching '" + nm + "'");
+
+        if (ips.size() == 1)
+          m_ip = ips.front();
+      }
+      else {
+        // case 3 use get_ip
+        m_ip = xclbin.get_ip(nm);
+      }
+
+      if (!m_ip)
         throw xrt_core::error(EINVAL, "No IP matching '" + nm + "'");
-      if (ips.size() > 1)
-        throw xrt_core::error(EINVAL, "More than one IP matching '" + nm + "'");
 
-      ip = ips.front();
+      // address range
+      m_size = m_ip.get_size();
 
-      const auto& all_cus = device->get_cus(xclbin_uuid);  // sort order
-      auto itr = std::find(all_cus.begin(), all_cus.end(), ip->m_base_address);
-      if (itr == all_cus.end())
-        throw xrt_core::internal_error("unexpected error");
-
-      idx = std::distance(all_cus.begin(), itr);
-
-      device->open_context(xclbin_uuid.get(), idx, xrt_core::config::get_rw_shared());
+      // context, driver allows shared context per xrt.ini
+      auto hwctx_hdl = static_cast<xrt_core::hwctx_handle*>(m_hwctx);
+      m_idx = hwctx_hdl->open_cu_context(m_ip.get_name());
     }
 
     ~ip_context()
     {
-      device->close_context(xclbin_uuid.get(), idx);
+      auto hwctx_hdl = static_cast<xrt_core::hwctx_handle*>(m_hwctx);
+      hwctx_hdl->close_cu_context(m_idx);
     }
 
     ip_context(const ip_context&) = delete;
@@ -166,45 +189,39 @@ class ip_impl
     ip_context& operator=(ip_context&) = delete;
     ip_context& operator=(ip_context&&) = delete;
 
-    unsigned int
+    [[nodiscard]] unsigned int
     get_idx() const
     {
-      return idx;
+      return m_idx.index;
     }
 
-    uint64_t
+    [[nodiscard]] uint64_t
     get_address() const
     {
-      return ip->m_base_address;
+      return m_ip.get_base_address();
     }
 
-    uint64_t
+    [[nodiscard]] uint64_t
     get_size() const
     {
-      return size;
+      return m_size;
+    }
+
+    void
+    set_read_range(uint32_t start, uint32_t size)
+    {
+      m_device->set_cu_read_range(m_idx, start, size);
+      m_readrange = {start, size};
     }
   };
 
-  size_t
-  address_range(const xrt::uuid& xid, const std::string& ipname) const
-  {
-    auto xml_section = device->get_axlf_section(EMBEDDED_METADATA, xid);
-    if (!xml_section.first)
-      return 0;
-
-    // Normalize ipname to kernel name
-    std::string kname(ipname.substr(0,ipname.find(":"))); 
-    auto kprop = xrt_core::xclbin::get_kernel_properties(xml_section.first, xml_section.second, kname);
-    return kprop.address_range;
-  }
-
-  unsigned int
+  [[nodiscard]] unsigned int
   get_cuidx_or_error(size_t offset) const
   {
-    if ((offset + sizeof(uint32_t)) > ipctx.get_size())
-        throw std::out_of_range("Cannot read or write outside kernel register space");
+    if ((offset + sizeof(uint32_t)) > m_ipctx.get_size())
+        throw std::out_of_range("Cannot read or write outside ip register space");
 
-    return ipctx.get_idx();
+    return m_ipctx.get_idx();
   }
 
   static uint32_t
@@ -215,10 +232,10 @@ class ip_impl
   }
 
 private:
-  std::shared_ptr<xrt_core::device> device;      // shared ownership
-  std::weak_ptr<ip::interrupt_impl> interrupt;   // interrupt if active
-  ip_context ipctx;
-  uint32_t uid;                                  // internal unique id for debug
+  std::shared_ptr<xrt_core::device> m_device;      // shared ownership
+  std::weak_ptr<ip::interrupt_impl> m_interrupt;   // interrupt if active
+  ip_context m_ipctx;
+  uint32_t m_uid;                                  // internal unique id for debug
 
 public:
   // ip_impl - constructor
@@ -227,16 +244,24 @@ public:
   // @xid:     uuid of xclbin to mine for kernel meta data
   // @nm:      name identifying an ip in IP_LAYOUT of xclbin
   ip_impl(std::shared_ptr<xrt_core::device> dev, const xrt::uuid& xid, const std::string& nm)
-    : device(std::move(dev))                                   // share ownership
-    , ipctx(device, xid, nm, address_range(xid, nm))
-    , uid(create_uid())
+    : m_device(std::move(dev))                                   // share ownership
+    , m_ipctx(xrt::hw_context{xrt::device{m_device}, xid, hwctx_access_mode()}, nm)
+    , m_uid(create_uid())
   {
-    XRT_DEBUGF("ip_impl::ip_impl(%d)\n" , uid);
+    XRT_DEBUGF("ip_impl::ip_impl(%d)\n" , m_uid);
+  }
+
+  ip_impl(const xrt::hw_context& hwctx, const std::string& nm)
+    : m_device(xrt_core::hw_context_int::get_core_device(hwctx)) // share ownership
+    , m_ipctx(hwctx, nm)
+    , m_uid(create_uid())
+  {
+    XRT_DEBUGF("ip_impl::ip_impl(%d)\n" , m_uid);
   }
 
   ~ip_impl()
   {
-    XRT_DEBUGF("ip_impl::~ip_impl(%d)\n" , uid);
+    XRT_DEBUGF("ip_impl::~ip_impl(%d)\n" , m_uid);
   }
 
   ip_impl(const ip_impl&) = delete;
@@ -244,15 +269,15 @@ public:
   ip_impl& operator=(ip_impl&) = delete;
   ip_impl& operator=(ip_impl&&) = delete;
 
-  uint32_t
+  [[nodiscard]] uint32_t
   read_register(uint32_t offset) const
   {
     auto idx = get_cuidx_or_error(offset);
     uint32_t value = 0;
     if (has_reg_read_write())
-      device->reg_read(idx, offset, &value);
+      m_device->reg_read(idx, offset, &value);
     else
-      device->xread(ipctx.get_address() + offset, &value, 4);
+      m_device->xread(XCL_ADDR_KERNEL_CTRL, m_ipctx.get_address() + offset, &value, 4);
     return value;
   }
 
@@ -261,32 +286,45 @@ public:
   {
     auto idx = get_cuidx_or_error(offset);
     if (has_reg_read_write())
-      device->reg_write(idx, offset, data);
+      m_device->reg_write(idx, offset, data);
     else
-      device->xwrite(ipctx.get_address() + offset, &data, 4);
+      m_device->xwrite(XCL_ADDR_KERNEL_CTRL, m_ipctx.get_address() + offset, &data, 4);
   }
 
   std::shared_ptr<ip::interrupt_impl>
   get_interrupt()
   {
-    auto intr = interrupt.lock();
+    auto intr = m_interrupt.lock();
     if (!intr)
       // NOLINTNEXTLINE(modernize-make-shared) used in weak_ptr
-      interrupt = intr = std::shared_ptr<ip::interrupt_impl>(new ip::interrupt_impl(device, ipctx.get_idx()));
+      m_interrupt = intr = std::shared_ptr<ip::interrupt_impl>(new ip::interrupt_impl(m_device, m_ipctx.get_idx()));
 
     return intr;
   }
 
-};
+  void
+  set_read_range(uint32_t start, uint32_t size)
+  {
+    m_ipctx.set_read_range(start, size);
+  }
+  
+}; // ip_impl
 
 } // namespace xrt
 
 ////////////////////////////////////////////////////////////////
 // XRT implmentation access to internal IP APIs
 ////////////////////////////////////////////////////////////////
-namespace xrt_core { namespace ip_int {
+namespace xrt_core::ip_int {
 
-}} // ip_int, xrt_core
+void
+set_read_range(const xrt::ip& ip, uint32_t start, uint32_t size)
+{
+  auto handle = ip.get_handle();
+  handle->set_read_range(start, size);
+}
+
+} // xrt_core::ip_int
 
 
 ////////////////////////////////////////////////////////////////
@@ -299,18 +337,27 @@ ip(const xrt::device& device, const xrt::uuid& xclbin_id, const std::string& nam
   : detail::pimpl<ip_impl>(std::make_shared<ip_impl>(device.get_handle(), xclbin_id, name))
 {}
 
+ip::
+ip(const xrt::hw_context& ctx, const std::string& name)
+  : detail::pimpl<ip_impl>(std::make_shared<ip_impl>(ctx, name))
+{}
+
 void
 ip::
 write_register(uint32_t offset, uint32_t data)
 {
-  handle->write_register(offset, data);
+  xdp::native::profiling_wrapper("xrt::ip::write_register",[this, offset, data]{
+    handle->write_register(offset, data);
+  }) ;
 }
 
 uint32_t
 ip::
 read_register(uint32_t offset) const
 {
-  return handle->read_register(offset);
+  return xdp::native::profiling_wrapper("xrt::ip::read_register", [this, offset] {
+    return handle->read_register(offset);
+  }) ;
 }
 
 xrt::ip::interrupt
@@ -345,6 +392,16 @@ wait()
 {
   if (handle)
     handle->wait();
+}
+
+std::cv_status
+ip::interrupt::
+wait(const std::chrono::milliseconds& timeout) const
+{
+  if (handle)
+    return handle->wait(timeout);
+
+  return std::cv_status::no_timeout;
 }
 
 } // namespace xrt

@@ -41,18 +41,31 @@ ELSE(GIT_FOUND)
 endif(GIT_FOUND)
 
 # --- LSB Release ---
-find_program(LSB_RELEASE lsb_release)
 find_program(UNAME uname)
 
-execute_process(COMMAND ${LSB_RELEASE} -is
+execute_process(
+  COMMAND awk -F= "$1==\"ID\" {print $2}" /etc/os-release
+  COMMAND tr -d "\""
+  COMMAND awk "{print tolower($1)}"
   OUTPUT_VARIABLE LINUX_FLAVOR
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
-execute_process(COMMAND ${LSB_RELEASE} -rs
-  OUTPUT_VARIABLE LINUX_VERSION
-  OUTPUT_STRIP_TRAILING_WHITESPACE
+if (${LINUX_FLAVOR} MATCHES "^centos")
+  execute_process(
+    COMMAND awk "{print $4}" /etc/redhat-release
+    COMMAND tr -d "\""
+    OUTPUT_VARIABLE LINUX_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+else()
+  execute_process(
+    COMMAND awk -F= "$1==\"VERSION_ID\" {print $2}" /etc/os-release
+    COMMAND tr -d "\""
+    OUTPUT_VARIABLE LINUX_VERSION
+    OUTPUT_STRIP_TRAILING_WHITESPACE
 )
+endif()
 
 execute_process(COMMAND ${UNAME} -r
   OUTPUT_VARIABLE LINUX_KERNEL_VERSION
@@ -95,13 +108,14 @@ if (DEFINED ENV{XRT_BOOST_INSTALL})
     set (Boost_LIBRARY_DIRS $ENV{XRT_BOOST_INSTALL}/lib)
   endif()
 
-  # Some later versions of boost spews warnings form property_tree
-  add_compile_options("-DBOOST_BIND_GLOBAL_PLACEHOLDERS")
 else()
   find_package(Boost
     REQUIRED COMPONENTS system filesystem program_options)
 endif()
 set(Boost_USE_MULTITHREADED ON)             # Multi-threaded libraries
+
+# Some later versions of boost spew warnings from property_tree
+add_compile_options("-DBOOST_BIND_GLOBAL_PLACEHOLDERS")
 
 # Boost_VERSION_STRING is not working properly, use our own macro
 set(XRT_BOOST_VERSION ${Boost_MAJOR_VERSION}.${Boost_MINOR_VERSION}.${Boost_SUBMINOR_VERSION})
@@ -109,7 +123,7 @@ set(XRT_BOOST_VERSION ${Boost_MAJOR_VERSION}.${Boost_MINOR_VERSION}.${Boost_SUBM
 include_directories(${Boost_INCLUDE_DIRS})
 add_compile_options("-DBOOST_LOCALE_HIDE_AUTO_PTR")
 
-# -- Cursers ---
+# --- Curses ---
 INCLUDE (FindCurses)
 find_package(Curses REQUIRED)
 
@@ -120,6 +134,7 @@ set (XRT_INSTALL_UNWRAPPED_DIR "${XRT_INSTALL_BIN_DIR}/unwrapped")
 set (XRT_INSTALL_INCLUDE_DIR   "${XRT_INSTALL_DIR}/include")
 set (XRT_INSTALL_LIB_DIR       "${XRT_INSTALL_DIR}/lib${LIB_SUFFIX}")
 set (XRT_INSTALL_PYTHON_DIR    "${XRT_INSTALL_DIR}/python")
+set (XRT_BUILD_INSTALL_DIR     "${CMAKE_BINARY_DIR}${CMAKE_INSTALL_PREFIX}/${XRT_INSTALL_DIR}")
 set (XRT_VALIDATE_DIR          "${XRT_INSTALL_DIR}/test")
 set (XRT_NAMELINK_ONLY NAMELINK_ONLY)
 set (XRT_NAMELINK_SKIP NAMELINK_SKIP)
@@ -154,19 +169,18 @@ message("-- Compiler: ${CMAKE_CXX_COMPILER} ${CMAKE_C_COMPILER}")
 # --- Lint ---
 include (CMake/lint.cmake)
 
-add_subdirectory(runtime_src)
+xrt_add_subdirectory(runtime_src)
 
 #XMA settings START
 set(XMA_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
-set(XMA_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/xrt")
+set(XMA_INSTALL_DIR "${XRT_INSTALL_DIR}")
 set(XMA_VERSION_STRING ${XRT_VERSION_MAJOR}.${XRT_VERSION_MINOR}.${XRT_VERSION_PATCH})
 set(XMA_SOVERSION ${XRT_SOVERSION})
-add_subdirectory(xma)
+xrt_add_subdirectory(xma)
 #XMA settings END
 
 # --- Python bindings ---
-set(PY_INSTALL_DIR "${XRT_INSTALL_DIR}/python")
-add_subdirectory(python)
+xrt_add_subdirectory(python)
 
 # --- Python tests ---
 set(PY_TEST_SRC
@@ -179,18 +193,21 @@ install (FILES ${PY_TEST_SRC}
   PERMISSIONS OWNER_READ OWNER_EXECUTE OWNER_WRITE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
   DESTINATION ${XRT_INSTALL_DIR}/test)
 
-add_subdirectory("../tests/validate" "${CMAKE_CURRENT_BINARY_DIR}/validate_build")
 message("-- XRT version: ${XRT_VERSION_STRING}")
 
 # -- CPack
 include (CMake/cpackLin.cmake)
 
-set (XRT_DKMS_DRIVER_SRC_BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/runtime_src/core")
-
-include (CMake/dkms.cmake)
-include (CMake/dkms-aws.cmake)
-include (CMake/dkms-azure.cmake)
-include (CMake/dkms-container.cmake)
+if (XRT_DKMS_ALVEO STREQUAL "ON")
+  message("-- XRT Alveo drivers will be bundled with the XRT package")
+  set (XRT_DKMS_DRIVER_SRC_BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/runtime_src/core")
+  include (CMake/dkms.cmake)
+  include (CMake/dkms-aws.cmake)
+  include (CMake/dkms-azure.cmake)
+  include (CMake/dkms-container.cmake)
+else()
+  message("-- Skipping bundling of XRT Alveo drivers with XRT package")
+endif()
 
 # --- ICD ---
 include (CMake/icd.cmake)
@@ -207,5 +224,5 @@ include (CMake/coverity.cmake)
 # --- Find Package Support ---
 include (CMake/findpackage.cmake)
 
-set (CTAGS "${CMAKE_SOURCE_DIR}/runtime_src/tools/scripts/tags.sh")
+set (CTAGS "${XRT_SOURCE_DIR}/runtime_src/tools/scripts/tags.sh")
 include (CMake/tags.cmake)

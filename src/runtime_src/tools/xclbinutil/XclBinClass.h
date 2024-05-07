@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2018-2021 Xilinx, Inc
+ * Copyright (C) 2020-2022 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -37,7 +38,7 @@ class XclBin {
 
  public:
   XclBin();
-  virtual ~XclBin();
+  ~XclBin();
 
  public:
   void reportInfo(std::ostream &_ostream, const std::string & _sInputFile, bool _bVerbose) const;
@@ -57,6 +58,9 @@ class XclBin {
   void setKeyValue(const std::string & _keyValue);
   void removeKey(const std::string & _keyValue);
   void addSection(Section* _pSection);
+  void addPsKernel(const std::string &encodedString);
+  void addKernels(const std::string &jsonFile);
+  void updateInterfaceuuid();
 
   public:
     // Helper method to take given encoded keyValue and break it down to its individual values (e.g., domain, key, and value)
@@ -64,7 +68,8 @@ class XclBin {
     static std::string findKeyAndGetValue(const std::string & _searchDomain, const std::string & _searchKey, const std::vector<std::string> & _keyValues);
 
  public:
-  Section *findSection(enum axlf_section_kind _eKind, const std::string & _indexName = "") const;
+  Section *findSection(axlf_section_kind _eKind, const std::string & _indexName = "") const;
+  std::vector<Section*> findSection(axlf_section_kind _eKind, bool _ignoreIndex, const std::string & _indexName = "") const;
 
  private:
   void updateHeaderFromSection(Section *_pSection);
@@ -105,12 +110,6 @@ class XclBin {
 
  protected:
   SchemaVersion m_SchemaVersionMirrorWrite;
-
-
- private:
-  // Purposefully private and undefined ctors...
-  XclBin(const XclBin& obj);
-  XclBin& operator=(const XclBin& obj);
 };
 
 

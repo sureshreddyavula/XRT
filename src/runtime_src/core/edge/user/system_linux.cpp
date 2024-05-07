@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2020 Xilinx, Inc
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,20 +15,19 @@
  * under the License.
  */
 
+// Local - Include files
 #include "system_linux.h"
 #include "device_linux.h"
-#include "gen/version.h"
 #include "core/common/time.h"
 
+// 3rd Party Library - Include files
 #include <boost/property_tree/ini_parser.hpp>
 #include <boost/format.hpp>
 
+// System - Include files
 #include <fstream>
 #include <memory>
 #include <thread>
-
-#include <sys/utsname.h>
-#include <gnu/libc-version.h>
 #include <unistd.h>
 
 #if defined(__aarch64__) || defined(__arm__) || defined(__mips__)
@@ -90,78 +90,12 @@ namespace xrt_core {
 
 void
 system_linux::
-get_xrt_info(boost::property_tree::ptree &pt)
+get_driver_info(boost::property_tree::ptree &pt)
 {
-  pt.put("build.version", xrt_build_version);
-  pt.put("build.hash", xrt_build_version_hash);
-  pt.put("build.date", xrt_build_version_date);
-  pt.put("build.branch", xrt_build_version_branch);
-  //driver version
   boost::property_tree::ptree _ptDriverInfo;
   _ptDriverInfo.push_back( std::make_pair("", driver_version("zocl") ));
   pt.put_child("drivers", _ptDriverInfo);
 }
-
-static boost::property_tree::ptree
-glibc_info()
-{
-  boost::property_tree::ptree _pt;
-  _pt.put("name", "glibc");
-  _pt.put("version", gnu_get_libc_version());
-  return _pt;
-}
-
-static std::string
-machine_info()
-{
-  std::string model("unknown");
-  std::ifstream stream(MACHINE_NODE_PATH);
-  if (stream.good()) {
-    std::getline(stream, model);
-    stream.close();
-  }
-  return model;
-}
-
-void
-system_linux::
-get_os_info(boost::property_tree::ptree &pt)
-{
-  struct utsname sysinfo;
-  if (!uname(&sysinfo)) {
-    pt.put("sysname",   sysinfo.sysname);
-    pt.put("release",   sysinfo.release);
-    pt.put("version",   sysinfo.version);
-    pt.put("machine",   sysinfo.machine);
-  }
-
-  boost::property_tree::ptree _ptLibInfo;
-  _ptLibInfo.push_back(std::make_pair("", glibc_info()));
-  pt.put_child("libraries", _ptLibInfo);
-
-  // The file is a requirement as per latest Linux standards
-  // https://www.freedesktop.org/software/systemd/man/os-release.html
-  std::ifstream ifs("/etc/os-release");
-  if (ifs.good()) {
-    boost::property_tree::ptree opt;
-    boost::property_tree::ini_parser::read_ini(ifs, opt);
-    auto val = opt.get<std::string>("PRETTY_NAME", "");
-    if (!val.empty()) {
-      // Remove extra '"' from both end of string
-      if ((val.front() == '"') && (val.back() == '"')) {
-        val.erase(0, 1);
-        val.erase(val.size()-1);
-      }
-      pt.put("distribution", val);
-    }
-    ifs.close();
-  }
-  pt.put("model", machine_info());
-  pt.put("cores", std::thread::hardware_concurrency());
-  pt.put("memory_bytes", (boost::format("0x%lx") % (sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGE_SIZE))).str());
-  pt.put("now", xrt_core::timestamp());
-}
-
 
 std::pair<device::id_type, device::id_type>
 system_linux::
@@ -208,13 +142,6 @@ system_linux::
 program_plp(const device* dev, const std::vector<char> &buffer) const
 {
   throw std::runtime_error("plp program is not supported");
-}
-
-void
-system_linux::
-mem_read(const device*, long long, long long, std::string) const
-{
-  throw std::runtime_error("memory read is not supported");
 }
 
 namespace edge_linux {

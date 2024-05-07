@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2022-2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,11 +15,16 @@
  * under the License.
  */
 
+#include "core/common/error.h"
+#include "core/common/message.h"
+
 #include "xdp/profile/writer/aie_trace/aie_trace_writer.h"
 
-#include <iostream>
-
 namespace xdp {
+
+  // 10 Megabytes or 2.5M words
+  constexpr uint64_t LARGE_DATA_WARN_THRESHOLD = 0xA00000;
+  bool AIETraceWriter::largeDataWarning = false;
 
   AIETraceWriter::AIETraceWriter(const char* filename, uint64_t devId, uint64_t trStrmId,
                                  const std::string& version, 
@@ -37,6 +43,19 @@ namespace xdp {
 
   AIETraceWriter::~AIETraceWriter()
   {
+    try {
+      if (fout.is_open()) {
+        if (fout.tellp() <= 0) {
+          std::string msg = "File: " + getcurrentFileName() + " (device #" + std::to_string(deviceId) 
+              + ", stream #" + std::to_string(traceStreamId) + ") trace data was not captured.";
+          xrt_core::message::send(xrt_core::message::severity_level::warning, "XRT", msg);
+        }
+        fout << std::endl;
+      }
+    } catch (...){
+      std::string msg = "Trace File: " + getcurrentFileName() + " not found.";
+      xrt_core::send_exception_message(msg);
+    }
   }
 
   void AIETraceWriter::writeHeader()
@@ -54,75 +73,57 @@ namespace xdp {
   void AIETraceWriter::writeTraceEvents()
   {
     // write the entire buffer
-    AIETraceDataType* traceData = (db->getDynamicInfo()).getAIETraceData(deviceId, traceStreamId);
-    if(nullptr == traceData) {
-      fout << std::endl;
+    aie::TraceDataType* traceData = (db->getDynamicInfo()).getAIETraceData(deviceId, traceStreamId);
+    if (nullptr == traceData) {
       return;
     }
 
     size_t num = traceData->buffer.size();
-    for(size_t j = 0; j < num; j++) {
-      void*    buf = traceData->buffer[j];
-      // We write 4 bytes at a time
-      // Max chunk size should be multiple of 4
-      // If last chunk is not multiple of 4 then in worst case, 3 bytes of data will not be written
-      uint64_t bufferSz = (traceData->bufferSz[j] / 4);
-      if(nullptr == buf) {
-        fout << std::endl;
-        return;
-      }
-
-      uint32_t* dataBuffer = static_cast<uint32_t*>(buf);
-      for(uint64_t i = 0; i < bufferSz; i++) {
-        fout << "0x" << std::hex << dataBuffer[i] << std::endl;
-      }
-    }
-    fout << std::endl;
-
-#if 0
-    void*    buf = traceData->buffer;
-    uint64_t bufferSz = traceData->bufferSz;
-std::cout << " AIETraceWriter::writeTraceEvents : buf " << buf << " bufferSz " << bufferSz << std::endl;
-    if(nullptr == buf) {
-      fout << std::endl;
+    if (num == 0) {
+      delete traceData;
       return;
     }
 
-    uint32_t* dataBuffer = static_cast<uint32_t*>(buf);
-std::cout << " AIETraceWriter::writeTraceEvents : dataBuffer " << dataBuffer << std::endl;
-    for(uint64_t i = 0; i < bufferSz; i++) {
-      fout << "0x" << std::hex << dataBuffer[i] << std::endl;
-      if(i < 100) {
-        std::cout << "0x" << std::hex << dataBuffer[i] << std::endl;
+    if (!largeDataWarning) {
+      uint64_t traceBytes = 0;
+      for (size_t j = 0; j < num; j++)
+        traceBytes += traceData->bufferSz[j];
+      if (traceBytes > LARGE_DATA_WARN_THRESHOLD) {
+        std::string msg = "Writing large amount of AIE trace. This could take a while.";
+        xrt_core::message::send(xrt_core::message::severity_level::warning, "XRT", msg);
+        largeDataWarning = true;
       }
     }
-    std::cout << std::dec << std::endl;
-    fout << std::endl;
-#endif
+
+    for (size_t j = 0; j < num; j++) {
+      void*    buf = traceData->buffer[j];
+      if (nullptr == buf)
+        continue;
+
+      // We write 4 bytes at a time
+      // Max chunk size should be multiple of 4
+      // If last chunk is not multiple of 4 then in worst case, 
+      // 3 bytes of data will not be written. But this is not possible, as we always write full packet.
+      uint64_t bufferSz = (traceData->bufferSz[j] / 4);
+
+      uint32_t* dataBuffer = static_cast<uint32_t*>(buf);
+      for (uint64_t i = 0; i < bufferSz; i++)
+        fout << "0x" << std::hex << dataBuffer[i] << std::endl;
+
+      // Free the memory immediately if we own it
+      if (traceData->owner)
+        delete[] (traceData->buffer[j]);
+    }
+    delete traceData;
   }
 
   void AIETraceWriter::writeDependencies()
   {
   }
 
-  bool AIETraceWriter::write(bool openNewFile)
+  bool AIETraceWriter::write(bool /*openNewFile*/)
   {
-#if 0
-    writeHeader() ;
-    fout << std::endl ;
-    writeStructure() ;
-    fout << std::endl ;
-    writeStringTable() ;
-    fout << std::endl ;
-#endif
-    writeTraceEvents() ;
-    fout << std::endl ;
-#if 0
-    writeDependencies() ;
-    fout << std::endl ;
-#endif
-
-    if (openNewFile) switchFiles() ;
+    writeTraceEvents();
     return true;
   }
 

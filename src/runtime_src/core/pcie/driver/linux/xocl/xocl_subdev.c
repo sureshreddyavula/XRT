@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2018-2020 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2022 Advanced Micro Devices, Inc.
  *
  * Authors:
  *
@@ -18,9 +19,6 @@
 #include "xclfeatures.h"
 #include "xocl_drv.h"
 #include "version.h"
-
-/* TODO: remove this with old kds */
-extern int kds_mode;
 
 struct xocl_subdev_array {
 	xdev_handle_t xdev_hdl;
@@ -56,7 +54,7 @@ void xocl_subdev_fini(xdev_handle_t xdev_hdl)
 			kfree(core->subdevs[i]);
 			core->subdevs[i] = NULL;
 		}
-		
+
 	}
 
 	if (core->dyn_subdev_store) {
@@ -150,7 +148,7 @@ static struct xocl_subdev *xocl_subdev_info2dev(xdev_handle_t xdev_hdl,
 	return NULL;
 }
 
-static int xocl_subdev_reserve(xdev_handle_t xdev_hdl,
+static int __xocl_subdev_reserve(xdev_handle_t xdev_hdl,
 		struct xocl_subdev_info *sdev_info,
 		struct xocl_subdev **rtn_subdev)
 {
@@ -164,7 +162,8 @@ static int xocl_subdev_reserve(xdev_handle_t xdev_hdl,
 	}
 
 	if (subdev->state != XOCL_SUBDEV_STATE_UNINIT) {
-		xocl_xdev_dbg(xdev_hdl, "subdev is in-use");
+		xocl_xdev_dbg(xdev_hdl, "subdev %s is in-use", subdev->info.name);
+		*rtn_subdev = subdev;
 		return -EEXIST;
 	}
 
@@ -180,6 +179,25 @@ static int xocl_subdev_reserve(xdev_handle_t xdev_hdl,
 	subdev->state = XOCL_SUBDEV_STATE_INIT;
 	*rtn_subdev = subdev;
 	return 0;
+}
+
+int xocl_subdev_reserve(xdev_handle_t xdev_hdl,
+		struct xocl_subdev_info *sdev_info)
+{
+	int retval = 0;
+	struct xocl_subdev *subdev = NULL;
+
+	xocl_lock_xdev(xdev_hdl);
+	retval = __xocl_subdev_reserve(xdev_hdl, sdev_info, &subdev);
+	if ((retval && retval != -EEXIST) ||
+	    subdev->state != XOCL_SUBDEV_STATE_INIT) {
+		xocl_unlock_xdev(xdev_hdl);
+		return retval;
+	}
+
+	xocl_unlock_xdev(xdev_hdl);
+
+	return subdev->info.dev_idx;
 }
 
 static struct xocl_subdev *xocl_subdev_lookup(struct platform_device *pldev)
@@ -395,7 +413,11 @@ static void __xocl_subdev_destroy(xdev_handle_t xdev_hdl,
 		case XOCL_SUBDEV_STATE_ACTIVE:
 		case XOCL_SUBDEV_STATE_OFFLINE:
 			device_release_driver(&pldev->dev);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+			fallthrough;
+#else
 			/* fall through */
+#endif
 		case XOCL_SUBDEV_STATE_ADDED:
 		default:
 			__xocl_platform_device_unreg(xdev_hdl, pldev, state);
@@ -418,6 +440,7 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 	int retval = 0, i, bar_idx;
 	struct resource *res = NULL;
 	resource_size_t iostart;
+	u64 bar_start, bar_end;
 
 	if (subdev->info.override_name)
 		snprintf(devname, sizeof(devname) - 1, "%s",
@@ -462,6 +485,21 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 					&res[i], subdev->info.level);
 			if (retval && retval != -ENODEV)
 				goto error;
+
+			/* If any addressable end point is of 64 bit xrt has
+			 * to pass only offset.
+			 * Get the offset by comparing with bar mappings of CPM.
+			 */
+			if(core->bars) {
+				bar_start = core->bars[bar_idx].base_addr;
+				bar_end = core->bars[bar_idx].base_addr +
+						core->bars[bar_idx].range - 1;
+				if((bar_start <= res[i].start) &&
+						(res[i].end <= bar_end)) {
+					res[i].start -= bar_start;
+					res[i].end -= bar_start;
+				}
+			}
 			iostart = pci_resource_start(core->pdev, bar_idx);
 			res[i].start += iostart;
 			if (!res[i].end) {
@@ -471,7 +509,7 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 				res[i].end += iostart;
 			/*
 			 * Make sure the resource of subdevice is a
-			 * child of the pci bar resource in the 
+			 * child of the pci bar resource in the
 			 * resource tree.
 			 */
 			res[i].parent = &(core->pdev->resource[bar_idx]);
@@ -514,6 +552,7 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 		goto error;
 	priv_data->debug_hdl = reg.hdl;
 	priv_data->data_sz = data_len;
+	priv_data->inst_idx = subdev->info.override_idx;
 
 	retval = platform_device_add_data(subdev->pldev, priv_data,
 			sizeof(*priv_data) + data_len);
@@ -548,8 +587,9 @@ static int __xocl_subdev_create(xdev_handle_t xdev_hdl,
 	int i, retval;
 	uint32_t dev_idx = 0;
 
-	retval = xocl_subdev_reserve(xdev_hdl, sdev_info, &subdev);
-	if (retval)
+	retval = __xocl_subdev_reserve(xdev_hdl, sdev_info, &subdev);
+	if ((retval && retval != -EEXIST) ||
+	    subdev->state != XOCL_SUBDEV_STATE_INIT)
 		goto error;
 
 	/* Restore the dev_idx */
@@ -578,7 +618,7 @@ static int __xocl_subdev_create(xdev_handle_t xdev_hdl,
 		memcpy(res, sdev_info->res, sizeof(*res) * sdev_info->num_res);
 		for (i = 0; i < sdev_info->num_res; i++) {
 			if (sdev_info->res[i].name) {
-				res[i].name = subdev->res_name + 
+				res[i].name = subdev->res_name +
 					i * XOCL_SUBDEV_RES_NAME_LEN;
 				strncpy(subdev->res_name +
 					i * XOCL_SUBDEV_RES_NAME_LEN,
@@ -883,7 +923,7 @@ end:
 int xocl_subdev_create_all(xdev_handle_t xdev_hdl)
 {
 	struct xocl_dev_core *core = (struct xocl_dev_core *)xdev_hdl;
-	struct FeatureRomHeader rom;
+	struct FeatureRomHeader rom = {0};
 	int	i, ret = 0, subdev_num = 0;
 	struct xocl_subdev_info *subdev_info = NULL;
 
@@ -984,6 +1024,26 @@ void xocl_subdev_destroy_by_level(xdev_handle_t xdev_hdl, int level)
 				core->subdevs[i][j]->info.level == level)
 				__xocl_subdev_destroy(xdev_hdl,
 					core->subdevs[i][j]);
+	xocl_unlock_xdev(xdev_hdl);
+}
+
+void xocl_subdev_destroy_by_slot(xdev_handle_t xdev_hdl,
+				 uint32_t slot_id)
+{
+	struct xocl_dev_core *core = (struct xocl_dev_core *)xdev_hdl;
+	int i = 0, j = 0;
+	int level = XOCL_SUBDEV_LEVEL_URP; // Slot is only valid for URP level
+
+	xocl_lock_xdev(xdev_hdl);
+	for (i = ARRAY_SIZE(core->subdevs) - 1; i >= 0; i--)
+		for (j = 0; j < XOCL_SUBDEV_MAX_INST; j++)
+			if (core->subdevs[i][j] &&
+				(core->subdevs[i][j]->info.level == level) &&
+				(core->subdevs[i][j]->info.slot_idx == slot_id)){
+					__xocl_subdev_destroy(xdev_hdl,
+						core->subdevs[i][j]);
+			}
+
 	xocl_unlock_xdev(xdev_hdl);
 }
 
@@ -1351,6 +1411,13 @@ xocl_fetch_dynamic_platform(struct xocl_dev_core *core,
 	u32 type;
 
 	ret = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_VNDR);
+	/*
+	 * Also try find VSEC in basic config space if we don't find it in
+	 * extended config space
+	 */
+	if (!ret)
+		ret = pci_find_capability(pdev, PCI_CAP_ID_VNDR);
+
 	if (ret)
 		type = XOCL_DSAMAP_RAPTOR2;
 	else
@@ -1421,7 +1488,7 @@ xocl_subdev_vsec_read32(xdev_handle_t xdev, int bar, u64 offset)
  * |----------------------+-----|
  * | rsvd                       |
  * |----------------------------|
- *   ... start 1st entry ...          
+ *   ... start 1st entry ...
  * +--------------+---+---+-----|
  * |uuid(15:0)    |bar|rev| type|
  * |--------------+---+---+-----|
@@ -1432,6 +1499,8 @@ xocl_subdev_vsec_read32(xdev_handle_t xdev, int bar, u64 offset)
  * |rsvd                        |
  * +----+-----------------------|
  *  ... next entry ...
+ *
+ * TODO: refactor this code to use struct bit field and memcpy_fromio
  */
 int
 xocl_subdev_vsec(xdev_handle_t xdev, u32 type,
@@ -1520,7 +1589,7 @@ int xocl_subdev_find_vsec_offset(xdev_handle_t xdev)
 	 */
 	do {
 		cap = pci_find_next_ext_capability(pdev,
-						offset_vsec, PCI_EXT_CAP_ID_VNDR);
+			offset_vsec, PCI_EXT_CAP_ID_VNDR);
 		if (cap == 0)
 			break;
 
@@ -1536,6 +1605,32 @@ int xocl_subdev_find_vsec_offset(xdev_handle_t xdev)
 			break;
 
 		offset_vsec = cap;
+	} while (cap != 0);
+
+	/*
+	 * If we don't find VSEC in extended config space, also try search in
+	 * basic config space. This applies in some virtualization case, the
+	 * vsec is emulated in basic config space when the FPGA is assigned
+	 * to VM
+	 */
+
+	if (cap)
+		return cap;
+
+	cap = pci_find_capability(pdev, PCI_CAP_ID_VNDR);
+	do {
+		ret = pci_read_config_word(pdev, (cap + PCI_VNDR_HEADER), &vsec_id);
+		if (ret != 0) {
+			xocl_err(&pdev->dev, "pci read failed for offset: 0x%x, err: %d",
+					 (cap + PCI_VNDR_HEADER), ret);
+			cap = 0;
+			break;
+		}
+
+		if (vsec_id == XOCL_VSEC_ALF_VSEC_ID)
+			break;
+
+		cap = pci_find_next_capability(pdev, cap, PCI_CAP_ID_VNDR);
 	} while (cap != 0);
 
 	return cap;
@@ -1577,6 +1672,7 @@ static inline int xocl_subdev_create_vsec_impl(xdev_handle_t xdev,
 
 int xocl_subdev_create_vsec_devs(xdev_handle_t xdev)
 {
+	struct xocl_dev_core *core = (struct xocl_dev_core *)xdev;
 	u64 offset;
 	int bar, ret;
 	u32 vtype;
@@ -1593,7 +1689,11 @@ int xocl_subdev_create_vsec_devs(xdev_handle_t xdev)
 			    (subdev_info.priv_data))->flash_type,
 			    FLASH_TYPE_QSPIPS, strlen(FLASH_TYPE_QSPIPS));
 			/* default is FLASH_TYPE_SPI, thus pass through. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)
+			fallthrough;
+#else
 			/* fall through */
+#endif
 		case XOCL_VSEC_FLASH_TYPE_SPI_IP:
 		case XOCL_VSEC_FLASH_TYPE_SPI_REG:
 			xocl_xdev_dbg(xdev,
@@ -1606,7 +1706,7 @@ int xocl_subdev_create_vsec_devs(xdev_handle_t xdev)
 			if (ret)
 				return ret;
 			break;
-		case XOCL_VSEC_FLASH_TYPE_VERSAL:
+		case XOCL_VSEC_FLASH_TYPE_XFER_VERSAL:
 			xocl_xdev_dbg(xdev,
 			    "VSEC VERSAL FLASH RES Start 0x%llx, bar %d",
 			    offset, bar);
@@ -1631,6 +1731,50 @@ int xocl_subdev_create_vsec_devs(xdev_handle_t xdev)
 		}
 	}
 
+	ret = xocl_subdev_vsec(xdev, XOCL_VSEC_XGQ, &bar, &offset, NULL);
+	if (!ret) {
+		int bar_payload = 0;
+		u64 offset_payload = 0;
+		struct xocl_subdev_info subdev_info = XOCL_DEVINFO_XGQ_VMR_VSEC;
+
+		ret = xocl_subdev_vsec(xdev, XOCL_VSEC_XGQ_VMR_PAYLOAD,
+			&bar_payload, &offset_payload, NULL);
+		if (ret) {
+			xocl_xdev_err(xdev, "Found XGQ, but missed XGQ_VMR_PAYLOAD");
+			goto done;
+		}
+
+		subdev_info.bar_idx[0] = bar;
+		subdev_info.bar_idx[1] = bar_payload;
+
+		/*
+		 * TODO: update the payload actual size from device later.
+		 * all end_points from VSEC should just have 0x1000(4k) size.
+		 * For now, just hardcode the size which will be reported by
+		 * the device.
+		 */
+		subdev_info.res[0].start = offset;
+		subdev_info.res[0].end = offset + 0xfff;
+		subdev_info.res[0].name = NODE_XGQ_SQ_BASE;
+
+		subdev_info.res[1].start = offset_payload;
+		subdev_info.res[1].end = offset_payload + 0x7ffffff;
+		subdev_info.res[1].name = NODE_XGQ_VMR_PAYLOAD_BASE;
+
+		core->priv.flash_type = FLASH_TYPE_OSPI_XGQ;
+
+		xocl_xdev_dbg(xdev,
+		    "VSEC XGQ Start 0x%llx, bar %d. XGQ Payload 0x%llx, bar %d",
+		    offset, bar, offset_payload, bar_payload);
+		xocl_xdev_dbg(xdev, "xdev flash_type %s", core->priv.flash_type);
+
+		ret = xocl_subdev_create(xdev, &subdev_info);
+		if (ret)
+			goto done;
+
+		xocl_xdev_info(xdev, "VSEC VMR created.");
+	}
+
 	ret = xocl_subdev_vsec(xdev, XOCL_VSEC_MAILBOX, &bar, &offset, NULL);
 	if (!ret) {
 		struct xocl_subdev_info subdev_info = XOCL_DEVINFO_MAILBOX_VSEC;
@@ -1645,6 +1789,7 @@ int xocl_subdev_create_vsec_devs(xdev_handle_t xdev)
 			return ret;
 	}
 
+done:
 	return 0;
 }
 
@@ -1677,11 +1822,6 @@ void xocl_fill_dsa_priv(xdev_handle_t xdev_hdl, struct xocl_board_private *in)
 	u64 offset;
 	unsigned val;
 	bool vsec = false;
-	/* workaround MB_SCHEDULER and INTC resource conflict
-	 * Remove below variables when MB_SCHEDULER is removed
-	 */
-	int i;
-	struct xocl_subdev_info *sdev_info;
 
 	memset(&core->priv, 0, sizeof(core->priv));
 	core->priv.vbnv = in->vbnv;
@@ -1702,8 +1842,12 @@ void xocl_fill_dsa_priv(xdev_handle_t xdev_hdl, struct xocl_board_private *in)
 				ptype);
 		xocl_fetch_dynamic_platform(core, &in, ptype);
 		vsec = true;
+	} else if (ret == -ENOENT) {
+		/* VSEC is found but PLATFORM_INFO does not exist. (versal) */
+		xocl_fetch_dynamic_platform(core, &in, -1);
+		vsec = true;
 	}
-		
+
 	/* workaround firewall completer abort issue */
 	cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_ERR);
 	if (cap) {
@@ -1725,23 +1869,6 @@ void xocl_fill_dsa_priv(xdev_handle_t xdev_hdl, struct xocl_board_private *in)
 		core->priv.xpr = true;
 
 	core->priv.dsa_ver = pdev->subsystem_device & 0xff;
-
-	/* workaround MB_SCHEDULER and INTC resource conflict
-	 * Remove below loop when MB_SCHEDULER is removed
-	 */
-	for (i = 0; i < in->subdev_num; i++) {
-		sdev_info = &in->subdev_info[i];
-		if (sdev_info->id == XOCL_SUBDEV_MB_SCHEDULER && kds_mode == 1) {
-			sdev_info->res = NULL;
-			sdev_info->num_res = 0;
-		} else if (sdev_info->id == XOCL_SUBDEV_INTC && kds_mode == 0) {
-			sdev_info->res = NULL;
-			sdev_info->num_res = 0;
-		} else if (sdev_info->id == XOCL_SUBDEV_ERT_USER && kds_mode == 0) {
-			sdev_info->res = NULL;
-			sdev_info->num_res = 0;
-		}
-	}
 
 	/* data defined in subdev header */
 	core->priv.subdev_info = in->subdev_info;
@@ -1823,6 +1950,38 @@ void xocl_free_dev_minor(xdev_handle_t xdev_hdl)
 	}
 }
 
+/*
+ * This function will reinitialize the versal platform after a cold or warm
+ * reboot. First, we should re-enable the reset registers, either via host or
+ * via vmr firmware. Second, we should try to load apu firmware via vmr.
+ * Note: we ignore errors after all subdev has been probed after extended_probe.
+ *       if any of this procedure fails due to fatal error, a hot reset warning
+ *       will be reported.
+ */
+int xocl_enable_vmr_boot(xdev_handle_t xdev)
+{
+	int err = 0;
+
+	/*
+	 * set reboot config to expected offset (A/B boot).
+	 */
+	err = xocl_vmr_enable_multiboot(xdev);
+	if (err && err != -ENODEV) {
+		xocl_xdev_info(xdev, "config vmr multi-boot failed. err: %d. continue to reset.", err);
+	}
+
+	/*
+	 * set reset signal
+	 */
+	err = xocl_pmc_enable_reset(xdev);
+	if (err && err != -ENODEV) {
+		xocl_xdev_err(xdev, "config pmc reset register failed. err: %d", err);
+		return err;
+	}
+
+	return 0;
+}
+
 int xocl_ioaddr_to_baroff(xdev_handle_t xdev_hdl, resource_size_t io_addr,
 		int *bar_idx, resource_size_t *bar_off)
 {
@@ -1901,25 +2060,47 @@ failed:
 
 static struct resource *__xocl_get_res_byname(struct platform_device *pdev,
 						unsigned int type,
-						const char *name)
+						const char *name, int idx)
 {
 	int i = 0;
 	struct resource *res;
+	int count = -1;
+
+	if (idx < 0)
+		return NULL;
 
 	for (res = platform_get_resource(pdev, type, i);
 		res;
 		res = platform_get_resource(pdev, type, ++i)) {
 		if (!strncmp(res->name, name, strlen(name)))
+			count++;
+		if (count == idx)
 			return res;
 	}
 
 	return NULL;
 }
 
+int xocl_count_iores_byname(struct platform_device *pdev, char *name)
+{
+	int nr = 0;
+
+	while (__xocl_get_res_byname(pdev, IORESOURCE_MEM, name, nr))
+		nr++;
+
+	return nr;
+}
+
+struct resource *xocl_get_iores_with_idx_byname(struct platform_device *pdev,
+				       char *name, int idx)
+{
+	return __xocl_get_res_byname(pdev, IORESOURCE_MEM, name, idx);
+}
+
 struct resource *xocl_get_iores_byname(struct platform_device *pdev,
 				       char *name)
 {
-	return __xocl_get_res_byname(pdev, IORESOURCE_MEM, name);
+	return __xocl_get_res_byname(pdev, IORESOURCE_MEM, name, 0);
 }
 
 void __iomem *xocl_devm_ioremap_res(struct platform_device *pdev,
@@ -1936,15 +2117,23 @@ void __iomem *xocl_devm_ioremap_res_byname(struct platform_device *pdev,
 {
 	struct resource *res;
 
-	res = __xocl_get_res_byname(pdev, IORESOURCE_MEM, name);
+	res = __xocl_get_res_byname(pdev, IORESOURCE_MEM, name, 0);
 	return devm_ioremap_resource(&pdev->dev, res);
+}
+
+int xocl_get_irq_with_idx_byname(struct platform_device *pdev, char *name, int index)
+{
+	struct resource *r;
+
+	r = __xocl_get_res_byname(pdev, IORESOURCE_IRQ, name, index);
+	return r? r->start : -ENXIO;
 }
 
 int xocl_get_irq_byname(struct platform_device *pdev, char *name)
 {
 	struct resource *r;
 
-	r = __xocl_get_res_byname(pdev, IORESOURCE_IRQ, name);
+	r = __xocl_get_res_byname(pdev, IORESOURCE_IRQ, name, 0);
 	return r? r->start : -ENXIO;
 }
 
@@ -1992,8 +2181,50 @@ int xocl_wait_pci_status(struct pci_dev *pdev, u16 mask, u16 val, int timeout)
 	}
 
 	xocl_dbg(&pdev->dev, "waiting for %d ms", i);
-	if (i == timeout) 
+	if (i == timeout)
 		return -ETIME;
 
 	return 0;
+}
+
+/*
+ * A wait_for_completion() hang inside request_firmware() was shown with multiple cards
+ * test. It is due to race condition when multiple threads call request_firmware() at
+ * the same firmware file. Thus, adding a wrapper function to resolve the race.
+ * Loading firmware is not in a critical path, just use a global lock to protect.
+ */
+static DEFINE_MUTEX(firmware_lock);
+int xocl_request_firmware(struct device *dev, const char *fw_name, char **buf, size_t *len)
+{
+	const struct firmware *fw = NULL;
+	int ret;
+
+	*buf = NULL;
+	mutex_lock(&firmware_lock);
+	ret = request_firmware(&fw, fw_name, dev);
+	if (ret)
+		goto failed;
+
+	*buf = vmalloc(fw->size);
+	if (!*buf) {
+		ret = -ENOMEM;
+		goto failed;
+	}
+	memcpy(*buf, fw->data, fw->size);
+	if (len)
+		*len = fw->size;
+	release_firmware(fw);
+	mutex_unlock(&firmware_lock);
+
+	return 0;
+
+failed:
+	if (fw)
+		release_firmware(fw);
+	mutex_unlock(&firmware_lock);
+
+	vfree(*buf);
+	*buf = NULL;
+
+	return ret;
 }

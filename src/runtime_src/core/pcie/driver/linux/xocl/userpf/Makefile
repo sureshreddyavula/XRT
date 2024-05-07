@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2016-2020 Xilinx, Inc. All rights reserved.
+# Copyright (C) 2016-2022 Xilinx, Inc. All rights reserved.
 #
 # Authors:
 #
@@ -16,7 +16,8 @@
 obj-m	+= xocl.o
 ccflags-y := -Iinclude/drm
 
-include $(PWD)/../lib/Makefile.in
+export module_path ?= $(PWD)
+include $(module_path)/../lib/Makefile.in
 
 # Base on Linux Documentation/kbuild/modules.txt.
 # $(src) provides the absolute path by pointing to the directory
@@ -40,11 +41,12 @@ endif
 
 endif
 
-drv_common-y   := $(common_dir)/kds_core.o \
+drv_common-y   := $(common_dir)/kds_hwctx.o \
+		  $(common_dir)/kds_core.o \
 		  $(common_dir)/xrt_cu.o \
 		  $(common_dir)/cu_hls.o \
 		  $(common_dir)/fast_adapter.o \
-		  $(common_dir)/cu_plram.o \
+		  $(common_dir)/xgq_execbuf.o \
 		  $(common_dir)/xrt_xclbin.o
 
 xocl-y := \
@@ -54,11 +56,10 @@ xocl-y := \
 	../xocl_fdt.o \
 	../xocl_xclbin.o \
 	../xocl_debug.o \
+	../xocl_xgq.o \
 	../subdev/xdma.o \
 	../subdev/qdma.o \
-	../subdev/qdma4.o \
 	../subdev/feature_rom.o \
-	../subdev/mb_scheduler.o \
 	../subdev/mailbox.o \
 	../subdev/xvc.o \
 	../subdev/icap.o \
@@ -84,6 +85,7 @@ xocl-y := \
 	../subdev/memory_hbm.o \
 	../subdev/address_translator.o \
 	../subdev/cu.o \
+	../subdev/scu.o \
 	../subdev/p2p.o \
 	../subdev/intc.o \
 	../subdev/m2m.o \
@@ -93,6 +95,9 @@ xocl-y := \
 	../subdev/accel_deadlock_detector.o \
 	../subdev/command_queue.o \
 	../subdev/cfg_gpio.o \
+	../subdev/hwmon_sdm.o \
+	../subdev/ert_ctrl.o \
+	../subdev/cu_xgq.o \
 	$(xocl_lib-y)	\
 	$(drv_common-y) \
 	xocl_drv.o	\
@@ -101,6 +106,7 @@ xocl-y := \
 	xocl_drm.o	\
 	xocl_ioctl.o	\
 	xocl_kds.o 	\
+	xocl_hwctx.o 	\
 	xocl_sysfs.o
 
 xocl-y += $(libfdt-y)
@@ -114,7 +120,7 @@ PWD	:= $(shell pwd)
 ROOT	:= $(dir $(M))
 XILINXINCLUDE := -I$(ROOT) -I$(ROOT)/../include -I$(ROOT)/../../../../include -I$(ROOT)/../../../../common/drv/include
 
-ccflags-y += $(XILINXINCLUDE) -DPF=USERPF -D__XRT__
+ccflags-y += $(XILINXINCLUDE) -DPF=USERPF -D__XRT__ -DMBOX_INTERRUPT_DISABLE
 ifeq ($(DEBUG),1)
 ccflags-y += -DDEBUG
 endif
@@ -122,6 +128,9 @@ endif
 ifeq ($(SYMBOL),1)
 ccflags-y += -g
 endif
+
+QDMA_PATH := $(src)/../lib/libqdma/QDMA/linux-kernel/driver/libqdma/
+ccflags-y += -I$(QDMA_PATH) -I$(QDMA_PATH)/qdma_access/ -I$(QDMA_PATH)/qdma_access/qdma_soft_access/ -I$(QDMA_PATH)/qdma_access/eqdma_soft_access -I$(QDMA_PATH)/qdma_access/qdma_cpm4_access/ -I$(QDMA_PATH)/qdma_access/eqdma_cpm5_access/
 
 all:
 	@echo $(PWD)

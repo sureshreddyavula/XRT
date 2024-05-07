@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2020 Xilinx Inc - All rights reserved
+ * Copyright (C) 2020-2022 Xilinx Inc - All rights reserved
+ * Copyright (C) 2022-2024 Advanced Micro Devices, Inc - All rights reserved
  * Xilinx Debug & Profile (XDP) APIs
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
@@ -15,7 +16,7 @@
  * under the License.
  */
 
-#ifndef _WIN32
+#if !defined(_WIN32) && !defined(SKIP_IOCTL)
 
 #include <sys/fcntl.h>
 #include <sys/mman.h>
@@ -27,6 +28,7 @@
 
 #include "ioctl_am.h"
 #include "core/pcie/driver/linux/include/profile_ioctl.h"
+#include "xdp/profile/device/utility.h"
 
 namespace xdp {
 
@@ -91,7 +93,7 @@ size_t IOCtlAM::stopCounter()
   return 0;
 }
 
-size_t IOCtlAM::readCounter(xclCounterResults& counterResults, uint32_t s)
+size_t IOCtlAM::readCounter(xdp::CounterResults& counterResults)
 {
   if(!isOpened()) {
     return 0;
@@ -111,6 +113,8 @@ size_t IOCtlAM::readCounter(xclCounterResults& counterResults, uint32_t s)
                   << " Stall support : " << hasStall()
                   << std::endl;
   }
+
+  uint64_t s = util::getAMSlotId(getMIndex());
 
   struct am_counters counters = { 0 };
   ioctl(driver_FD, AM_IOC_READCNT, &counters);

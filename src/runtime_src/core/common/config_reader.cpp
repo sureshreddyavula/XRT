@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2019 Xilinx, Inc
+ * Copyright (C) 2016-2021 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -19,18 +19,17 @@
 #include "message.h"
 #include "error.h"
 
-#include <set>
-#include <iostream>
-#include <mutex>
+#include <filesystem>
 #include <cstdlib>
+#include <iostream>
+#include <set>
+#include <mutex>
 
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/ini_parser.hpp>
-#include <boost/filesystem/path.hpp>
-#include <boost/filesystem/operations.hpp>
 #include <boost/format.hpp>
 
-#ifdef __GNUC__
+#ifdef __linux__
 # include <linux/limits.h>
 # include <sys/stat.h>
 #endif
@@ -43,25 +42,30 @@ namespace {
 
 namespace key {
 
+static std::mutex mutex;
 // Configuration values can be changed programmatically, but because
 // values are statically cached, they can be changed only until they
 // have been accessed the very first time.  This map tracks first key
 // access.
-static std::set<std::string> locked;
-static std::mutex mutex;
+static std::set<std::string>&
+get_lock_map()
+{
+  static std::set<std::string> lock_map;
+  return lock_map;
+}
 
 static void
 lock(const std::string& key)
 {
   std::lock_guard<std::mutex> lk(mutex);
-  locked.insert(key);
+  get_lock_map().insert(key);
 }
 
 static bool
 is_locked(const std::string& key)
 {
   std::lock_guard<std::mutex> lk(mutex);
-  return locked.find(key) != locked.end();
+  return get_lock_map().find(key) != get_lock_map().end();
 }
 
 } // key
@@ -94,14 +98,14 @@ get_self_path()
  * Look for xrt.ini and if not found look for legacy sdaccel.ini.
  */
 static std::string
-verify_ini_path(const boost::filesystem::path& dir)
+verify_ini_path(const std::filesystem::path& dir)
 {
   auto file_path = dir / "xrt.ini";
-  if (boost::filesystem::exists(file_path))
+  if (std::filesystem::exists(file_path))
     return file_path.string();
 
   file_path = dir / "sdaccel.ini";
-  if (boost::filesystem::exists(file_path))
+  if (std::filesystem::exists(file_path))
     return file_path.string();
 
   return "";
@@ -113,27 +117,27 @@ get_ini_path()
   std::string full_path;
   try {
     //The env variable should be the full path which includes xrt.ini
-    auto xrt_path = boost::filesystem::path(value_or_empty(std::getenv("XRT_INI_PATH")));
-    if (boost::filesystem::exists(xrt_path))
+    auto xrt_path = std::filesystem::path(value_or_empty(std::getenv("XRT_INI_PATH")));
+    if (std::filesystem::exists(xrt_path))
       return xrt_path.string();
 
     //The env variable should be the full path which includes sdaccel.ini
-    auto sda_path = boost::filesystem::path(value_or_empty(std::getenv("SDACCEL_INI_PATH")));
-    if (boost::filesystem::exists(sda_path))
+    auto sda_path = std::filesystem::path(value_or_empty(std::getenv("SDACCEL_INI_PATH")));
+    if (std::filesystem::exists(sda_path))
       return sda_path.string();
 
-    auto exe_path = boost::filesystem::path(get_self_path()).parent_path();
+    auto exe_path = std::filesystem::path(get_self_path()).parent_path();
     full_path = verify_ini_path(exe_path);
     if (!full_path.empty())
       return full_path;
 
-    auto self_path = boost::filesystem::current_path();
+    auto self_path = std::filesystem::current_path();
     full_path = verify_ini_path(self_path);
     if (!full_path.empty())
       return full_path;
 
   }
-  catch (const boost::filesystem::filesystem_error&) {
+  catch (const std::filesystem::filesystem_error&) {
   }
   return full_path;
 }
@@ -215,7 +219,7 @@ get_string_value(const char* key, const std::string& default_value)
     if (!val.empty() && (val.front() == '"') && (val.back() == '"')) {
       val.erase(0, 1);
       val.erase(val.size()-1);
-    } 
+    }
   }
   catch( std::exception const&) {
     // eat the exception, probably bad path

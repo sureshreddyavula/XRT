@@ -1,18 +1,6 @@
-/**
- * Copyright (C) 2016-2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2016-2022 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2024 Advanced Micro Devices, Inc. All rights reserved.
 
 #ifndef xrtcore_config_reader_h_
 #define xrtcore_config_reader_h_
@@ -101,13 +89,6 @@ set(const std::string& key, const std::string& value);
  * file
  */
 inline bool
-get_debug()
-{
-  static bool value  = detail::get_bool_value("Debug.debug",false);
-  return value;
-}
-
-inline bool
 get_app_debug()
 {
   static bool value  = detail::get_bool_value("Debug.app_debug",false);
@@ -150,9 +131,9 @@ get_container()
 }
 
 inline std::string
-get_data_transfer_trace()
+get_device_trace()
 {
-  static std::string value = detail::get_string_value("Debug.data_transfer_trace","off");
+  static std::string value = detail::get_string_value("Debug.device_trace", "off");
   return value;
 }
 
@@ -185,12 +166,26 @@ get_aie_profile()
   return value;
 }
 
+inline bool
+get_aie_debug()
+{
+  static bool value = detail::get_bool_value("Debug.aie_debug",false);
+  return value;
+}
+
+inline bool
+get_aie_status()
+{
+  static bool value = detail::get_bool_value("Debug.aie_status", false);
+  return value;
+}
+
 inline unsigned int
-get_aie_profile_interval_us()
+get_aie_status_interval_us()
 {
   // NOLINTNEXTLINE
-  static unsigned int value = detail::get_uint_value("Debug.aie_profile_interval_us", 1000) ;
-  return value ;
+  static unsigned int value = detail::get_uint_value("Debug.aie_status_interval_us", 1000);
+  return value;
 }
 
 inline bool
@@ -211,46 +206,29 @@ get_noc_profile_interval_ms()
 inline std::string
 get_stall_trace()
 {
-  static std::string data_transfer_enabled = get_data_transfer_trace();
-  static std::string value = (!get_profile() && (0 == data_transfer_enabled.compare("off")) ) ? "off" : detail::get_string_value("Debug.stall_trace","off");
-  return value;
-}
-
-inline bool
-get_timeline_trace()
-{
-  static bool value = detail::get_bool_value("Debug.timeline_trace",false);
+  static std::string value = (get_device_trace() == "off") ? "off"
+                             : detail::get_string_value("Debug.stall_trace", "off");
   return value;
 }
 
 inline bool
 get_continuous_trace()
 {
-  static bool value = detail::get_bool_value("Debug.continuous_trace",false);
-  return value;
-}
-
-inline unsigned int
-get_continuous_trace_interval_ms()
-{
-  // NOLINTNEXTLINE
-  static unsigned int value = detail::get_uint_value("Debug.continuous_trace_interval_ms",10);
+  static bool value = detail::get_bool_value("Debug.continuous_trace", false);
   return value;
 }
 
 inline unsigned int
 get_trace_buffer_offload_interval_ms()
 {
-  // NOLINTNEXTLINE
-  static unsigned int value = detail::get_uint_value("Debug.trace_buffer_offload_interval_ms",10);
+  static unsigned int value = detail::get_uint_value("Debug.trace_buffer_offload_interval_ms", 10);
   return value;
 }
 
 inline unsigned int
 get_trace_file_dump_interval_s()
 {
-  // NOLINTNEXTLINE
-  static unsigned int value = detail::get_uint_value("Debug.trace_file_dump_interval_s",5);
+  static unsigned int value = detail::get_uint_value("Debug.trace_file_dump_interval_s", 5);
   return value;
 }
 
@@ -261,10 +239,10 @@ get_trace_buffer_size()
   return value;
 }
 
-inline std::string
-get_aie_trace_buffer_size()
+inline bool
+get_ml_timeline()
 {
-  static std::string value = detail::get_string_value("Debug.aie_trace_buffer_size", "8M");
+  static bool value = detail::get_bool_value("Debug.ml_timeline",false);
   return value;
 }
 
@@ -276,16 +254,21 @@ get_profile_api()
 }
 
 inline bool
-get_xrt_trace()
+get_host_trace()
 {
-  static bool value = detail::get_bool_value("Debug.xrt_trace", false);
+  // The host_trace switch is intended to turn on only one layer of host trace,
+  // either OpenCL level, Native XRT level, or HAL level.  If the user
+  // sets host_trace=true in the xrt.ini file, then the level of trace that
+  // will be enabled is the level at which the host application is written.
+
+  static bool value = detail::get_bool_value("Debug.host_trace", false);
   return value;
 }
 
 inline bool
-get_xrt_profile()
+get_xrt_trace()
 {
-  static bool value = detail::get_bool_value("Debug.xrt_profile", false);
+  static bool value = detail::get_bool_value("Debug.xrt_trace", false);
   return value;
 }
 
@@ -304,16 +287,9 @@ get_opencl_trace()
 }
 
 inline bool
-get_opencl_summary()
+get_device_counters()
 {
-  static bool value = detail::get_bool_value("Debug.opencl_summary", false);
-  return value;
-}
-
-inline bool
-get_opencl_device_counter()
-{
-  static bool value = (get_profile()) ? true : detail::get_bool_value("Debug.opencl_device_counter", false);
+  static bool value = detail::get_bool_value("Debug.device_counters", false);
   return value;
 }
 
@@ -321,34 +297,6 @@ inline bool
 get_aie_trace()
 {
   static bool value = detail::get_bool_value("Debug.aie_trace", false);
-  return value;
-}
-
-inline bool
-get_aie_trace_flush()
-{
-  static bool value = detail::get_bool_value("Debug.aie_trace_flush", true);
-  return value;
-}
-
-inline std::string
-get_aie_trace_metrics()
-{
-  static std::string value = detail::get_string_value("Debug.aie_trace_metrics", "functions");
-  return value;
-}
-
-inline std::string
-get_aie_profile_core_metrics()
-{
-  static std::string value = detail::get_string_value("Debug.aie_profile_core_metrics", "heat_map");
-  return value;
-}
-
-inline std::string
-get_aie_profile_memory_metrics()
-{
-  static std::string value = detail::get_string_value("Debug.aie_profile_memory_metrics", "dma_locks");
   return value;
 }
 
@@ -363,6 +311,13 @@ inline bool
 get_vitis_ai_profile()
 {
   static bool value = detail::get_bool_value("Debug.vitis_ai_profile", false);
+  return value;
+}
+
+inline bool
+get_pl_deadlock_detection()
+{
+  static bool value = detail::get_bool_value("Debug.pl_deadlock_detection", false);
   return value;
 }
 
@@ -384,6 +339,21 @@ inline std::string
 get_logging()
 {
   static std::string value = detail::get_string_value("Runtime.runtime_log","console");
+  return value;
+}
+
+inline bool
+get_trace_logging()
+{
+  static bool value = detail::get_bool_value("Runtime.trace_logging", false)
+    || detail::get_env_value("XRT_TRACE_LOGGING_ENABLE");
+  return value;
+}
+
+inline bool
+get_usage_metrics_logging()
+{
+  static bool value = detail::get_bool_value("Runtime.usage_metrics_logging", false);
   return value;
 }
 
@@ -429,8 +399,15 @@ get_xclbin_programming()
   return get_xclbin_programing();
 }
 
+inline std::string
+get_platform_repo()
+{
+  static std::string value = detail::get_string_value("Runtime.platform_repo_path","");
+  return value;
+}
+
 /**
- * Enable xma mode. 1 = default (1 cu cmd at a time); 2 = (upto 2 cu cmds at a time);  
+ * Enable xma mode. 1 = default (1 cu cmd at a time); 2 = (upto 2 cu cmds at a time);
  *     3 = (upto 8 cu cmds at a time);  4 = (upto 64 cu cmds at a time); Max cu cmds at a time per session
  */
 inline unsigned int
@@ -496,14 +473,41 @@ get_ert_polling()
 {
   /**
    * enable_flat flag is added for embedded platforms where it load full bitstream after boot.
-   * This feature does not support interrupt mode as interrupt controller exist in pl 
-   * and is configured at boot time. 
+   * This feature does not support interrupt mode as interrupt controller exist in pl
+   * and is configured at boot time.
    * So if enable_flat is true, polling mode should be enabled by default.
    */
   static bool value = get_enable_flat() || detail::get_bool_value("Runtime.ert_polling",false);
   return value;
 }
 
+/**
+  * Poll for XGQ command completion
+  */
+inline bool
+get_xgq_polling()
+{
+  /**
+   * xgq_polling flag will force KDS to poll XGQ commands regardless of interrupt config.
+   * This is added for XRT team interrupt debugging purpose and will not be documented.
+   */
+  static bool value = get_enable_flat() || detail::get_bool_value("Runtime.xgq_polling",false);
+  return value;
+}
+
+/**
+ * Use new hw context for multi slot application 
+ */
+inline bool
+get_hw_context_flag()
+{
+  /**
+   * Temporary flag to backward compatibility for legacy context over
+   * new hw context. Remove once hw context is fully functional.
+   */
+  static bool value = detail::get_bool_value("Runtime.hw_context",true);
+  return value;
+}
 
 /**
  * Enable embedded scheduler CUDMA module
@@ -556,6 +560,13 @@ inline bool
 get_enable_pr()
 {
   static unsigned int value = detail::get_bool_value("Runtime.enable_pr",true);
+  return value;
+}
+
+inline bool
+get_enable_aied()
+{
+  static bool value = detail::get_bool_value("Runtime.enable_aied",true);
   return value;
 }
 
@@ -705,6 +716,17 @@ get_flag_kds_sw_emu()
   return value;
 }
 
+// This flag is added to support force xclbin download eventhough same xclbin is already programmed.
+// This is required for aie reset/reinit in next run. Aie is not clean after first
+// run. We need to work with aie team to figureout a solution to reset/reinit AIE in second run.
+// This flow is enabled in both edge/dc
+inline bool
+get_force_program_xclbin()
+{
+  static bool value = detail::get_bool_value("Runtime.force_program_xclbin", false);
+  return value;
+}
+
 inline bool
 get_is_enable_prep_target()
 {
@@ -726,7 +748,242 @@ get_aie_sim_options()
   return value;
 }
 
+inline bool
+get_flag_sw_emu_kernel_debug()
+{
+  static bool value = detail::get_bool_value("Emulation.kernel-dbg", false);
+  return value;
+}
 
+// This flag is added to exit device offline status check loop forcibly.
+// By default, device offline status loop runs for 320 seconds.
+inline unsigned int
+get_device_offline_timer()
+{
+  static unsigned int value = detail::get_uint_value("Runtime.dev_offline_timer", 320);
+  return value;
+}
+
+// Configurations under AIE_debug_settings section
+inline std::string
+get_aie_debug_settings_core_registers()
+{
+  static std::string value = detail::get_string_value("AIE_debug_settings.core_registers", "");
+  return value;
+}
+
+inline std::string
+get_aie_debug_settings_memory_registers()
+{
+  static std::string value = detail::get_string_value("AIE_debug_settings.memory_registers", "");
+  return value;
+}
+
+inline std::string
+get_aie_debug_settings_interface_registers()
+{
+  static std::string value = detail::get_string_value("AIE_debug_settings.interface_registers", "");
+  return value;
+}
+
+inline std::string
+get_aie_debug_settings_memory_tile_registers()
+{
+  static std::string value = detail::get_string_value("AIE_debug_settings.memory_tile_registers", "");
+  return value;
+}
+
+// Configurations under AIE_profile_settings section
+inline unsigned int
+get_aie_profile_settings_interval_us()
+{
+  static unsigned int value = detail::get_uint_value("AIE_profile_settings.interval_us", 1000) ;
+  return value ;
+}
+
+inline std::string
+get_aie_profile_settings_graph_based_aie_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_profile_settings.graph_based_aie_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_profile_settings_graph_based_aie_memory_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_profile_settings.graph_based_aie_memory_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_profile_settings_graph_based_memory_tile_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_profile_settings.graph_based_memory_tile_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_profile_settings_graph_based_interface_tile_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_profile_settings.graph_based_interface_tile_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_profile_settings_tile_based_aie_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_profile_settings.tile_based_aie_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_profile_settings_tile_based_aie_memory_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_profile_settings.tile_based_aie_memory_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_profile_settings_tile_based_memory_tile_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_profile_settings.tile_based_memory_tile_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_profile_settings_tile_based_interface_tile_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_profile_settings.tile_based_interface_tile_metrics", "");
+  return value;
+}
+
+// AIE_trace_settings
+
+inline std::string
+get_aie_trace_settings_start_type()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.start_type", "time");
+  return value;
+}
+
+inline std::string
+get_aie_trace_settings_end_type()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.end_type", "disable_event");
+  return value;
+}
+
+inline std::string
+get_aie_trace_settings_start_time()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.start_time", "0");
+  return value;
+}
+
+inline unsigned int
+get_aie_trace_settings_start_iteration()
+{
+  static unsigned int value = detail::get_uint_value("AIE_trace_settings.start_iteration", 1);
+  return value;
+}
+
+inline std::string
+get_aie_trace_settings_graph_based_aie_tile_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.graph_based_aie_tile_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_trace_settings_tile_based_aie_tile_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.tile_based_aie_tile_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_trace_settings_graph_based_memory_tile_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.graph_based_memory_tile_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_trace_settings_tile_based_memory_tile_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.tile_based_memory_tile_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_trace_settings_graph_based_interface_tile_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.graph_based_interface_tile_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_trace_settings_tile_based_interface_tile_metrics()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.tile_based_interface_tile_metrics", "");
+  return value;
+}
+
+inline std::string
+get_aie_trace_settings_buffer_size()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.buffer_size", "8M");
+  return value;
+}
+
+inline std::string
+get_aie_trace_settings_counter_scheme()
+{
+  static std::string value = detail::get_string_value("AIE_trace_settings.counter_scheme", "es2");
+  return value;
+}
+
+inline bool
+get_aie_trace_settings_periodic_offload()
+{
+  static bool value = detail::get_bool_value("AIE_trace_settings.periodic_offload", true);
+  return value;
+}
+
+inline bool
+get_aie_trace_settings_reuse_buffer()
+{
+  static bool value = detail::get_bool_value("AIE_trace_settings.reuse_buffer", false);
+  return value;
+}
+
+inline unsigned int
+get_aie_trace_settings_buffer_offload_interval_us()
+{
+  static unsigned int value = detail::get_uint_value("AIE_trace_settings.buffer_offload_interval_us", 100);
+  return value;
+}
+
+inline unsigned int
+get_aie_trace_settings_file_dump_interval_s()
+{
+  static unsigned int value = detail::get_uint_value("AIE_trace_settings.file_dump_interval_s", 5);
+  return value;
+}
+
+inline unsigned int
+get_aie_trace_settings_poll_timers_interval_us()
+{
+  static unsigned int value = detail::get_uint_value("AIE_trace_settings.poll_timers_interval_us", 100);
+  return value;
+}
+
+inline bool
+get_aie_trace_settings_enable_system_timeline()
+{
+  static bool value = detail::get_bool_value("AIE_trace_settings.enable_system_timeline", false);
+  return value;
+}
 
 }} // config,xrt_core
 

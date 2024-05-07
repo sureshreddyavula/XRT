@@ -79,4 +79,9 @@
 #define xclGraphTimedEnd_n 48
 #define xclGraphResume_n 49
 
+#define xclCopyBOFromFd_n 50
+#define xclRegWrite_n 51
+#define xclRegRead_n 52
+#define swemuDriverVersion_n 53
+
 #endif

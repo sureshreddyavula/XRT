@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2020 Xilinx, Inc
+ * Copyright (C) 2022-2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -17,93 +17,55 @@
 #ifndef AIE_TRACE_PLUGIN_H
 #define AIE_TRACE_PLUGIN_H
 
-#include "xdp/profile/plugin/vp_base/vp_base_plugin.h"
-#include "core/edge/common/aie_parser.h"
-#include "xaiefal/xaiefal.hpp"
+#include <cstdint>
 
-extern "C" {
-#include <xaiengine.h>
-}
+#include "aie_trace_metadata.h"
+#include "xdp/profile/database/events/creator/aie_trace_data_logger.h"
+#include "xdp/profile/plugin/aie_trace/aie_trace_impl.h"
+#include "xdp/profile/plugin/vp_base/vp_base_plugin.h"
+
+#ifdef XDP_CLIENT_BUILD
+#include "xdp/profile/device/aie_trace/client/aie_trace_offload_client.h"
+#else
+#include "xdp/profile/device/aie_trace/aie_trace_offload.h"
+#endif
 
 namespace xdp {
 
-  class DeviceIntf;
-  class AIETraceOffload;
-  class AIETraceLogger;
+class AieTracePluginUnified : public XDPPlugin {
+public:
+  AieTracePluginUnified();
+  virtual ~AieTracePluginUnified();
+  void updateAIEDevice(void *handle);
+  void flushAIEDevice(void *handle);
+  void finishFlushAIEDevice(void *handle);
+  virtual void writeAll(bool openNewFiles) override;
+  void endPollforDevice(void *handle);
+  static bool alive();
 
-  class AieTracePlugin : public XDPPlugin
-  {
-    public:
-      XDP_EXPORT
-      AieTracePlugin();
+private:
+  uint64_t getDeviceIDFromHandle(void *handle);
+  void pollAIETimers(uint64_t index, void *handle);
+  void flushOffloader(const std::unique_ptr<AIETraceOffload> &offloader,
+                      bool warn);
+  void endPoll();
 
-      XDP_EXPORT
-      ~AieTracePlugin();
-
-      XDP_EXPORT
-      void updateAIEDevice(void* handle);
-
-      XDP_EXPORT
-      void flushAIEDevice(void* handle);
-
-      XDP_EXPORT
-      void finishFlushAIEDevice(void* handle);
-
-      XDP_EXPORT
-      virtual void writeAll(bool openNewFiles);
-
-    private:
-      inline uint32_t bcIdToEvent(int bcId);
-      void releaseCurrentTileCounters(int numCoreCounters, int numMemoryCounters);
-      bool setMetrics(uint64_t deviceId, void* handle);
-      void setFlushMetrics(uint64_t deviceId, void* handle);
-
-    private:
-      // Runtime or compile-time specified trace metrics?
-      bool runtimeMetrics = true;
-
-      // Trace Runtime Status
-      AieRC mConfigStatus = XAIE_OK;
-
-      std::vector<void*> deviceHandles;
-      std::map<uint64_t, void*> deviceIdToHandle;
-
-      typedef std::tuple<AIETraceOffload*, 
-                         AIETraceLogger*,
-                         DeviceIntf*> AIEData;
-
-      std::map<uint32_t, AIEData>  aieOffloaders;
-
-      // Types
-      typedef XAie_Events            EventType;
-      typedef std::vector<EventType> EventVector;
-      typedef std::vector<uint32_t>  ValueVector;
-
-      // Trace metrics
-      std::string metricSet;    
-      std::set<std::string> metricSets;
-      std::map<std::string, EventVector> coreEventSets;
-      std::map<std::string, EventVector> memoryEventSets;
-
-      // AIE profile counters
-      std::vector<xrt_core::edge::aie::tile_type> coreCounterTiles;
-      std::vector<std::shared_ptr<xaiefal::XAiePerfCounter>> coreCounters;
-      std::vector<std::shared_ptr<xaiefal::XAiePerfCounter>> memoryCounters;
-
-      // Counter metrics (same for all sets)
-      EventType   coreTraceStartEvent;
-      EventType   coreTraceEndEvent;
-      EventVector coreCounterStartEvents;
-      EventVector coreCounterEndEvents;
-      EventVector coreCounterResetEvents;
-      ValueVector coreCounterEventValues;
-
-      EventVector memoryCounterStartEvents;
-      EventVector memoryCounterEndEvents;
-      EventVector memoryCounterResetEvents;
-      ValueVector memoryCounterEventValues;
+private:
+  static bool live;
+  struct AIEData {
+    uint64_t deviceID;
+    bool valid;
+    DeviceIntf *devIntf;
+    std::unique_ptr<AIETraceOffload> offloader;
+    std::unique_ptr<AIETraceLogger> logger;
+    std::unique_ptr<AieTraceImpl> implementation;
+    std::shared_ptr<AieTraceMetadata> metadata;
+    std::atomic<bool> threadCtrlBool;
+    std::thread thread;
   };
-    
-}   
-    
+  std::map<void *, AIEData> handleToAIEData;
+};
+
+} // namespace xdp
+
 #endif

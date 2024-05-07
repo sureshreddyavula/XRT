@@ -1,23 +1,12 @@
-/**
- * Copyright (C) 2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2020-2022 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
 #ifndef xrt_core_command_h_
 #define xrt_core_command_h_
 
 #include "core/common/device.h"
+#include "core/common/shim/hwctx_handle.h"
+#include "core/common/shim/buffer_handle.h"
 #include "xrt.h"
 #include "ert.h"
 
@@ -68,14 +57,23 @@ public:
   /**
    * get_exec_bo() - get BO handle of command buffer
    */
-  virtual xclBufferHandle
+  virtual buffer_handle*
   get_exec_bo() const = 0;
 
   /**
    * notify() - notify of state change
    */
   virtual void
-  notify(ert_cmd_state) = 0;
+  notify(ert_cmd_state) const = 0;
+
+  // get_hwctx_handle() - get submission hw context of command buffer
+  //
+  // The submission hw context is the hardware context used for
+  // command execution.  This context is used in multi-xclbin / slot
+  // support when submitting a command with execbuf when the core
+  // implementation does not support hardware queue.
+  virtual hwctx_handle*
+  get_hwctx_handle() const = 0;
 
 private:
   unsigned long m_uid;

@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2018-2021 Xilinx, Inc
+ * Copyright (C) 2020-2022 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -17,25 +18,27 @@
 // ------ I N C L U D E   F I L E S -------------------------------------------
 // Local - Include Files
 #include "XclBinUtilMain.h"
-#include "XclBinUtilities.h"
-#include "XclBinClass.h"
-#include "ParameterSectionData.h"
+
 #include "FormattedOutput.h"
-#include "XclBinSignature.h"
+#include "ParameterSectionData.h"
 #include "xclbin.h"
+#include "XclBinClass.h"
+#include "XclBinSignature.h"
+#include "XclBinUtilities.h"
 
 // 3rd Party Library - Include Files
-#include <boost/program_options.hpp>
-#include <boost/filesystem.hpp>
 #include <boost/algorithm/string.hpp>
+#include <boost/program_options.hpp>
 #include <stdexcept>
 
 // System - Include Files
+#include <filesystem>
 #include <iostream>
-#include <string>
 #include <set>
+#include <string>
 
 namespace XUtil = XclBinUtilities;
+namespace fs = std::filesystem;
 
 namespace {
 enum ReturnCodes {
@@ -52,25 +55,25 @@ void drcCheckFiles(const std::vector<std::string> & _inputFiles,
 {
    std::set<std::string> normalizedInputFiles;
 
-   for( auto file : _inputFiles) {
-     if ( !boost::filesystem::exists(file)) {
+   for (const auto& file : _inputFiles) {
+     if (!fs::exists(file)) {
        std::string errMsg = "ERROR: The following input file does not exist: " + file;
        throw std::runtime_error(errMsg);
      }
-     boost::filesystem::path filePath(file);
+     fs::path filePath(file);
      normalizedInputFiles.insert(canonical(filePath).string());
    }
 
    std::vector<std::string> normalizedOutputFiles;
-   for ( auto file : _outputFiles) {
-     if ( boost::filesystem::exists(file)) {
-       if (_bForce == false) {
-         std::string errMsg = "ERROR: The following output file already exists on disk (use the force option to overwrite): " + file;
-         throw std::runtime_error(errMsg);
-       } else {
-         boost::filesystem::path filePath(file);
-         normalizedOutputFiles.push_back(canonical(filePath).string());
-       }
+   for ( const auto& file : _outputFiles) {
+     if ( !fs::exists(file))
+       continue;
+
+     if (_bForce == false) {
+       std::string errMsg = "ERROR: The following output file already exists on disk (use the force option to overwrite): " + file;
+       throw std::runtime_error(errMsg);
+     } else {
+       normalizedOutputFiles.push_back(fs::canonical(file).string());
      }
    }
 
@@ -126,101 +129,94 @@ void insertTargetMode(const std::string & _sTarget, std::vector<std::string> & _
   _keyValuePairs.push_back(keyValue);
 }
 
-
 // Program entry point
 int main_(int argc, const char** argv) {
-  bool bVerbose = false;
-  bool bQuiet = false;
-  bool bTrace = false;
-  bool bMigrateForward = false;
+  bool bForce = false;
+  bool bGetSignature = false;
   bool bListNames = false;
   bool bListSections = false;
-  std::string sInfoFile;
-  bool bSkipUUIDInsertion = false;
-  bool bSkipBankGrouping = false;
-  bool bVersion = false;
-  bool bForce = false;
-
+  bool bMigrateForward = false;
+  bool bQuiet = false;
   bool bRemoveSignature = false;
-  std::string sSignature;
-  bool bGetSignature = false;
-  bool bSignatureDebug = false;
-  std::string sSignatureOutputFile;
-  std::string sDigestAlgorithm = "sha512";
-
-  std::string sPrivateKey;
-  std::string sCertificate;
   bool bValidateSignature = false;
-
-  std::string sTarget;
-
+  bool bVerbose = false;
+  bool bVersion = false;
+  std::string sCertificate;
+  std::string sDigestAlgorithm = "sha512";
+  std::string sInfoFile;
   std::string sInputFile;
   std::string sOutputFile;
-
-  std::vector<std::string> sectionsToReplace;
-  std::vector<std::string> sectionsToAdd;
-  std::vector<std::string> sectionsToAddReplace;
-  std::vector<std::string> sectionsToAddMerge;
-  std::vector<std::string> sectionsToRemove;
-  std::vector<std::string> sectionsToDump;
-  std::vector<std::string> sectionsToAppend;
-
-  std::vector<std::string> keyValuePairs;
+  std::string sPrivateKey;
+  std::string sSignature;
+  std::string sTarget;
+  std::vector<std::string> addPsKernels;
   std::vector<std::string> keysToRemove;
+  std::vector<std::string> keyValuePairs;
+  std::vector<std::string> sectionsToAdd;
+  std::vector<std::string> sectionsToAddMerge;
+  std::vector<std::string> sectionsToAddReplace;
+  std::vector<std::string> sectionsToDump;
+  std::vector<std::string> sectionsToRemove;
+  std::vector<std::string> sectionsToReplace;
 
 
   namespace po = boost::program_options;
 
   po::options_description desc("Options");
   desc.add_options()
-      ("help,h", "Print help messages")
-      ("input,i", boost::program_options::value<std::string>(&sInputFile), "Input file name. Reads xclbin into memory.")
-      ("output,o", boost::program_options::value<std::string>(&sOutputFile), "Output file name. Writes in memory xclbin image to a file.")
-
-      ("target", boost::program_options::value<decltype(sTarget)>(&sTarget), "Target flow for this image.  Valid values: hw, hw_emu, and sw_emu.")
-
-      ("private-key", boost::program_options::value<std::string>(&sPrivateKey), "Private key used in signing the xclbin image.")
-      ("certificate", boost::program_options::value<std::string>(&sCertificate), "Certificate used in signing and validating the xclbin image.")
-      ("digest-algorithm", boost::program_options::value<std::string>(&sDigestAlgorithm), "Digest algorithm. Default: sha512")
-      ("validate-signature", boost::program_options::bool_switch(&bValidateSignature), "Validates the signature for the given xclbin archive.")
-
-      ("verbose,v", boost::program_options::bool_switch(&bVerbose), "Display verbose/debug information.")
-      ("quiet,q", boost::program_options::bool_switch(&bQuiet),     "Minimize reporting information.")
-
-      ("migrate-forward", boost::program_options::bool_switch(&bMigrateForward), "Migrate the xclbin archive forward to the new binary format.")
-
-      ("add-section", boost::program_options::value<std::vector<std::string> >(&sectionsToAdd)->multitoken(), "Section name to add.  Format: <section>:<format>:<file>")
-      ("add-replace-section", boost::program_options::value<std::vector<std::string> >(&sectionsToAddReplace)->multitoken(), "Section name to add or replace.  Format: <section>:<format>:<file>")
-      ("add-merge-section", boost::program_options::value<std::vector<std::string> >(&sectionsToAddMerge)->multitoken(), "Section name to add or merge.  Format: <section>:<format>:<file>")
-      ("remove-section", boost::program_options::value<std::vector<std::string> >(&sectionsToRemove)->multitoken(), "Section name to remove.")
-      ("dump-section", boost::program_options::value<std::vector<std::string> >(&sectionsToDump)->multitoken(), "Section to dump. Format: <section>:<format>:<file>")
-      ("replace-section", boost::program_options::value<std::vector<std::string> >(&sectionsToReplace)->multitoken(), "Section to replace. ")
-
-      ("key-value", boost::program_options::value<std::vector<std::string> >(&keyValuePairs)->multitoken(), "Key value pairs.  Format: [USER|SYS]:<key>:<value>")
-      ("remove-key", boost::program_options::value<std::vector<std::string> >(&keysToRemove)->multitoken(), "Removes the given user key from the xclbin archive." )
-
-      ("add-signature", boost::program_options::value<std::string>(&sSignature), "Adds a user defined signature to the given xclbin image.")
-      ("remove-signature", boost::program_options::bool_switch(&bRemoveSignature), "Removes the signature from the xclbin image.")
-      ("get-signature", boost::program_options::bool_switch(&bGetSignature), "Returns the user defined signature (if set) of the xclbin image.")
-
-      ("info", boost::program_options::value<std::string>(&sInfoFile)->default_value("")->implicit_value("<console>"), "Report accelerator binary content.  Including: generation and packaging data, kernel signatures, connectivity, clocks, sections, etc.  Note: Optionally an output file can be specified.  If none is specified, then the output will go to the console.")
-      ("list-sections", boost::program_options::bool_switch(&bListSections), "List all possible section names (Stand Alone Option)")
-      ("version", boost::program_options::bool_switch(&bVersion), "Version of this executable.")
+      ("add-merge-section", boost::program_options::value<decltype(sectionsToAddMerge)>(&sectionsToAddMerge)->multitoken(), "Section name to add or merge.  Format: <section>:<format>:<file>")
+      ("add-pskernel", boost::program_options::value<decltype(addPsKernels)>(&addPsKernels)->multitoken(), "Helper option to add PS kernels.  Format: [<mem_banks>]:[<symbol_name>]:[<instances>]:<path_to_shared_library>")
+      ("add-replace-section", boost::program_options::value<decltype(sectionsToAddReplace)>(&sectionsToAddReplace)->multitoken(), "Section name to add or replace.  Format: <section>:<format>:<file>")
+      ("add-section", boost::program_options::value<decltype(sectionsToAdd)>(&sectionsToAdd)->multitoken(), "Section name to add.  Format: <section>:<format>:<file>")
+      ("add-signature", boost::program_options::value<decltype(sSignature)>(&sSignature), "Adds a user defined signature to the given xclbin image.")
+      ("certificate", boost::program_options::value<decltype(sCertificate)>(&sCertificate), "Certificate used in signing and validating the xclbin image.")
+      ("digest-algorithm", boost::program_options::value<decltype(sDigestAlgorithm)>(&sDigestAlgorithm), "Digest algorithm. Default: sha512")
+      ("dump-section", boost::program_options::value<decltype(sectionsToDump)>(&sectionsToDump)->multitoken(), "Section to dump. Format: <section>:<format>:<file>")
       ("force", boost::program_options::bool_switch(&bForce), "Forces a file overwrite.")
+      ("get-signature", boost::program_options::bool_switch(&bGetSignature), "Returns the user defined signature (if set) of the xclbin image.")
+      ("help,h", "Print help messages")
+      ("info", boost::program_options::value<decltype(sInfoFile)>(&sInfoFile)->default_value("")->implicit_value("<console>"), "Report accelerator binary content.  Including: generation and packaging data, kernel signatures, connectivity, clocks, sections, etc.  Note: Optionally an output file can be specified.  If none is specified, then the output will go to the console.")
+      ("input,i", boost::program_options::value<std::string>(&sInputFile), "Input file name. Reads xclbin into memory.")
+      ("key-value", boost::program_options::value<decltype(keyValuePairs)>(&keyValuePairs)->multitoken(), "Key value pairs.  Format: [USER|SYS]:<key>:<value>")
+      ("list-sections", boost::program_options::bool_switch(&bListSections), "List all possible section names (Stand Alone Option)")
+      ("migrate-forward", boost::program_options::bool_switch(&bMigrateForward), "Migrate the xclbin archive forward to the new binary format.")
+      ("output,o", boost::program_options::value<std::string>(&sOutputFile), "Output file name. Writes in memory xclbin image to a file.")
+      ("private-key", boost::program_options::value<decltype(sPrivateKey)>(&sPrivateKey), "Private key used in signing the xclbin image.")
+      ("quiet,q", boost::program_options::bool_switch(&bQuiet),     "Minimize reporting information.")
+      ("remove-key", boost::program_options::value<decltype(keysToRemove)>(&keysToRemove)->multitoken(), "Removes the given user key from the xclbin archive." )
+      ("remove-section", boost::program_options::value<decltype(sectionsToRemove)>(&sectionsToRemove)->multitoken(), "Section name to remove.")
+      ("remove-signature", boost::program_options::bool_switch(&bRemoveSignature), "Removes the signature from the xclbin image.")
+      ("replace-section", boost::program_options::value<decltype(sectionsToReplace)>(&sectionsToReplace)->multitoken(), "Section to replace. ")
+      ("target", boost::program_options::value<decltype(sTarget)>(&sTarget), "Target flow for this image.  Valid values: hw, hw_emu, and sw_emu.")
+      ("validate-signature", boost::program_options::bool_switch(&bValidateSignature), "Validates the signature for the given xclbin archive.")
+      ("verbose,v", boost::program_options::bool_switch(&bVerbose), "Display verbose/debug information.")
+      ("version", boost::program_options::bool_switch(&bVersion), "Version of this executable.")
  ;
 
   // hidden options
-  std::vector<std::string> badOptions;
+  bool bResetBankGrouping = false;
+  bool bSignatureDebug = false;
+  bool bSkipBankGrouping = false;
+  bool bSkipUUIDInsertion = false;
+  bool bTrace = false;
+  bool bTransformPdi = false;
   boost::program_options::options_description hidden("Hidden options");
+  std::string sSignatureOutputFile;
+  std::vector<std::string> addKernels;
+  std::vector<std::string> badOptions;
+  std::vector<std::string> sectionsToAppend;
 
   hidden.add_options()
-    ("trace,t", boost::program_options::bool_switch(&bTrace), "Trace")
-    ("skip-uuid-insertion", boost::program_options::bool_switch(&bSkipUUIDInsertion), "Do not update the xclbin's UUID")
-    ("append-section", boost::program_options::value<std::vector<std::string> >(&sectionsToAppend)->multitoken(), "Section to append to.")
+    ("add-kernel", boost::program_options::value<decltype(addKernels)>(&addKernels)->multitoken(), "Helper option to add fixed kernels.  Format: <path_to_json>")
+    ("append-section", boost::program_options::value<decltype(sectionsToAppend)>(&sectionsToAppend)->multitoken(), "Section to append to.")
+    ("BAD-DATA", boost::program_options::value<decltype(badOptions)>(&badOptions)->multitoken(), "Dummy Data." )
+    ("dump-signature", boost::program_options::value<decltype(sSignatureOutputFile)>(&sSignatureOutputFile), "Dumps a sign xclbin image's signature.")
+    ("reset-bank-grouping", boost::program_options::bool_switch(&bResetBankGrouping), "Resets the memory bank grouping section(s).")
     ("signature-debug", boost::program_options::bool_switch(&bSignatureDebug), "Dump section debug data.")
-    ("dump-signature", boost::program_options::value<std::string>(&sSignatureOutputFile), "Dumps a sign xclbin image's signature.")
     ("skip-bank-grouping", boost::program_options::bool_switch(&bSkipBankGrouping), "Disables creating the memory bank grouping section(s).")
-    ("BAD-DATA", boost::program_options::value<std::vector<std::string> >(&badOptions)->multitoken(), "Dummy Data." )
+    ("skip-uuid-insertion", boost::program_options::bool_switch(&bSkipUUIDInsertion), "Do not update the xclbin's UUID")
+    ("trace,t", boost::program_options::bool_switch(&bTrace), "Trace")
+    ("transform-pdi", boost::program_options::bool_switch(&bTransformPdi), "Transform the PDIs in AIE_PARTITION, this option only valid on Linux")
   ;
 
   boost::program_options::options_description all("Allowed options");
@@ -235,36 +231,36 @@ int main_(int argc, const char** argv) {
 
     if ((vm.count("help")) ||
         (argc == 1)) {
-      std::cout << "This utility operates on a xclbin produced by v++." << std::endl << std::endl;
-      std::cout << "For example:" << std::endl;
-      std::cout << "  1) Reporting xclbin information  : xclbinutil --info --input binary_container_1.xclbin" << std::endl;
-      std::cout << "  2) Extracting the bitstream image: xclbinutil --dump-section BITSTREAM:RAW:bitstream.bit --input binary_container_1.xclbin" << std::endl;
-      std::cout << "  3) Extracting the build metadata : xclbinutil --dump-section BUILD_METADATA:HTML:buildMetadata.json --input binary_container_1.xclbin" << std::endl;
-      std::cout << "  4) Removing a section            : xclbinutil --remove-section BITSTREAM --input binary_container_1.xclbin --output binary_container_modified.xclbin" << std::endl;
-      std::cout << "  5) Signing xclbin                : xclbinutil --private-key key.priv --certificate cert.pem --input binary_container_1.xclbin --output signed.xclbin" << std::endl;
+      std::cout << "This utility operates on a xclbin produced by v++.\n\n";
+      std::cout << "For example:\n";
+      std::cout << "  1) Reporting xclbin information  : xclbinutil --info --input binary_container_1.xclbin\n";
+      std::cout << "  2) Extracting the bitstream image: xclbinutil --dump-section BITSTREAM:RAW:bitstream.bit --input binary_container_1.xclbin\n";
+      std::cout << "  3) Extracting the build metadata : xclbinutil --dump-section BUILD_METADATA:HTML:buildMetadata.json --input binary_container_1.xclbin\n";
+      std::cout << "  4) Removing a section            : xclbinutil --remove-section BITSTREAM --input binary_container_1.xclbin --output binary_container_modified.xclbin\n";
+      std::cout << "  5) Signing xclbin                : xclbinutil --private-key key.priv --certificate cert.pem --input binary_container_1.xclbin --output signed.xclbin\n";
 
       std::cout << std::endl
-                << "Command Line Options" << std::endl
+                << "Command Line Options\n"
                 << desc
                 << std::endl;
 
-      std::cout << "Addition Syntax Information" << std::endl;
-      std::cout << "---------------------------" << std::endl;
-      std::cout << "Syntax: <section>:<format>:<file>" << std::endl;
-      std::cout << "    <section> - The section to add or dump (e.g., BUILD_METADATA, BITSTREAM, etc.)"  << std::endl;
-      std::cout << "                Note: If a JSON format is being used, this value can be empty.  If so, then" << std::endl;
-      std::cout << "                      the JSON metadata will determine the section it is associated with." << std::endl;
-      std::cout << "                      In addition, only sections that are found in the JSON file will be reported." << std::endl;
-      std::cout << std::endl;
-      std::cout << "    <format>  - The format to be used.  Currently, there are three formats available: " << std::endl;
-      std::cout << "                RAW: Binary Image; JSON: JSON file format; and HTML: Browser visible." << std::endl;
-      std::cout << std::endl;
-      std::cout << "                Note: Only selected operations and sections supports these file types."  << std::endl;
-      std::cout << std::endl;
-      std::cout << "    <file>    - The name of the input/output file to use." << std::endl;
-      std::cout << std::endl;
-      std::cout << "  Used By: --add_section and --dump_section" << std::endl;
-      std::cout << "  Example: xclbinutil --add-section BITSTREAM:RAW:mybitstream.bit"  << std::endl;
+      std::cout << "Addition Syntax Information\n";
+      std::cout << "---------------------------\n";
+      std::cout << "Syntax: <section>:<format>:<file>\n";
+      std::cout << "    <section> - The section to add or dump (e.g., BUILD_METADATA, BITSTREAM, etc.)\n";
+      std::cout << "                Note: If a JSON format is being used, this value can be empty.  If so, then\n";
+      std::cout << "                      the JSON metadata will determine the section it is associated with.\n";
+      std::cout << "                      In addition, only sections that are found in the JSON file will be reported.\n";
+      std::cout << "\n";
+      std::cout << "    <format>  - The format to be used.  Currently, there are three formats available:\n";
+      std::cout << "                RAW: Binary Image; JSON: JSON file format; and HTML: Browser visible.\n";
+      std::cout << "\n";
+      std::cout << "                Note: Only selected operations and sections supports these file types.\n";
+      std::cout << "\n";
+      std::cout << "    <file>    - The name of the input/output file to use.\n";
+      std::cout << "\n";
+      std::cout << "  Used By: --add_section and --dump_section\n";
+      std::cout << "  Example: xclbinutil --add-section BITSTREAM:RAW:mybitstream.bit\n";
       std::cout << std::endl;
 
 
@@ -293,16 +289,14 @@ int main_(int argc, const char** argv) {
     return RC_SUCCESS;
   }
 
-  if (!bQuiet) {
+  if (!bQuiet) 
     FormattedOutput::reportVersion(true);
-  }
 
   // Actions not requiring --input
   if (bListSections || bListNames) {
-    if (argc != 2) {
-      std::string errMsg = "ERROR: The '--list-sections' argument is a stand alone option.  No other options can be specified with it.";
-      throw std::runtime_error(errMsg);
-    }
+    if (argc != 2) 
+      throw std::runtime_error("ERROR: The '--list-sections' argument is a stand alone option.  No other options can be specified with it.");
+
     XUtil::printKinds();
     return RC_SUCCESS;
   }
@@ -311,43 +305,38 @@ int main_(int argc, const char** argv) {
   // -- Map the target to the mode
   if (!sTarget.empty()) {
     // Make sure that SYS:mode isn't being used
-    if (!XclBin::findKeyAndGetValue("SYS","mode", keyValuePairs).empty()) {
-      std::string errMsg = "ERROR: The option '--target' and the key 'SYS:mode' are mutually exclusive.";
-      throw std::runtime_error(errMsg);
-    }
+    if (!XclBin::findKeyAndGetValue("SYS","mode", keyValuePairs).empty()) 
+      throw std::runtime_error("ERROR: The option '--target' and the key 'SYS:mode' are mutually exclusive.");
 
     insertTargetMode(sTarget, keyValuePairs);
   } else {
     // Validate that the SYS:dfx_enable is not set
-    if (!XclBin::findKeyAndGetValue("SYS","dfx_enable", keyValuePairs).empty()) {
-      std::string errMsg = "ERROR: The option '--target' needs to be defined when using 'SYS:dfx_enable'.";
-      throw std::runtime_error(errMsg);
-    }
+    if (!XclBin::findKeyAndGetValue("SYS","dfx_enable", keyValuePairs).empty()) 
+      throw std::runtime_error("ERROR: The option '--target' needs to be defined when using 'SYS:dfx_enable'.");
   }
+
+  // If the user is specifying the xclbin's UUID, honor it
+  if (!XclBin::findKeyAndGetValue("SYS","XclbinUUID", keyValuePairs).empty())
+    bSkipUUIDInsertion = true;
 
   // Signing DRCs
   if (bValidateSignature == true) {
-    if (sCertificate.empty()) {
+    if (sCertificate.empty()) 
       throw std::runtime_error("ERROR: Validate signature specified with no certificate defined.");
-    }
 
-    if (sInputFile.empty()) {
+    if (sInputFile.empty()) 
       throw std::runtime_error("ERROR: Validate signature specified with no input file defined.");
-    }
   }
 
-  if (!sPrivateKey.empty() && sOutputFile.empty()) {
+  if (!sPrivateKey.empty() && sOutputFile.empty()) 
     throw std::runtime_error("ERROR: Private key specified, but no output file defined.");
-  }
 
-  if (sCertificate.empty() && !sOutputFile.empty() && !sPrivateKey.empty()) {
+  if (sCertificate.empty() && !sOutputFile.empty() && !sPrivateKey.empty()) 
     throw std::runtime_error("ERROR: Private key specified, but no certificate defined.");
-  }
 
   // Report option conflicts
-  if ((!sSignature.empty() && !sPrivateKey.empty())) {
+  if ((!sSignature.empty() && !sPrivateKey.empty())) 
     throw std::runtime_error("ERROR: The options '-add-signature' (a private signature) and '-private-key' (a PKCS signature) are mutually exclusive.");
-  }
 
   // Actions requiring --input
 
@@ -391,17 +380,15 @@ int main_(int argc, const char** argv) {
 
   std::vector< std::string> outputFiles;
   {
-    if (!sOutputFile.empty()) {
+    if (!sOutputFile.empty()) 
       outputFiles.push_back(sOutputFile);
-    }
 
     if (!sInfoFile.empty()) {
-      if (sInfoFile != "<console>") {
+      if (sInfoFile != "<console>") 
         outputFiles.push_back(sInfoFile);
-      }
     }
 
-    for (auto section : sectionsToDump ) {
+    for (const auto &section : sectionsToDump ) {
       ParameterSectionData psd(section);
       outputFiles.push_back(psd.getFile());
     }
@@ -418,51 +405,45 @@ int main_(int argc, const char** argv) {
 
   // Dump the signature
   if (!sSignatureOutputFile.empty()) {
-    if (sInputFile.empty()) {
+    if (sInputFile.empty()) 
       throw std::runtime_error("ERROR: Missing input file.");
-    }
+
     dumpSignatureFile(sInputFile, sSignatureOutputFile);
     return RC_SUCCESS;
   }
 
   // Validate signature for the input file
-  if (bValidateSignature == true) {
+  if (bValidateSignature == true) 
     verifyXclBinImage(sInputFile, sCertificate, bSignatureDebug);
-  }
 
   if (!sSignature.empty()) {
-    if (sInputFile.empty()) {
-      std::string errMsg = "ERROR: Cannot add signature.  Missing input file.";
-      throw std::runtime_error(errMsg);
-    }
-    if(sOutputFile.empty()) {
-      std::string errMsg = "ERROR: Cannot add signature.  Missing output file.";
-      throw std::runtime_error(errMsg);
-    }
+    if (sInputFile.empty()) 
+      throw std::runtime_error("ERROR: Cannot add signature.  Missing input file.");
+    
+    if(sOutputFile.empty()) 
+      throw std::runtime_error("ERROR: Cannot add signature.  Missing output file.");
+    
     XUtil::addSignature(sInputFile, sOutputFile, sSignature, "");
     XUtil::QUIET("Exiting");
     return RC_SUCCESS;
   }
 
   if (bGetSignature) {
-    if(sInputFile.empty()) {
-      std::string errMsg = "ERROR: Cannot read signature.  Missing input file.";
-      throw std::runtime_error(errMsg);
-    }
+    if(sInputFile.empty()) 
+      throw std::runtime_error("ERROR: Cannot read signature.  Missing input file.");
+
     XUtil::reportSignature(sInputFile);
     XUtil::QUIET("Exiting");
     return RC_SUCCESS;
   }
 
   if (bRemoveSignature) {
-    if(sInputFile.empty()) {
-      std::string errMsg = "ERROR: Cannot remove signature.  Missing input file.";
-      throw std::runtime_error(errMsg);
-    }
-    if(sOutputFile.empty()) {
-      std::string errMsg = "ERROR: Cannot remove signature.  Missing output file.";
-      throw std::runtime_error(errMsg);
-    }
+    if(sInputFile.empty()) 
+      throw std::runtime_error("ERROR: Cannot remove signature.  Missing input file.");
+    
+    if(sOutputFile.empty()) 
+      throw std::runtime_error("ERROR: Cannot remove signature.  Missing output file.");
+    
     XUtil::removeSignature(sInputFile, sOutputFile);
     XUtil::QUIET("Exiting");
     return RC_SUCCESS;
@@ -477,35 +458,27 @@ int main_(int argc, const char** argv) {
     XUtil::QUIET("Creating a default 'in-memory' xclbin image.");
   }
 
-  // -- DRC checks --
-  // Determine if we should auto create the GROUP_TOPOLOGY or GROUP_CONNECTIVITY sections
-  if ((xclBin.findSection(ASK_GROUP_TOPOLOGY) != nullptr) ||
-      (xclBin.findSection(ASK_GROUP_CONNECTIVITY) != nullptr)) {
-    // GROUP Sections already exist don't modify them.
-    bSkipBankGrouping = true;
-  }
-
   // -- Remove Sections --
-  for (auto section : sectionsToRemove) 
+  for (const auto &section : sectionsToRemove) 
     xclBin.removeSection(section);
 
   // -- Add or Replace Sections --
-  for (auto section : sectionsToAddReplace) {
+  for (const auto &section : sectionsToAddReplace) {
     ParameterSectionData psd(section);
     xclBin.addReplaceSection( psd );
   }
 
   // -- Replace Sections --
-  for (auto section : sectionsToReplace) {
+  for (const auto &section : sectionsToReplace) {
     ParameterSectionData psd(section);
     xclBin.replaceSection( psd );
   }
 
   // -- Add Sections --
-  for (auto section : sectionsToAdd) {
+  for (const auto &section : sectionsToAdd) {
     ParameterSectionData psd(section);
     if (psd.getSectionName().empty() &&
-        psd.getFormatType() == Section::FT_JSON) {
+        psd.getFormatType() == Section::FormatType::json) {
       xclBin.addSections(psd);
     } else {
       xclBin.addSection(psd);
@@ -513,16 +486,16 @@ int main_(int argc, const char** argv) {
   }
 
   // -- Add or Merge Sections --
-  for (auto section : sectionsToAddMerge) {
+  for (const auto &section : sectionsToAddMerge) {
     ParameterSectionData psd(section);
     xclBin.addMergeSection( psd );
   }
 
   // -- Append to Sections --
-  for (auto section : sectionsToAppend) {
+  for (const auto &section : sectionsToAppend) {
     ParameterSectionData psd(section);
     if (psd.getSectionName().empty() &&
-        psd.getFormatType() == Section::FT_JSON) {
+        psd.getFormatType() == Section::FormatType::json) {
       xclBin.appendSections(psd);
     } else {
       std::string errMsg = "ERROR: Appending of sections only supported via wildcards and the JSON format (e.g. :JSON:appendfile.rtd).";
@@ -530,31 +503,58 @@ int main_(int argc, const char** argv) {
     }
   }
 
+  // -- Add PS Kernels
+  for (const auto &psKernel : addPsKernels)
+    xclBin.addPsKernel(psKernel);
+  
+  // -- Add Fixed Kernels files
+  for (const auto &kernel : addKernels)
+    xclBin.addKernels(kernel);
+
   // -- Post Section Processing --
+  if ( bResetBankGrouping || 
+      (( !addKernels.empty() || !addPsKernels.empty()) && !bSkipBankGrouping)) {
+    if (xclBin.findSection(ASK_GROUP_TOPOLOGY) != nullptr)
+      xclBin.removeSection("GROUP_TOPOLOGY");
+
+    if (xclBin.findSection(ASK_GROUP_CONNECTIVITY) != nullptr)
+      xclBin.removeSection("GROUP_CONNECTIVITY");
+  }
+
   // Auto add GROUP_TOPOLOGY and/or GROUP_CONNECTIVITY
   if ((bSkipBankGrouping == false) &&
       (xclBin.findSection(ASK_GROUP_TOPOLOGY) == nullptr) &&
       (xclBin.findSection(ASK_GROUP_CONNECTIVITY) == nullptr) &&
       (xclBin.findSection(MEM_TOPOLOGY) != nullptr))
-  {
     XUtil::createMemoryBankGrouping(xclBin);
-  } 
+
+  // add support for transform-pdi 
+  // transform the PDIs in AIE_PARTITION sections before writing out the output xclbin
+  if (bTransformPdi) {
+#ifndef _WIN32
+    XUtil::transformAiePartitionPDIs(xclBin);
+#else
+    std::string errMsg = "ERROR: --transform-pdi is only valid on Linux.";
+    throw std::runtime_error(errMsg);
+#endif
+  }
 
   // -- Remove Keys --
-  for (auto key : keysToRemove) {
+  for (const auto &key : keysToRemove) 
     xclBin.removeKey(key);
-  }
 
   // -- Add / Set Keys --
-  for (auto keyValue : keyValuePairs) {
+  for (const auto &keyValue : keyValuePairs) 
     xclBin.setKeyValue(keyValue);
-  }
+
+  // -- Update Interface uuid in xclbin --
+  xclBin.updateInterfaceuuid();
 
   // -- Dump Sections --
-  for (auto section : sectionsToDump) {
+  for (const auto &section : sectionsToDump) {
     ParameterSectionData psd(section);
     if (psd.getSectionName().empty() &&
-        psd.getFormatType() == Section::FT_JSON) {
+        psd.getFormatType() == Section::FormatType::json) {
       xclBin.dumpSections(psd);
     } else {
       xclBin.dumpSection(psd);
@@ -565,9 +565,8 @@ int main_(int argc, const char** argv) {
   if (!sOutputFile.empty()) {
     xclBin.writeXclBinBinary(sOutputFile, bSkipUUIDInsertion);
 
-    if (!sPrivateKey.empty() && !sCertificate.empty()) {
+    if (!sPrivateKey.empty() && !sCertificate.empty()) 
       signXclBinImage(sOutputFile, sPrivateKey, sCertificate, sDigestAlgorithm, bSignatureDebug);
-    }
   }
 
   // -- Redirect INFO output --

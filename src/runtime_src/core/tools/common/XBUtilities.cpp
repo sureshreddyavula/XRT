@@ -1,33 +1,24 @@
-/**
- * Copyright (C) 2019-2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2022 Xilinx, Inc
+// Copyright (C) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 
 // ------ I N C L U D E   F I L E S -------------------------------------------
-// Local - Include Files
 #include "XBUtilities.h"
-#include "core/common/error.h"
-#include "core/common/utils.h"
-#include "core/common/message.h"
+#include "XBUtilitiesCore.h"
 
+// Local - Include Files
+#include "common/error.h"
+#include "common/info_vmr.h"
+#include "common/utils.h"
+#include "common/message.h"
 #include "common/system.h"
+#include "common/sysinfo.h"
 
 // 3rd Party Library - Include Files
+#include <boost/algorithm/string/split.hpp>
+#include <boost/format.hpp>
 #include <boost/property_tree/json_parser.hpp>
 #include <boost/tokenizer.hpp>
-#include <boost/format.hpp>
-#include <boost/algorithm/string/split.hpp>
 
 // System - Include Files
 #include <iostream>
@@ -68,298 +59,110 @@ struct fdt_header {
   uint32_t size_dt_struct;
 };
 
-
-// ------ N A M E S P A C E ---------------------------------------------------
-using namespace XBUtilities;
-
-// ------ S T A T I C   V A R I A B L E S -------------------------------------
-static bool m_bVerbose = false;
-static bool m_bTrace = false;
-static bool m_disableEscapeCodes = false;
-static bool m_bShowHidden = false;
-static bool m_bForce = false;
-
+namespace xq = xrt_core::query;
 
 // ------ F U N C T I O N S ---------------------------------------------------
-void
-XBUtilities::setVerbose(bool _bVerbose)
-{
-  bool prevVerbose = m_bVerbose;
-
-  if ((prevVerbose == true) && (_bVerbose == false))
-    verbose("Disabling Verbosity");
-
-  m_bVerbose = _bVerbose;
-
-  if ((prevVerbose == false) && (_bVerbose == true))
-    verbose("Enabling Verbosity");
-}
-
-bool 
-XBUtilities::getVerbose()
-{
-  return m_bVerbose;
-}
-
-void
-XBUtilities::setTrace(bool _bTrace)
-{
-  if (_bTrace)
-    trace("Enabling Tracing");
-  else
-    trace("Disabling Tracing");
-
-  m_bTrace = _bTrace;
-}
-
-
-void
-XBUtilities::setShowHidden(bool _bShowHidden)
-{
-  if (_bShowHidden)
-    trace("Hidden commands and options will be shown.");
-  else
-    trace("Hidden commands and options will be hidden");
-
-  m_bShowHidden = _bShowHidden;
-}
-
-bool
-XBUtilities::getShowHidden()
-{
-  return m_bShowHidden;
-}
-
-void
-XBUtilities::setForce(bool _bForce)
-{
-  m_bForce = _bForce;
-
-  if (m_bForce) 
-    trace("Enabling force option");
-  else
-    trace("Disabling force option");
-}
-
-bool 
-XBUtilities::getForce()
-{
-  return m_bForce;
-}
-
-void
-XBUtilities::disable_escape_codes(bool _disable)
-{
-  m_disableEscapeCodes = _disable;
-}
-
-bool
-XBUtilities::is_escape_codes_disabled() {
-  return m_disableEscapeCodes;
-}
-
-
-void
-XBUtilities::message_(MessageType _eMT, const std::string& _msg, bool _endl, std::ostream & _ostream)
-{
-  static std::map<MessageType, std::string> msgPrefix = {
-    { MT_MESSAGE, "" },
-    { MT_INFO, "Info: " },
-    { MT_WARNING, "Warning: " },
-    { MT_ERROR, "Error: " },
-    { MT_VERBOSE, "Verbose: " },
-    { MT_FATAL, "Fatal: " },
-    { MT_TRACE, "Trace: " },
-    { MT_UNKNOWN, "<type unknown>: " },
-  };
-
-  // A simple DRC check
-  if (_eMT > MT_UNKNOWN) {
-    _eMT = MT_UNKNOWN;
-  }
-
-  // Verbosity is not enabled
-  if ((m_bVerbose == false) && (_eMT == MT_VERBOSE)) {
-      return;
-  }
-
-  // Tracing is not enabled
-  if ((m_bTrace == false) && (_eMT == MT_TRACE)) {
-      return;
-  }
-
-  _ostream << msgPrefix[_eMT] << _msg;
-
-  if (_endl == true) {
-    _ostream << std::endl;
-  }
-}
-
-void
-XBUtilities::message(const std::string& _msg, bool _endl, std::ostream & _ostream)
-{
-  message_(MT_MESSAGE, _msg, _endl, _ostream);
-}
-
-void
-XBUtilities::info(const std::string& _msg, bool _endl)
-{
-  message_(MT_INFO, _msg, _endl);
-}
-
-void
-XBUtilities::warning(const std::string& _msg, bool _endl)
-{
-  message_(MT_WARNING, _msg, _endl);
-}
-
-void
-XBUtilities::error(const std::string& _msg, bool _endl)
-{
-  message_(MT_ERROR, _msg, _endl);
-}
-
-void
-XBUtilities::verbose(const std::string& _msg, bool _endl)
-{
-  message_(MT_VERBOSE, _msg, _endl);
-}
-
-void
-XBUtilities::fatal(const std::string& _msg, bool _endl)
-{
-  message_(MT_FATAL, _msg, _endl);
-}
-
-void
-XBUtilities::trace(const std::string& _msg, bool _endl)
-{
-  message_(MT_TRACE, _msg, _endl);
-}
-
-
-
-void
-XBUtilities::trace_print_tree(const std::string & _name,
-                              const boost::property_tree::ptree & _pt)
-{
-  if (m_bTrace == false) {
-    return;
-  }
-
-  XBUtilities::trace(_name + " (JSON Tree)");
-
-  std::ostringstream buf;
-  boost::property_tree::write_json(buf, _pt, true /*Pretty print*/);
-  XBUtilities::message(buf.str());
-}
-
 
 std::string
-XBUtilities::wrap_paragraphs( const std::string & unformattedString,
-                              unsigned int indentWidth,
-                              unsigned int columnWidth,
-                              bool indentFirstLine) {
-  std::vector<std::string> lines;
+XBUtilities::Timer::format_time(std::chrono::duration<double> duration) 
+{
+  auto hours = std::chrono::duration_cast<std::chrono::hours>(duration);
+  auto minutes = std::chrono::duration_cast<std::chrono::minutes>(duration);
+  auto seconds = std::chrono::duration_cast<std::chrono::seconds>(duration);
 
-  // Process the string
-  std::string workingString;
+  std::string formatted_time;
+  if (hours.count() != 0) 
+    formatted_time += std::to_string(hours.count()) + "h ";
 
-  for (const auto &entry : unformattedString) {
-    // Do we have a new line added by the user
-    if (entry == '\n') {
-      lines.push_back(workingString);
-      workingString.clear();
-      continue;
-    }
+  if (hours.count() != 0 || minutes.count() != 0) 
+    formatted_time += std::to_string(minutes.count() % 60) + "m ";
 
-    workingString += entry;
+  formatted_time += std::to_string(seconds.count() % 60) + "s";
 
-    // Check to see if this string is too long
-    if (workingString.size() >= columnWidth) {
-      // Find the beginning of the previous 'word'
-      auto index = workingString.find_last_of(" ");
-
-      // None found, keep on adding characters till we find a space
-      if (index == std::string::npos)
-        continue;
-
-      // Add the line and populate the next line
-      lines.push_back(workingString.substr(0, index));
-      workingString = workingString.substr(index + 1);
-    }
-  }
-
-  if (!workingString.empty())
-    lines.push_back(workingString);
-
-  // Early exit, nothing here
-  if (lines.size() == 0)
-    return std::string();
-
-  // -- Build the formatted string
-  std::string formattedString;
-
-  // Iterate over the lines building the formatted string
-  const std::string indention(indentWidth, ' ');
-  auto iter = lines.begin();
-  while (iter != lines.end()) {
-    // Add an indention
-    if (iter != lines.begin() || indentFirstLine)
-      formattedString += indention;
-    
-    // Add formatted line
-    formattedString += *iter;
-
-    // Don't add a '\n' on the last line
-    if (++iter != lines.end())
-      formattedString += "\n";
-  }
-
-  return formattedString;
+  return formatted_time;
 }
 
 boost::property_tree::ptree
 XBUtilities::get_available_devices(bool inUserDomain)
 {
   xrt_core::device_collection deviceCollection;
-  collect_devices(std::set<std::string> {"all"}, inUserDomain, deviceCollection);
+  collect_devices(std::set<std::string> {"_all_"}, inUserDomain, deviceCollection);
   boost::property_tree::ptree pt;
   for (const auto & device : deviceCollection) {
     boost::property_tree::ptree pt_dev;
     pt_dev.put("bdf", xrt_core::query::pcie_bdf::to_string(xrt_core::device_query<xrt_core::query::pcie_bdf>(device)));
 
+    const auto device_class = xrt_core::device_query_default<xrt_core::query::device_class>(device, xrt_core::query::device_class::type::alveo);
+    pt_dev.put("device_class", xrt_core::query::device_class::enum_to_str(device_class));
+
     //user pf doesn't have mfg node. Also if user pf is loaded, it means that the card is not is mfg mode
-    bool is_mfg = false;
-    try{
-      is_mfg = xrt_core::device_query<xrt_core::query::is_mfg>(device);
-    } catch(...) {}
+    const auto is_mfg = xrt_core::device_query_default<xrt_core::query::is_mfg>(device, false);
 
     //if factory mode
     if (is_mfg) {
       auto mGoldenVer = xrt_core::device_query<xrt_core::query::mfg_ver>(device);
       std::string vbnv = "xilinx_" + xrt_core::device_query<xrt_core::query::board_name>(device) + "_GOLDEN_"+ std::to_string(mGoldenVer);
       pt_dev.put("vbnv", vbnv);
+      pt_dev.put("id", "n/a");
+      pt_dev.put("instance","n/a");
     }
     else {
-      pt_dev.put("vbnv", xrt_core::device_query<xrt_core::query::rom_vbnv>(device));
+      switch (device_class) {
+      case xrt_core::query::device_class::type::alveo:
+        pt_dev.put("vbnv", xrt_core::device_query<xrt_core::query::rom_vbnv>(device));
+        break;
+      case xrt_core::query::device_class::type::ryzen:
+        pt_dev.put("name", xrt_core::device_query<xrt_core::query::rom_vbnv>(device));
+        break;
+      }
+      
       try { //1RP
-      pt_dev.put("id", xrt_core::query::rom_time_since_epoch::to_string(xrt_core::device_query<xrt_core::query::rom_time_since_epoch>(device)));
-      } catch(...) {}
+        pt_dev.put("id", xrt_core::query::rom_time_since_epoch::to_string(xrt_core::device_query<xrt_core::query::rom_time_since_epoch>(device)));
+      }
+      catch(...) {
+        // The id wasn't added
+      }
+
       try { //2RP
         auto logic_uuids = xrt_core::device_query<xrt_core::query::logic_uuids>(device);
         if (!logic_uuids.empty())
-          pt_dev.put("id", boost::str(boost::format("0x%s") % logic_uuids[0]));
-      } catch(...) {}
-    }
+          pt_dev.put("id", xrt_core::query::interface_uuids::to_uuid_upper_string(logic_uuids[0]));
+      }
+      catch(...) {
+        // The id wasn't added
+      }
 
-    pt_dev.put("is_ready", xrt_core::device_query<xrt_core::query::is_ready>(device));
+      try {
+        const auto fw_ver = xrt_core::device_query_default<xq::firmware_version>(device, {0,0,0,0});
+        std::string version = "N/A";
+        if (fw_ver.major != 0 || fw_ver.minor != 0 || fw_ver.patch != 0 || fw_ver.build != 0) {
+          version = boost::str(boost::format("%u.%u.%u.%u")
+            % fw_ver.major % fw_ver.minor % fw_ver.patch % fw_ver.build);
+        }
+        pt_dev.put("firmware_version", version);
+      }
+      catch(...) {
+        // The firmware wasn't added
+      }
+
+      try {
+        auto instance = xrt_core::device_query<xrt_core::query::instance>(device);
+        std::string pf = device->is_userpf() ? "user" : "mgmt";
+        pt_dev.put("instance",boost::str(boost::format("%s(inst=%d)") % pf % instance));
+      }
+      catch(const xrt_core::query::exception&) {
+          // The instance wasn't added
+      }
+
+    }
+    pt_dev.put("is_ready", xrt_core::device_query_default<xrt_core::query::is_ready>(device, true));
+
     pt.push_back(std::make_pair("", pt_dev));
   }
   return pt;
 }
 
-/* 
+/*
  * currently edge supports only one device
  */
 static uint16_t
@@ -369,15 +172,18 @@ deviceId2index()
 }
 
 std::string
-str_available_devs(bool _inUserDomain)
+XBUtilities::str_available_devs(bool _inUserDomain)
 {
   //gather available devices for user to pick from
   std::stringstream available_devs;
   available_devs << "\n Available devices:\n";
-  boost::property_tree::ptree available_devices = get_available_devices(_inUserDomain);
-  for(auto& kd : available_devices) {
+  boost::property_tree::ptree available_devices = XBUtilities::get_available_devices(_inUserDomain);
+  for (auto& kd : available_devices) {
     boost::property_tree::ptree& dev = kd.second;
-    available_devs << boost::format("  [%s] : %s\n") % dev.get<std::string>("bdf") % dev.get<std::string>("vbnv");
+    if (boost::iequals(dev.get<std::string>("device_class"), xrt_core::query::device_class::enum_to_str(xrt_core::query::device_class::type::alveo)))
+      available_devs << boost::format("  [%s] : %s\n") % dev.get<std::string>("bdf") % dev.get<std::string>("vbnv");
+    if (boost::iequals(dev.get<std::string>("device_class"), xrt_core::query::device_class::enum_to_str(xrt_core::query::device_class::type::ryzen)))
+      available_devs << boost::format("  [%s] : %s\n") % dev.get<std::string>("bdf") % dev.get<std::string>("name");
   }
   return available_devs.str();
 }
@@ -389,8 +195,8 @@ str_available_devs(bool _inUserDomain)
 static uint16_t
 bdf2index(const std::string& bdfstr, bool _inUserDomain)
 {
-  if(!std::regex_match(bdfstr,std::regex("[A-Za-z0-9:.]+")))
-    throw std::runtime_error("Invalid BDF format. Please specify valid BDF" + str_available_devs(_inUserDomain));
+  if (!std::regex_match(bdfstr,std::regex("[A-Za-z0-9:.]+")))
+    throw std::runtime_error("Invalid BDF format. Please specify valid BDF" + XBUtilities::str_available_devs(_inUserDomain));
 
   std::vector<std::string> tokens;
   boost::split(tokens, bdfstr, boost::is_any_of(":"));
@@ -402,34 +208,32 @@ bdf2index(const std::string& bdfstr, bool _inUserDomain)
 
   // check if we have 2-3 tokens: domain, bus, device.function
   // domain is optional
-  if(tokens.size() <= 1 || tokens.size() > 3)
-    throw std::runtime_error(boost::str(boost::format("Invalid BDF '%s'. Please spcify the BDF using 'DDDD:BB:DD.F' format") % bdfstr) + str_available_devs(_inUserDomain));
+  if (tokens.size() <= 1 || tokens.size() > 3)
+    throw std::runtime_error(boost::str(boost::format("Invalid BDF '%s'. Please spcify the BDF using 'DDDD:BB:DD.F' format") % bdfstr) + XBUtilities::str_available_devs(_inUserDomain));
 
   std::reverse(std::begin(tokens), std::end(tokens));
 
   //check if func was specified. func is optional
   auto pos_of_func = tokens[0].find('.');
-  if(pos_of_func != std::string::npos) {
+  if (pos_of_func != std::string::npos) {
     dev = static_cast<uint16_t>(std::stoi(std::string(tokens[0].substr(0, pos_of_func)), nullptr, radix));
     func = static_cast<uint16_t>(std::stoi(std::string(tokens[0].substr(pos_of_func+1)), nullptr, radix));
   }
-  else{
+  else
     dev = static_cast<uint16_t>(std::stoi(std::string(tokens[0]), nullptr, radix));
-  }
+
   bus = static_cast<uint16_t>(std::stoi(std::string(tokens[1]), nullptr, radix));
-  
+
   // domain is not mandatory if it is "0000"
   if(tokens.size() > 2)
     domain = static_cast<uint16_t>(std::stoi(std::string(tokens[2]), nullptr, radix));
 
-  uint64_t devices = _inUserDomain ? xrt_core::get_total_devices(true).first : xrt_core::get_total_devices(false).first;
-  for (uint16_t i = 0; i < devices; i++) {
-    std::shared_ptr<xrt_core::device> device;
-    try{
-      device = _inUserDomain ? xrt_core::get_userpf_device(i) : xrt_core::get_mgmtpf_device(i);
-    } catch (...) { continue; }
-    auto bdf = xrt_core::device_query<xrt_core::query::pcie_bdf>(device);
-
+  // Iterate through the available devices to find a BDF match
+  // This must not open any devices! Doing do would slow down the software
+  // quite a bit and cause other undesirable side affects
+auto devices = _inUserDomain ? xrt_core::get_total_devices(true).first : xrt_core::get_total_devices(false).first;
+  for (decltype(devices) i = 0; i < devices; i++) {
+    auto bdf = xrt_core::get_bdf_info(i, _inUserDomain);
     //if the user specifies func, compare
     //otherwise safely ignore
     auto cmp_func = [bdf](uint16_t func)
@@ -440,10 +244,39 @@ bdf2index(const std::string& bdfstr, bool _inUserDomain)
     };
 
     if (domain == std::get<0>(bdf) && bus == std::get<1>(bdf) && dev == std::get<2>(bdf) && cmp_func(func))
-      return i;
+      return static_cast<uint16_t>(i);
   }
 
-  throw std::runtime_error(boost::str(boost::format("Specified device BDF '%s' not found") % bdfstr) + str_available_devs(_inUserDomain));
+  throw std::runtime_error(boost::str(boost::format("Specified device BDF '%s' not found") % bdfstr) + XBUtilities::str_available_devs(_inUserDomain));
+}
+
+static std::shared_ptr<xrt_core::device>
+get_device_internal(xrt_core::device::id_type index, bool in_user_domain)
+{
+  static std::mutex mutex;
+  std::lock_guard guard(mutex);
+
+  if (in_user_domain) {
+    static std::vector<std::shared_ptr<xrt_core::device>> user_devices(xrt_core::get_total_devices(true).first, nullptr);
+  
+    if (user_devices.size() <= index )
+      throw std::runtime_error("no device present with index " + std::to_string(index));
+    
+    if (!user_devices[index])
+      user_devices[index] = xrt_core::get_userpf_device(index);
+
+    return user_devices[index];
+  }
+
+  static std::vector<std::shared_ptr<xrt_core::device>> mgmt_devices(xrt_core::get_total_devices(false).first, nullptr);
+  
+  if (mgmt_devices.size() <= index )
+    throw std::runtime_error("no device present with index " + std::to_string(index));
+
+  if (!mgmt_devices[index])
+    mgmt_devices[index] = xrt_core::get_mgmtpf_device(index);
+
+  return mgmt_devices[index];
 }
 
 /*
@@ -455,20 +288,41 @@ str2index(const std::string& str, bool _inUserDomain)
 {
   //throw an error if no devices are present
   uint64_t devices = _inUserDomain ? xrt_core::get_total_devices(true).first : xrt_core::get_total_devices(false).first;
-  if(devices == 0)
+  if (devices == 0)
     throw std::runtime_error("No devices found");
   try {
     int idx(boost::lexical_cast<int>(str));
-    auto device = _inUserDomain ? xrt_core::get_userpf_device(idx) : xrt_core::get_mgmtpf_device(idx);
+    auto device = get_device_internal(idx, _inUserDomain);
 
     auto bdf = xrt_core::device_query<xrt_core::query::pcie_bdf>(device);
     // if the bdf is zero, we are dealing with an edge device
-    if(std::get<0>(bdf) == 0 && std::get<1>(bdf) == 0 && std::get<2>(bdf) == 0 && std::get<3>(bdf) == 0)
+    if (std::get<0>(bdf) == 0 && std::get<1>(bdf) == 0 && std::get<2>(bdf) == 0 && std::get<3>(bdf) == 0)
       return deviceId2index();
   } catch (...) {
     /* not an edge device so safe to ignore this error */
   }
   return bdf2index(str, _inUserDomain);
+}
+
+void
+XBUtilities::xrt_version_cmp(bool isUserDomain)
+{
+  boost::property_tree::ptree pt_xrt;
+  xrt_core::sysinfo::get_xrt_info(pt_xrt);
+  const boost::property_tree::ptree empty_ptree;
+
+  std::string xrt_version = pt_xrt.get<std::string>("version", "<unknown>");
+  const boost::property_tree::ptree& available_drivers = pt_xrt.get_child("drivers", empty_ptree);
+  const std::string expected_drv_name = isUserDomain ? "xocl" : "xclmgmt";
+  for(const auto& drv : available_drivers) {
+    const boost::property_tree::ptree& driver = drv.second;
+    const std::string drv_name = driver.get<std::string>("name", "<unknown>");
+    const std::string drv_version = driver.get<std::string>("version", "<unknown>");
+    if (drv_name.compare(expected_drv_name) == 0 && drv_version.compare("unknown") != 0 && xrt_version.compare(drv_version) != 0) {
+      const auto & warnMsg = boost::str(boost::format("WARNING: Unexpected %s version (%s) was found. Expected %s, to match XRT tools.") % expected_drv_name % drv_version % xrt_version);
+      std::cout << warnMsg << std::endl;
+    }
+  }
 }
 
 void
@@ -481,7 +335,7 @@ XBUtilities::collect_devices( const std::set<std::string> &_deviceBDFs,
     return;
 
   // -- Collect all of devices if the "all" option is used...anywhere in the collection
-  if (_deviceBDFs.find("all") != _deviceBDFs.end()) {
+  if (_deviceBDFs.find("_all_") != _deviceBDFs.end()) {
     xrt_core::device::id_type total = 0;
     try {
       // If there are no devices in the server a runtime exception is thrown in  mgmt.cpp probe()
@@ -497,15 +351,12 @@ XBUtilities::collect_devices( const std::set<std::string> &_deviceBDFs,
     // Now collect the devices and add them to the collection
     for(xrt_core::device::id_type index = 0; index < total; ++index) {
       try {
-        if(_inUserDomain)
-          _deviceCollection.push_back( xrt_core::get_userpf_device(index) );
-        else
-          _deviceCollection.push_back( xrt_core::get_mgmtpf_device(index) );
-      } catch (...) { 
+        _deviceCollection.push_back(get_device_internal(index, _inUserDomain));
+      } catch (...) {
         /* If the device is not available, quietly ignore it
            Use case: when a device is being reset in parallel */
       }
-      
+
     }
 
     return;
@@ -514,82 +365,158 @@ XBUtilities::collect_devices( const std::set<std::string> &_deviceBDFs,
   // -- Collect the devices by name
   for (const auto & deviceBDF : _deviceBDFs) {
     auto index = str2index(deviceBDF, _inUserDomain);         // Can throw
-    if(_inUserDomain)
-      _deviceCollection.push_back( xrt_core::get_userpf_device(index) );
-    else
-      _deviceCollection.push_back( xrt_core::get_mgmtpf_device(index) );
+    _deviceCollection.push_back(get_device_internal(index, _inUserDomain));
   }
 }
 
-bool
-XBUtilities::can_proceed(bool force)
+  static void 
+  check_versal_boot(const std::shared_ptr<xrt_core::device> &device)
+  {
+    std::vector<std::string> warnings;
+
+    try {
+      const auto is_default = xrt_core::vmr::get_vmr_status(device.get(), xrt_core::vmr::vmr_status_type::has_fpt);
+      if (!is_default)
+        warnings.push_back("Versal Platform is NOT migrated");
+    } catch (const xrt_core::error& e) {
+      warnings.push_back(e.what());
+    }
+
+    try {
+      const auto is_default = xrt_core::vmr::get_vmr_status(device.get(), xrt_core::vmr::vmr_status_type::boot_on_default);
+      if (!is_default)
+        warnings.push_back("Versal Platform is NOT in default boot");
+    } catch (const xrt_core::error& e) {
+      warnings.push_back(e.what());
+    }
+
+    try {
+      const std::string unavail = "N/A";
+      const std::string zeroes = "0.0.0";
+      auto cur_ver = xrt_core::device_query_default<xrt_core::query::hwmon_sdm_active_msp_ver>(device, unavail);
+      auto exp_ver = xrt_core::device_query_default<xrt_core::query::hwmon_sdm_target_msp_ver>(device, unavail);
+      cur_ver = (boost::equals(cur_ver, zeroes)) ? unavail : cur_ver;
+      exp_ver = (boost::equals(exp_ver, zeroes)) ? unavail : exp_ver;
+      if ((boost::equals(cur_ver, unavail) || boost::equals(exp_ver, unavail)) && !boost::equals(cur_ver, exp_ver))
+        warnings.push_back("SC version data missing. Upgrade your shell");
+      else if (!boost::equals(cur_ver, exp_ver))
+        warnings.push_back(boost::str(boost::format("Invalid SC version. Expected: %s Current: %s") % exp_ver % cur_ver));
+    } catch (const xrt_core::error& e) {
+      warnings.push_back(e.what());
+    }
+
+    if (warnings.empty())
+      return;
+
+    const std::string star_line = "***********************************************************";
+
+    std::cout << star_line << "\n";
+    std::cout << "*        WARNING          WARNING          WARNING        *\n";
+
+    // Print all warnings
+    for (const auto& warning : warnings) {
+      // Subtract the:
+      // 1. Side stars
+      // 2. Single space next to the side star
+      const size_t available_space = star_line.size() - 2 - 2;
+      // Account for strings who are larger than the star line
+      size_t warning_index = 0;
+      while (warning_index < warning.size()) {
+        // Extract the largest possible string from the warning
+        const auto warning_msg = warning.substr(warning_index, available_space);
+        // Update the index so the next substring is valid
+        warning_index += warning_msg.size();
+        const auto side_spaces = available_space - warning_msg.size();
+        // The left side should be larger than the right if there is an imbalance
+        const size_t left_spaces = (side_spaces % 2 == 0) ? side_spaces / 2 : (side_spaces / 2) + 1;
+        const size_t right_spaces = side_spaces / 2;
+        std::cout << "* " << std::string(left_spaces, ' ') << warning_msg << std::string(right_spaces, ' ') << " *\n";
+      }
+    }
+
+    std::cout << star_line << "\n";
+  }
+
+  std::shared_ptr<xrt_core::device>
+  XBUtilities::get_device( const std::string &deviceBDF, bool in_user_domain, bool print_warning)
+  {
+    // -- If the deviceBDF is empty then do nothing
+    if (deviceBDF.empty())
+      throw std::runtime_error("Please specify a device using --device option" + XBUtilities::str_available_devs(in_user_domain));
+
+    // -- Collect the devices by name
+    auto index = str2index(deviceBDF, in_user_domain);    // Can throw
+    std::shared_ptr<xrt_core::device> device;
+    device = get_device_internal(index, in_user_domain);
+
+    if (xrt_core::device_query_default<xq::is_versal>(device, false))
+      check_versal_boot(device);
+
+    const std::string device_name = xrt_core::device_query_default<xrt_core::query::rom_vbnv>(device, "");
+    if (device_name.find("Ryzen") != std::string::npos && print_warning) {
+      std::cout << "------------------------------------------------------------\n";
+      std::cout << "                        EARLY ACCESS                        \n";
+      std::cout << "        This release of xbutil contains early access        \n";
+      std::cout << "         experimental features which may have bugs.         \n";
+      std::cout << "------------------------------------------------------------\n";
+    }
+
+    return device;
+  }
+
+static std::string
+deviceMapping(const xrt_core::query::device_class::type type)
 {
-  bool proceed = false;
-  std::string input;
+  switch (type) {
+  case xrt_core::query::device_class::type::alveo:
+    return "alveo";
+  case xrt_core::query::device_class::type::ryzen:
+    return "aie";
+  }
 
-  std::cout << "Are you sure you wish to proceed? [Y/n]: ";
+  return "";
+}
 
-  if (force) 
-    std::cout << "Y (Force override)" << std::endl;
-  else
-    std::getline(std::cin, input);
-  
-  // Ugh, the std::transform() produces windows compiler warnings due to
-  // conversions from 'int' to 'char' in the algorithm header file
-  boost::algorithm::to_lower(input);
-  //std::transform( input.begin(), input.end(), input.begin(), [](unsigned char c){ return std::tolower(c); });
-  //std::transform( input.begin(), input.end(), input.begin(), ::tolower);
+std::string
+XBUtilities::get_device_class(const std::string &deviceBDF, bool in_user_domain)
+{
+  if (deviceBDF.empty()) 
+    return "";
 
-  // proceeds for "y", "Y" and no input
-  proceed = ((input.compare("y") == 0) || input.empty());
-  if (!proceed)
-    std::cout << "Action canceled." << std::endl;
-  return proceed;
+  std::shared_ptr<xrt_core::device> device = get_device(boost::algorithm::to_lower_copy(deviceBDF), in_user_domain, false);
+  auto device_class = xrt_core::device_query_default<xrt_core::query::device_class>(device, xrt_core::query::device_class::type::alveo);
+  return deviceMapping(device_class);
 }
 
 void
 XBUtilities::can_proceed_or_throw(const std::string& info, const std::string& error)
 {
   std::cout << info << "\n";
-  if (!can_proceed(getForce()))
+  if (!XBUtilities::can_proceed(getForce()))
     throw xrt_core::system_error(ECANCELED, error);
 }
 
 void
-XBUtilities::sudo_or_throw(const std::string& msg)
+XBUtilities::print_exception(const std::system_error& e)
 {
-#ifndef _WIN32
-  if ((getuid() == 0) || (geteuid() == 0))
-    return;
+  try {
+    // Remove the type of error from the message.
+    const std::string msg = std::regex_replace(e.what(), std::regex(std::string(": ") + e.code().message()), "");
 
-  std::cerr << "ERROR: " << msg << std::endl;
-  throw xrt_core::error(std::errc::operation_canceled);
-#endif
-}
-
-
-void 
-XBUtilities::print_exception_and_throw_cancel(const xrt_core::error& e)
-{
-  // Remove the type of error from the message.
-  const std::string msg = std::regex_replace(e.what(), std::regex(std::string(": ") + e.code().message()), "");
-
-  std::cerr << boost::format("ERROR (%s): %s") % e.code().message() % msg << std::endl;
-
-  throw xrt_core::error(std::errc::operation_canceled);
-}
-
-void 
-XBUtilities::print_exception_and_throw_cancel(const std::runtime_error& e)
-{
-  std::cerr << boost::format("ERROR: %s\n") % e.what();
-  throw xrt_core::error(std::errc::operation_canceled);
+    if (!msg.empty())
+      std::cerr << boost::format("ERROR: %s\n") % msg;
+  }
+  catch (const std::exception&)
+  {
+    // exception can occur while formatting message, print normal message
+    std::cerr << e.what() << std::endl;
+  }
 }
 
 std::vector<char>
 XBUtilities::get_axlf_section(const std::string& filename, axlf_section_kind kind)
 {
-  std::ifstream in(filename);
+  std::ifstream in(filename, std::ios::binary);
   if (!in.is_open())
     throw std::runtime_error(boost::str(boost::format("Can't open %s") % filename));
 
@@ -684,4 +611,148 @@ XBUtilities::str_to_reset_obj(const std::string& str)
   if (it != reset_map.end())
     return it->second;
   throw xrt_core::error(str + " is invalid. Please specify a valid reset type");
+}
+
+std::string
+XBUtilities::string_to_UUID(std::string str)
+{
+  //make sure that a UUID is passed in
+  assert(str.length() == 32);
+  std::string uuid = "";
+  //positions to insert hyphens
+  //before: 00000000000000000000000000000000
+  std::vector<int> pos = {8, 4, 4, 4};
+  //before: 00000000-0000-0000-0000-000000000000
+
+  for(auto const p : pos) {
+    std::string token = str.substr(0, p);
+    boost::to_upper(token);
+    uuid.append(token + "-");
+    str.erase(0, p);
+  }
+  boost::to_upper(str);
+  uuid.append(str);
+
+  return uuid;
+}
+
+static const std::map<uint64_t, std::string> oemid_map = {
+  {0x10da, "Xilinx"},
+  {0x02a2, "Dell"},
+  {0x12a1, "IBM"},
+  {0xb85c, "HP"},
+  {0x2a7c, "Super Micro"},
+  {0x4a66, "Lenovo"},
+  {0xbd80, "Inspur"},
+  {0x12eb, "Amazon"},
+  {0x2b79, "Google"}
+};
+
+std::string
+XBUtilities::parse_oem_id(const std::string& oemid)
+{
+  uint64_t oem_id_val = 0;
+  std::stringstream ss;
+
+  try {
+    oem_id_val = std::stoul(oemid, nullptr, 16);
+  } catch (const std::exception&) {
+    //failed to parse oemid to hex value, ignore erros and print original value
+  }
+
+  auto oemstr = oemid_map.find(oem_id_val);
+  return oemstr != oemid_map.end() ? oemstr->second : "N/A";
+}
+
+static const std::map<std::string, std::string> clock_map = {
+  {"DATA_CLK", "Data"},
+  {"KERNEL_CLK", "Kernel"},
+  {"SYSTEM_CLK", "System"},
+};
+
+std::string
+XBUtilities::parse_clock_id(const std::string& id)
+{
+  auto clock_str = clock_map.find(id);
+  if (clock_str != clock_map.end())
+    return clock_str->second;
+
+  throw xrt_core::error(std::errc::invalid_argument);
+}
+
+uint64_t
+XBUtilities::string_to_base_units(std::string str, const unit& conversion_unit)
+{
+  boost::algorithm::trim(str);
+
+  if(str.empty())
+    throw xrt_core::error(std::errc::invalid_argument);
+
+  int factor;
+  switch(conversion_unit) {
+    case unit::bytes :
+      factor = 1024;
+      break;
+    case unit::Hertz :
+      factor = 1000;
+      break;
+    default :
+      throw xrt_core::error(std::errc::invalid_argument);
+  }
+
+  std::string units = "B";
+  if(std::isalpha(str.back())) {
+    units = str.back();
+    str.pop_back();
+  }
+
+  uint64_t unit_value = 0;
+  boost::to_upper(units);
+  if(units.compare("B") == 0)
+    unit_value = 1;
+  else if(units.compare("K") == 0)
+    unit_value = factor;
+  else if(units.compare("M") == 0)
+    unit_value = factor * factor;
+  else if(units.compare("G") == 0)
+    unit_value = factor * factor * factor;
+  else
+    throw xrt_core::error(std::errc::invalid_argument);
+
+  boost::algorithm::trim(str);
+  uint64_t size = 0;
+  try {
+    size = std::stoll(str);
+  }
+  catch (const std::exception&) {
+    //out of range, invalid argument ex
+    throw xrt_core::error(std::errc::invalid_argument);
+  }
+
+  size *= unit_value;
+  return size;
+}
+
+std::string
+XBUtilities::
+get_xrt_pretty_version()
+{
+  std::stringstream ss;
+  boost::property_tree::ptree pt_xrt;
+  xrt_core::sysinfo::get_xrt_info(pt_xrt);
+  boost::property_tree::ptree empty_ptree;
+
+  ss << boost::format("%-20s : %s\n") % "Version" % pt_xrt.get<std::string>("version", "N/A");
+  ss << boost::format("%-20s : %s\n") % "Branch" % pt_xrt.get<std::string>("branch", "N/A");
+  ss << boost::format("%-20s : %s\n") % "Hash" % pt_xrt.get<std::string>("hash", "N/A");
+  ss << boost::format("%-20s : %s\n") % "Hash Date" % pt_xrt.get<std::string>("build_date", "N/A");
+  const boost::property_tree::ptree& available_drivers = pt_xrt.get_child("drivers", empty_ptree);
+  for(auto& drv : available_drivers) {
+    const boost::property_tree::ptree& driver = drv.second;
+    std::string drv_name = driver.get<std::string>("name", "N/A");
+    boost::algorithm::to_upper(drv_name);
+    ss << boost::format("%-20s : %s, %s\n") % drv_name
+        % driver.get<std::string>("version", "N/A") % driver.get<std::string>("hash", "N/A");
+  }
+  return ss.str();
 }

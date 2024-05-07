@@ -1,7 +1,7 @@
 /*
  * A GEM style device manager for PCIe based OpenCL accelerators.
  *
- * Copyright (C) 2016-2020 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2016-2022 Xilinx, Inc. All rights reserved.
  *
  * Authors: chienwei@xilinx.com
  *
@@ -349,6 +349,12 @@ struct xmc_pkt_hdr {
 	u32 reserved	: 12;
 	u32 op		: 8;
 };
+
+#define XMC_UNRECOVERABLE_ERR(val) \
+		((val == XMC_HOST_MSG_SAT_FW_WRITE_FAIL)  || \
+		 (val == XMC_HOST_MSG_SAT_FW_UPDATE_FAIL) || \
+		 (val == XMC_HOST_MSG_SAT_FW_LOAD_FAIL)   || \
+		 (val == XMC_HOST_MSG_SAT_FW_ERASE_FAIL))
 
 /* We have a 4k buffer for xmc mailbox */
 #define	XMC_PKT_MAX_SZ	1024 /* In u32 */
@@ -1278,17 +1284,32 @@ static int xmc_get_data(struct platform_device *pdev, enum xcl_group_kind kind,
 	return 0;
 }
 
-static uint64_t xmc_get_power(struct platform_device *pdev, enum sensor_val_kind kind)
+static uint64_t xmc_get_power(struct platform_device *pdev,
+                              enum sensor_val_kind kind, bool instantaneous)
 {
+	struct xocl_xmc *xmc = platform_get_drvdata(pdev);
 	u32 v_pex, v_aux, v_3v3, c_pex, c_aux, c_3v3;
 	u64 val = 0;
 
-	xmc_sensor(pdev, VOL_12V_PEX, &v_pex, kind);
-	xmc_sensor(pdev, VOL_12V_AUX, &v_aux, kind);
-	xmc_sensor(pdev, CUR_12V_PEX, &c_pex, kind);
-	xmc_sensor(pdev, CUR_12V_AUX, &c_aux, kind);
-	xmc_sensor(pdev, VOL_3V3_PEX, &v_3v3, kind);
-	xmc_sensor(pdev, CUR_3V3_PEX, &c_3v3, kind);
+	if (instantaneous) {
+		xmc_sensor(pdev, VOL_12V_PEX, &v_pex, kind);
+		xmc_sensor(pdev, VOL_12V_AUX, &v_aux, kind);
+		xmc_sensor(pdev, CUR_12V_PEX, &c_pex, kind);
+		xmc_sensor(pdev, CUR_12V_AUX, &c_aux, kind);
+		xmc_sensor(pdev, VOL_3V3_PEX, &v_3v3, kind);
+		xmc_sensor(pdev, CUR_3V3_PEX, &c_3v3, kind);
+	} else {
+		v_pex = xmc->cache->vol_12v_pex;
+		v_aux = xmc->cache->vol_12v_aux;
+		c_pex = xmc->cache->cur_12v_pex;
+		c_aux = xmc->cache->cur_12v_aux;
+		v_3v3 = xmc->cache->vol_3v3_pex;
+		c_3v3 = xmc->cache->cur_3v3_pex;
+	}
+
+	xocl_dbg(&xmc->pdev->dev, "v_pex %d, c_pex %d, v_aux %d, "
+		"c_aux %d, v_3v3 %d, c_3v3 %d",
+		v_pex, c_pex, v_aux, c_aux, v_3v3, c_3v3);
 
 	val = (u64)v_pex * c_pex + (u64)v_aux * c_aux + (u64)v_3v3 * c_3v3;
 
@@ -1493,17 +1514,29 @@ static ssize_t xmc_power_show(struct device *dev,
 	struct device_attribute *da, char *buf)
 {
 	struct xocl_xmc *xmc = dev_get_drvdata(dev);
-	u64 val = xmc_get_power(xmc->pdev, SENSOR_INS);
+	u64 val = xmc_get_power(xmc->pdev, SENSOR_INS, false);
 
 	return sprintf(buf, "%lld\n", val);
 }
 static DEVICE_ATTR_RO(xmc_power);
 
+static ssize_t xmc_power_ins_show(struct device *dev,
+	struct device_attribute *da, char *buf)
+{
+	struct xocl_xmc *xmc = dev_get_drvdata(dev);
+	u64 val = xmc_get_power(xmc->pdev, SENSOR_INS, true);
+
+	return sprintf(buf, "%lld\n", val);
+}
+static DEVICE_ATTR_RO(xmc_power_ins);
+
 static ssize_t status_show(struct device *dev,
 	struct device_attribute *da, char *buf)
 {
 	struct xocl_xmc *xmc = dev_get_drvdata(dev);
-	u32 val = READ_REG32(xmc, XMC_STATUS_REG);
+	u32 val = 0;
+
+	safe_read32(xmc, XMC_STATUS_REG, &val);
 
 	return sprintf(buf, "0x%x\n", val);
 }
@@ -1513,7 +1546,9 @@ static ssize_t core_version_show(struct device *dev,
 	struct device_attribute *da, char *buf)
 {
 	struct xocl_xmc *xmc = dev_get_drvdata(dev);
-	u32 val = READ_REG32(xmc, XMC_CORE_VERSION_REG);
+	u32 val = 0;
+
+	safe_read32(xmc, XMC_CORE_VERSION_REG, &val);
 
 	return sprintf(buf, "%u.%u.%u\n",
 	    (val & 0xff0000) >> 16, (val & 0xff00) >> 8, (val & 0xff));
@@ -1579,7 +1614,8 @@ static DEVICE_ATTR_RO(core_version);
 	&dev_attr_xmc_heartbeat_err_code.attr,				\
 	&dev_attr_xmc_heartbeat_err_time.attr,				\
 	&dev_attr_xmc_heartbeat_stall.attr,				\
-	&dev_attr_xmc_qspi_status.attr
+	&dev_attr_xmc_qspi_status.attr,					\
+	&dev_attr_xmc_power_ins.attr
 
 /*
  * Defining sysfs nodes for reading some of xmc regisers.
@@ -1610,7 +1646,6 @@ REG_SYSFS_NODE(host_msg_header, XMC_HOST_MSG_HEADER_REG, "0x%x\n");
 	&dev_attr_host_msg_offset.attr,					\
 	&dev_attr_host_msg_error.attr,					\
 	&dev_attr_host_msg_header.attr
-
 
 static ssize_t pause_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
@@ -1948,7 +1983,7 @@ static ssize_t scaling_threshold_power_override_show(struct device *dev,
 	}
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uW\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t scaling_threshold_power_override_store(struct device *dev,
@@ -2040,7 +2075,7 @@ static ssize_t scaling_critical_temp_threshold_show(struct device *dev,
 		return sprintf(buf, "N/A\n");
 	}
 
-	return sprintf(buf, "%uC\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 static DEVICE_ATTR_RO(scaling_critical_temp_threshold);
 
@@ -2063,7 +2098,7 @@ static ssize_t scaling_threshold_temp_limit_show(struct device *dev,
 		val = xmc_get_threshold_temp(xmc);
 	}
 
-	return sprintf(buf, "%uC\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 static DEVICE_ATTR_RO(scaling_threshold_temp_limit);
 
@@ -2086,7 +2121,7 @@ static ssize_t scaling_threshold_power_limit_show(struct device *dev,
 		val = xmc_get_threshold_power(xmc);
 	}
 
-	return sprintf(buf, "%uW\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 static DEVICE_ATTR_RO(scaling_threshold_power_limit);
 
@@ -2133,7 +2168,7 @@ static ssize_t scaling_threshold_temp_override_show(struct device *dev,
 	}
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uC\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t scaling_threshold_temp_override_store(struct device *dev,
@@ -2272,7 +2307,7 @@ static ssize_t scaling_enabled_store(struct device *dev,
 {
 	struct xocl_xmc *xmc = platform_get_drvdata(to_platform_device(dev));
 
-	if (strncmp(buf, "enable", strlen("enable")) == 0)
+	if (strncmp(buf, "true", strlen("true")) == 0)
 		runtime_clk_scale_enable(xmc);
 	else
 		runtime_clk_scale_disable(xmc);
@@ -2315,7 +2350,7 @@ static ssize_t hwmon_scaling_target_power_show(struct device *dev,
 	val = val * 1000000;
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uW\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t hwmon_scaling_target_power_store(struct device *dev,
@@ -2371,7 +2406,7 @@ static ssize_t hwmon_scaling_target_temp_show(struct device *dev,
 	val = val * 1000;
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uc\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t hwmon_scaling_target_temp_store(struct device *dev,
@@ -2434,7 +2469,7 @@ static ssize_t hwmon_scaling_threshold_temp_show(struct device *dev,
 	val = val * 1000;
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uC\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t hwmon_scaling_threshold_power_show(struct device *dev,
@@ -2462,7 +2497,7 @@ static ssize_t hwmon_scaling_threshold_power_show(struct device *dev,
 	val = val * 1000000;
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uW\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t reg_base_show(struct device *dev,
@@ -2606,18 +2641,22 @@ static ssize_t read_temp_by_mem_topology(struct file *filp,
 {
 	u32 nread = 0;
 	size_t size = 0;
+	int ret = 0;
 	u32 i;
-	int err = 0;
 	struct mem_topology *memtopo = NULL;
 	struct xocl_xmc *xmc =
 		dev_get_drvdata(container_of(kobj, struct device, kobj));
 	uint32_t *temp = NULL;
 	xdev_handle_t xdev = xocl_get_xdev(xmc->pdev);
+	struct xocl_drm *drm = XDEV(xdev)->drm;
+	uint32_t slot_id = DEFAULT_PL_SLOT;
 
-	err = xocl_icap_get_xclbin_metadata(xdev, MEMTOPO_AXLF,
-		(void **)&memtopo);
-	if (err)
-		return nread;
+        if (!drm)
+                return 0;
+
+	ret  = XOCL_GET_MEM_TOPOLOGY(xdev, memtopo, slot_id);
+	if (ret)
+                return ret;
 
 	if (!memtopo)
 		goto done;
@@ -2641,9 +2680,8 @@ static ssize_t read_temp_by_mem_topology(struct file *filp,
 
 	memcpy(buffer, temp, nread);
 done:
-	xocl_icap_put_xclbin_metadata(xdev);
+	XOCL_PUT_MEM_TOPOLOGY(xdev, slot_id);
 	vfree(temp);
-	/* xocl_icap_unlock_bitstream */
 	return nread;
 }
 
@@ -2976,7 +3014,7 @@ static ssize_t hwmon_power_show(struct device *dev,
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	int index = to_sensor_dev_attr(da)->index;
-	u64 val = xmc_get_power(pdev, HWMON_INDEX2VAL_KIND(index));
+	u64 val = xmc_get_power(pdev, HWMON_INDEX2VAL_KIND(index), true);
 
 	return sprintf(buf, "%lld\n", val);
 }
@@ -4212,6 +4250,14 @@ static int xmc_mailbox_wait(struct xocl_xmc *xmc)
 
 	if (val) {
 		xocl_err(&xmc->pdev->dev, "XMC packet error: %d\n", val);
+		/*
+		 *  We set the xmc state as XMC_STATE_ERROR only if it's unrecoverable.
+		 *  e.g. get error while upgrading the sc firmware.
+		 */
+		if (XMC_UNRECOVERABLE_ERR(val)) {
+			xocl_err(&xmc->pdev->dev, "Card requires pci hot reset\n");
+			xmc->state = XMC_STATE_ERROR;
+		}
 		safe_read32(xmc, XMC_CONTROL_REG, &ctrl_val);
 		safe_write32(xmc, XMC_CONTROL_REG, ctrl_val | XMC_CTRL_ERR_CLR);
 		return -EIO;
@@ -4394,9 +4440,7 @@ static void clock_status_check(struct platform_device *pdev, bool *latched)
 		status = READ_RUNTIME_CS(xmc, XMC_CLOCK_SCALING_CLOCK_STATUS_REG);
 		if (status & 0x1) {
 			xocl_err(&pdev->dev, "Critical temperature event, "
-					"kernel clocks have been stopped, run "
-					"'xbutil validate -q' to continue. "
-					"See AR 73398 for more details.");
+					"kernel clocks have been stopped.");
 			/* explicitly indicate reset should be latched */
 			*latched = true;
 		}
@@ -5062,6 +5106,15 @@ xmc_update_sc_firmware(struct file *file, const char __user *ubuf,
 	ssize_t ret = 0;
 	u8 *kbuf;
 
+	mutex_lock(&xmc->xmc_lock);
+	if (xmc->state != XMC_STATE_ENABLED) {
+		xocl_err(&xmc->pdev->dev, "Card requires pci hot reset\n");
+		ret = -EACCES;
+	}
+	mutex_unlock(&xmc->xmc_lock);
+
+	if (ret)
+		return ret;
 	/* Sanity check input 'n' */
 	if (n == 0 || n > jump_offset || n > 100 * 1024 * 1024)
 		return -EINVAL;

@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2021 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -40,7 +40,6 @@ public:
   using compute_unit_range = compute_unit_vector_type;
   using compute_unit_iterator = compute_unit_vector_type::const_iterator;
   using memidx_type = xclbin::memidx_type;
-  using connidx_type = xclbin::connidx_type;
 
   /**
    * Construct an xocl::device.
@@ -420,33 +419,6 @@ public:
   void
   read_image(memory* image,const size_t* origin,const size_t* region,size_t row_pitch,size_t slice_pitch,void *ptr);
 
-  int
-  get_stream(xrt_xocl::device::stream_flags flags, xrt_xocl::device::stream_attrs attrs, const cl_mem_ext_ptr_t* ext, xrt_xocl::device::stream_handle* stream, int32_t& m_conn);
-
-  int
-  close_stream(xrt_xocl::device::stream_handle stream, int connidx);
-
-  ssize_t
-  write_stream(xrt_xocl::device::stream_handle stream, const void* ptr, size_t size, xrt_xocl::device::stream_xfer_req* req);
-
-  ssize_t
-  read_stream(xrt_xocl::device::stream_handle stream, void* ptr, size_t size, xrt_xocl::device::stream_xfer_req* req);
-
-  xrt_xocl::device::stream_buf
-  alloc_stream_buf(size_t size, xrt_xocl::device::stream_buf_handle* handle);
-
-  int
-  free_stream_buf(xrt_xocl::device::stream_buf_handle handle);
-
-  int
-  set_stream_opt(xrt_xocl::device::stream_handle stream, int type, uint32_t val);
-
-  int
-  poll_stream(xrt_xocl::device::stream_handle stream, xrt_xocl::device::stream_xfer_completions* comps, int min, int max, int* actual, int timeout);
-
-  int
-  poll_streams(xrt_xocl::device::stream_xfer_completions* comps, int min, int max, int* actual, int timeout);
-
   /**
    * Read a device register at specified offset
    *
@@ -509,10 +481,22 @@ public:
   /**
    * @return
    *  Current loaded xclbin
+   *
+   * Deprecated, to be removed when core xrt is used
    */
   XRT_XOCL_EXPORT
   xclbin
   get_xclbin() const;
+
+  /**
+   * @return 
+   *   Current loaded xrt::xclbin
+   */
+  const xrt::xclbin&
+  get_xrt_xclbin() const
+  {
+    return m_xclbin;
+  }
 
   /**
    * @return
@@ -685,9 +669,6 @@ public:
   size_t
   get_num_cdmas() const;
 
-  void
-  clear_connection(connidx_type conn);
-
 private:
 
   /**
@@ -726,11 +707,13 @@ private:
 
   unsigned int m_uid = 0;
   program* m_active = nullptr;   // program loaded on to this device
-  xclbin m_metadata;             // cache xclbin that came from program
+  xrt::xclbin m_xclbin;          // the xclbin loaded on this device
+  xclbin m_metadata;             // cache parsed meta data from xclbin
   unsigned int m_locks = 0;      // number of locks on this device
 
   platform* m_platform = nullptr;
   xrt_xocl::device* m_xdevice = nullptr;
+  xrt_core::device* m_cdevice = nullptr;  // in transition to core xrt
 
   // Set for sub-device only
   ptr<device> m_parent = nullptr;

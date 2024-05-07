@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2019-2021 Xilinx, Inc
+ * Copyright (C) 2019-2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -13,20 +13,24 @@
  * License for the specific language governing permissions and limitations
  * under the License.
  */
-
 #ifndef xclbin_parser_h_
 #define xclbin_parser_h_
 
-#include "core/common/config.h"
-#include "xclbin.h"
+#include "config.h"
+#include "cuidx_type.h"
+#include "core/include/xclbin.h"
+#include "core/include/xrt/xrt_uuid.h"
+
+#include <array>
+#include <limits>
+#include <map>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace xrt_core { namespace xclbin {
 
-/**
- * struct kernel_argument -
- */
+// struct kernel_argument - kernel argument meta data
 struct kernel_argument
 {
   static constexpr size_t no_index { std::numeric_limits<size_t>::max() };
@@ -37,6 +41,7 @@ struct kernel_argument
   std::string name;
   std::string hosttype;
   std::string port;
+  size_t port_width = 0;
   size_t index = no_index;
   size_t offset = 0;
   size_t size = 0;
@@ -46,15 +51,26 @@ struct kernel_argument
   direction dir;
 };
 
+// struct kernel_properties - kernel property metadata
 struct kernel_properties
 {
+  enum class kernel_type { none, pl, ps, dpu };
   enum class mailbox_type { none, in , out, inout };
   using restart_type = size_t;
   std::string name;
+  kernel_type type = kernel_type::none;
   restart_type counted_auto_restart = 0;
   mailbox_type mailbox = mailbox_type::none;
-  size_t address_range = 0;
+  size_t address_range = 0x10000;  // NOLINT, default address range
   bool sw_reset = false;
+  size_t functional = 0;
+  size_t kernel_id = 0;
+
+  // opencl specifics
+  size_t workgroupsize = 0;
+  std::array<size_t, 3> compileworkgroupsize {0};
+  std::array<size_t, 3> maxworkgroupsize {0};
+  std::map<uint32_t, std::string> stringtable;
 };
 
 struct kernel_object
@@ -65,14 +81,12 @@ struct kernel_object
   bool sw_reset;
 };
 
-/**
- * struct softkernel_object - wrapper for a soft kernel object
- *
- * @ninst: number of instances
- * @symbol_name: soft kernel symbol name
- * @size: size of soft kernel image
- * @sk_buf: pointer to the soft kernel buffer
- */
+// struct softkernel_object - wrapper for a soft kernel object
+//
+// @ninst: number of instances
+// @symbol_name: soft kernel symbol name
+// @size: size of soft kernel image
+// @sk_buf: pointer to the soft kernel buffer
 struct softkernel_object
 {
   uint32_t ninst;
@@ -83,6 +97,47 @@ struct softkernel_object
   char *sk_buf;
 };
 
+// struct aie_cdo_obj - wrapper for an AIE CDO group object
+//
+// @cdo_name: CDO group name
+// @cdo_type: CDO group type
+// @pdi_id: ID of this CDO group in PDI
+struct aie_cdo_group_obj
+{
+  std::string cdo_name;
+  uint8_t cdo_type;
+  uint64_t pdi_id;
+  std::vector<uint64_t> kernel_ids;
+};
+
+// struct aie_pdi_obj - wrapper for an AIE PDI object
+//
+// @uuid: PDI UUID
+// @cdo_groups: Array of CDO groups
+// @pdi: PDI blob
+struct aie_pdi_obj
+{
+  xrt::uuid uuid;
+  std::vector<aie_cdo_group_obj> cdo_groups;
+  std::vector<uint8_t> pdi;
+};
+
+// struct aie_partition_obj - wrapper for an AIE Partition object
+//
+// @ncol: number of columns in this partition
+// @start_col_list: Array of start column for partition relocation
+// @name: partition name
+// @ops_per_cycle: Operations per AIE cycle
+// @pdis: PDIs (blob and metadata) associated with this partition
+struct aie_partition_obj
+{
+  uint16_t ncol;
+  std::vector<uint16_t> start_col_list;
+  std::string name;
+  uint32_t ops_per_cycle;
+  std::vector<aie_pdi_obj> pdis;
+};
+
 /**
  * get_axlf_section_header() - retrieve axlf section header
  *
@@ -91,7 +146,7 @@ struct softkernel_object
  *
  * This function treats group sections conditionally based on
  * xrt.ini settings
- */ 
+ */
 XRT_CORE_COMMON_EXPORT
 const axlf_section_header*
 get_axlf_section(const axlf* top, axlf_section_kind kind);
@@ -136,6 +191,15 @@ get_first_used_mem(const axlf* top);
  */
 int32_t
 address_to_memidx(const mem_topology* mem, uint64_t address);
+
+// get_cu_indices() - mapping from cu name to its index type
+//
+// Compute index type for all controllable IPs in IP_LAYOUT Normally
+// indexing is determined by KDS in driver via kds_cu_info query
+// request, but in emulation mode that query request is not not
+// implemented
+std::map<std::string, cuidx_type>
+get_cu_indices(const ip_layout* ip_layout);
 
 /**
  * get_max_cu_size() - Compute max register map size of CUs in xclbin
@@ -252,6 +316,10 @@ get_dbg_ips_pair(const axlf* top);
 std::vector<softkernel_object>
 get_softkernels(const axlf* top);
 
+XRT_CORE_COMMON_EXPORT
+aie_partition_obj
+get_aie_partition(const axlf* top);
+
 /**
  * get_kernel_freq() - Get kernel frequency.
  */
@@ -289,7 +357,7 @@ get_kernel_arguments(const axlf* top, const std::string& kname);
  * @kname : Name of kernel
  * Return: Properties for kernel extracted from XML meta data
  */
-XRT_CORE_COMMON_EXPORT 
+XRT_CORE_COMMON_EXPORT
 kernel_properties
 get_kernel_properties(const char* xml_data, size_t xml_size, const std::string& kname);
 
@@ -300,7 +368,7 @@ get_kernel_properties(const char* xml_data, size_t xml_size, const std::string& 
  * @kname : Name of kernel
  * Return: Properties for kernel extracted from XML meta data
  */
-XRT_CORE_COMMON_EXPORT 
+XRT_CORE_COMMON_EXPORT
 kernel_properties
 get_kernel_properties(const axlf* top, const std::string& kname);
 
@@ -335,6 +403,26 @@ is_pdi_only(const axlf* top);
 XRT_CORE_COMMON_EXPORT
 std::string
 get_vbnv(const axlf* top);
+
+/**
+ * get_project_name() - Get the project name from the XML
+ */
+XRT_CORE_COMMON_EXPORT
+std::string
+get_project_name(const char* xml_data, size_t xml_size);
+
+/**
+ * get_project_name() - Get the project name from the XML
+ */
+XRT_CORE_COMMON_EXPORT
+std::string
+get_project_name(const axlf* top);
+
+/**
+ * get_project_name() - Get the project name from the XML
+ */
+std::string
+get_fpga_device_name(const char* xml_data, size_t xml_size);
 
 }} // xclbin, xrt_core
 

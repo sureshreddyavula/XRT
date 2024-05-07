@@ -1,18 +1,6 @@
-/**
- * Copyright (C) 2019 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019 Xilinx, Inc
+// Copyright (C) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 
 #include "app/xma_utils.hpp"
 #include "lib/xma_utils.hpp"
@@ -23,11 +11,13 @@
 #include "lib/xmalimits_lib.h"
 #include "ert.h"
 #include "core/common/config_reader.h"
-#include "core/pcie/linux/scan.h"
+#include "core/common/message.h"
+#include "core/pcie/linux/pcidev.h"
 #include "core/common/utils.h"
+#include "core/common/api/bo.h"
+#include "core/common/device.h"
 #include <dlfcn.h>
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
+#include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <bitset>
@@ -62,14 +52,16 @@ namespace xma_core {
         { ert_cmd_state::ERT_CMD_STATE_MAX, "MAX"}
     };
 
-    std::string get_cu_cmd_state(ert_start_kernel_cmd *cu_cmd) {
-        auto it = cu_cmdMap.find((ert_cmd_state)cu_cmd->state);
+    // get_cu_cmd_state() - Returns string format of ert_cmd_state, used for logging purpose.
+    std::string get_cu_cmd_state(ert_cmd_state state) {
+        auto it = cu_cmdMap.find(state);
         if (it == cu_cmdMap.end()) {
             return std::string("invalid");
         }
         return it->second;
     }
 
+    // get_session_name() - Returns XMA session name for the given input of XmaSessionType.
     std::string get_session_name(XmaSessionType eSessionType) {
         auto it = sessionMap.find(eSessionType);
         if (it == sessionMap.end()) {
@@ -78,6 +70,7 @@ namespace xma_core {
         return it->second;
     }
 
+    // finalize_ddr_index() - Allows user selected default ddr bank per XMA session.
     int32_t finalize_ddr_index(XmaHwKernel* kernel_info, int32_t req_ddr_index, int32_t& ddr_index, const std::string& prefix) {
         ddr_index = INVALID_M1;
         if (kernel_info->soft_kernel) {
@@ -106,32 +99,33 @@ namespace xma_core {
         return XMA_ERROR;
     }
 
+    // create_session_execbo() : Creates XmaHwExecBO object with xrt::Kernel.
     int32_t create_session_execbo(XmaHwSessionPrivate *priv, int32_t count, const std::string& prefix) {
-        for (int32_t d = 0; d < count; d++) {
-            xclBufferHandle  bo_handle = 0;
-            int       execBO_size = MAX_EXECBO_BUFF_SIZE;
-            //uint32_t  execBO_flags = (1<<31);
-            char     *bo_data;
-            bo_handle = xclAllocBO(priv->dev_handle, 
-                                    execBO_size, 
-                                    0, 
-                                    XCL_BO_FLAGS_EXECBUF);
-            if (!bo_handle || bo_handle == NULLBO) 
-            {
-                xma_logmsg(XMA_ERROR_LOG, prefix.c_str(), "Initalization of plugin failed. Failed to alloc execbo");
-                return XMA_ERROR;
+        try {
+            for (int32_t d = 0; d < count; d++) {
+                priv->kernel_execbos.emplace_back(XmaHwExecBO{});
+                XmaHwExecBO& dev_execbo = priv->kernel_execbos.back();
+                std::string cu_name{ reinterpret_cast<char*>(priv->kernel_info->name) };
+                auto pos = cu_name.find(":");
+                if (pos == std::string::npos) {
+                    xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "create_session_execbo - Invalid cu name %s\n", cu_name.c_str());
+                    return XMA_ERROR;
+                }
+                std::string kernel_name = cu_name.substr(0, pos);
+                std::string inst_name = cu_name.substr(pos + 1);
+                std::string updated_cu_name = kernel_name + ":{" + inst_name + "}";
+                dev_execbo.xrt_kernel = xrt::kernel(priv->dev_handle, priv->dev_handle.get_xclbin_uuid(), updated_cu_name);
+                dev_execbo.xrt_run = xrt::run(dev_execbo.xrt_kernel);
             }
-            bo_data = (char*)xclMapBO(priv->dev_handle, bo_handle, true);
-            memset((void*)bo_data, 0x0, execBO_size);
-
-            priv->kernel_execbos.emplace_back(XmaHwExecBO{});
-            XmaHwExecBO& dev_execbo = priv->kernel_execbos.back();
-            dev_execbo.handle = bo_handle;
-            dev_execbo.data = bo_data;
+            return XMA_SUCCESS;
         }
-        return XMA_SUCCESS;
+        catch (const xrt_core::system_error&) {
+            xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "create_session_execbo failed.");
+            return XMA_ERROR;
+        }
     }
 
+    // check_plugin_version() - Checks Plugin version.
     int32_t check_plugin_version(int32_t plugin_main_ver, int32_t plugin_sub_ver) {
         if ((plugin_main_ver == XMA_LIB_MAIN_VER && plugin_sub_ver < XMA_LIB_SUB_VER) || plugin_main_ver < XMA_LIB_MAIN_VER) {
             xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "Invalid plugin version. Expected plugin version is: %d.%d", XMA_LIB_MAIN_VER, XMA_LIB_SUB_VER);
@@ -148,8 +142,7 @@ namespace xma_core {
 namespace xma_core { namespace utils {
 
 constexpr std::uint64_t cu_base_min = 0x1800000;
-namespace bfs = boost::filesystem;
-
+namespace sfs = std::filesystem;
 
 static const char*
 emptyOrValue(const char* cstr)
@@ -158,26 +151,26 @@ emptyOrValue(const char* cstr)
 }
 
 int32_t
-directoryOrError(const bfs::path& path)
+directoryOrError(const sfs::path& path)
 {
-  if (!bfs::is_directory(path))
+  if (!sfs::is_directory(path))
       return XMA_ERROR;
 
    return XMA_SUCCESS;
 }
 
-static boost::filesystem::path&
+static std::filesystem::path&
 dllExt()
 {
-  static boost::filesystem::path sDllExt(".so");
+  static std::filesystem::path sDllExt(".so");
   return sDllExt;
 }
 
 inline bool
-isDLL(const bfs::path& path)
+isDLL(const sfs::path& path)
 {
-  return (bfs::exists(path)
-          && bfs::is_regular_file(path)
+  return (sfs::exists(path)
+          && sfs::is_regular_file(path)
           && path.extension()==dllExt());
 }
 
@@ -196,16 +189,17 @@ is_sw_emulation()
   return swem;
 }
 
+// load_libxrt() - Loads required XRT Libraries.
 int32_t
 load_libxrt()
 {
     dlerror();    /* Clear any existing error */
 
     // xrt
-    bfs::path xrt(emptyOrValue(std::getenv("XILINX_XRT")));
+    sfs::path xrt(emptyOrValue(std::getenv("XILINX_XRT")));
     if (xrt.empty()) {
         std::cout << "XMA INFO: XILINX_XRT env variable not set. Trying default /opt/xilinx/xrt" << std::endl;
-        xrt = bfs::path("/opt/xilinx/xrt");
+        xrt = sfs::path("/opt/xilinx/xrt");
     }
     if (directoryOrError(xrt) != XMA_SUCCESS) {
         std::cout << "XMA FATAL: XILINX_XRT env variable is not a directory: " << xrt.string() << std::endl;
@@ -213,7 +207,7 @@ load_libxrt()
     }
 
     // Load the xmaplugin library as it is a dependency for all plugins
-    bfs::path xma2plugin_lib(xrt / "lib/libxma2plugin.so");
+    sfs::path xma2plugin_lib(xrt / "lib/libxma2plugin.so");
     if (!isDLL(xma2plugin_lib)) {
         std::cout << "XMA FATAL: xma2plugin lib not found. Lib: " << xma2plugin_lib.string() << std::endl;
         return XMA_ERROR;
@@ -227,7 +221,7 @@ load_libxrt()
     }
 
     if (!isEmulationMode()) {
-        bfs::path p1(xrt / "lib/libxrt_core.so");
+        sfs::path p1(xrt / "lib/libxrt_core.so");
         if (isDLL(p1)) {
             void* xrthandle = dlopen(p1.string().c_str(), RTLD_NOW | RTLD_GLOBAL);
             if (!xrthandle)
@@ -240,7 +234,7 @@ load_libxrt()
             return 1;
         }
 
-        bfs::path p2(xrt / "lib/libxrt_aws.so");
+        sfs::path p2(xrt / "lib/libxrt_aws.so");
         if (isDLL(p2)) {
             void* xrthandle = dlopen(p2.string().c_str(), RTLD_NOW | RTLD_GLOBAL);
             if (!xrthandle)
@@ -275,7 +269,7 @@ load_libxrt()
             return XMA_ERROR;
         }
 
-        bfs::path p2(xrt / "lib/libxrt_swemu.so");
+        sfs::path p2(xrt / "lib/libxrt_swemu.so");
         sw_em_driver = p2.string();
 
         if (isDLL(sw_em_driver)) {
@@ -310,7 +304,7 @@ load_libxrt()
         return XMA_ERROR;
     }
 
-    bfs::path p1(xrt / "lib/libxrt_hwemu.so");
+    sfs::path p1(xrt / "lib/libxrt_hwemu.so");
     hw_em_driver = p1.string();
 
     if (isDLL(hw_em_driver)) {
@@ -329,14 +323,15 @@ load_libxrt()
     return XMA_ERROR;
 }
 
+// get_system_info() - Used for logging of XMA System info.
 void get_system_info() {
     static auto verbosity = xrt_core::config::get_verbosity();
     XmaLogLevelType level = (XmaLogLevelType) std::min({(uint32_t)XMA_INFO_LOG, (uint32_t)verbosity});
     xma_logmsg(level, "XMA-System-Info", "======= START =============");
-    for (unsigned j = 0; j < pcidev::get_dev_total(); j++) {
-        auto dev = pcidev::get_dev(j);
-        xma_logmsg(level, "XMA-System-Info", "dev index = %d; %s", j, dev->sysfs_name.c_str());
-        if (dev->is_ready) {
+    for (unsigned j = 0; j < xrt_core::pci::get_dev_total(); j++) {
+        auto dev = xrt_core::pci::get_dev(j);
+        xma_logmsg(level, "XMA-System-Info", "dev index = %d; %s", j, dev->m_sysfs_name.c_str());
+        if (dev->m_is_ready) {
             /* Let's keep this function as generic
             for more detials customers should use xbutil
             uint32_t hwcfg_dev_index = 0;
@@ -410,7 +405,8 @@ void get_system_info() {
 
     while (!g_xma_singleton->log_msg_list.empty()) {
         auto itr1 = g_xma_singleton->log_msg_list.begin();
-        xclLogMsg(NULL, (xrtLogMsgLevel)itr1->level, "XMA", itr1->msg.c_str());
+        xrt_core::message::send(static_cast<xrt_core::message::severity_level>(itr1->level),
+                                "XMA", itr1->msg.c_str());
         g_xma_singleton->log_msg_list.pop_front();
     }
 
@@ -418,6 +414,7 @@ void get_system_info() {
     g_xma_singleton->log_msg_list_locked = false;
 }
 
+// get_session_cmd_load() - Used for logging of XMA session info.
 void get_session_cmd_load() {
     static auto verbosity = xrt_core::config::get_verbosity();
     XmaLogLevelType level = (XmaLogLevelType) std::min({(uint32_t)XMA_INFO_LOG, (uint32_t)verbosity});
@@ -461,6 +458,7 @@ void get_session_cmd_load() {
     xma_logmsg(level, "XMA-Session-Stats", "--------\n");
 }
 
+// get_cu_index() -  Returns cu index for the given cu name.
 int32_t get_cu_index(int32_t dev_index, char* cu_name1) {
     //singleton should be locked before calling this function
     XmaHwCfg *hwcfg = &g_xma_singleton->hwcfg;
@@ -500,6 +498,7 @@ int32_t get_cu_index(int32_t dev_index, char* cu_name1) {
     return -1;
 }
 
+// get_default_ddr_index() - Returns default ddr index for the given cu index.
 int32_t get_default_ddr_index(int32_t dev_index, int32_t cu_index) {
     //singleton should be locked before calling this function
     XmaHwCfg *hwcfg = &g_xma_singleton->hwcfg;
@@ -539,6 +538,7 @@ int32_t get_default_ddr_index(int32_t dev_index, int32_t cu_index) {
     }
 }
 
+// check_all_execbo() -  Checks status of xrt::run objects.
 int32_t check_all_execbo(XmaSession s_handle) {
     //NOTE: execbo lock must be already obtained
     //Check only for commands in-progress in this sessions else too much checking will waste CPU cycles
@@ -553,46 +553,54 @@ int32_t check_all_execbo(XmaSession s_handle) {
             for (i = 0; i < num_execbo; i++) {
                 auto& ebo = priv1->kernel_execbos[i];
                 if (ebo.in_use) {
-                    ert_start_kernel_cmd *cu_cmd = 
-                        (ert_start_kernel_cmd*)ebo.data;
-                    if (cu_cmd->state == ERT_CMD_STATE_COMPLETED) {
+                    // only for PS Kernels, will be removed after PS kernel migration to xrt::kernel  
+                    auto cu_cmd_pkt = 
+                        reinterpret_cast<ert_start_kernel_cmd*>(ebo.xrt_run.get_ert_packet());
+                    if (!cu_cmd_pkt) {
+                        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "check_all_execbo : Invalid ert_start_kernel_cmd\n");
+                        return XMA_ERROR;
+                    }
+                    auto cu_state = ebo.xrt_run.state();
+                    if (cu_state == ERT_CMD_STATE_COMPLETED) {
                         if (s_handle.session_type < XMA_ADMIN) {
                             priv1->kernel_complete_count++;
                             priv1->kernel_complete_total++;
                         }
                         notify_execbo_is_free = true;
                         ebo.in_use = false;
-                        cu_cmd->state = ERT_CMD_STATE_MAX;
+                        //cu_cmd->state = ERT_CMD_STATE_MAX;
                         priv1->CU_cmds.erase(ebo.cu_cmd_id1);
                         priv1->num_cu_cmds--;
-                    } else if (cu_cmd->state == ERT_CMD_STATE_SKERROR) {
+                    } else if (cu_state == ERT_CMD_STATE_SKERROR) {
+                        uint32_t return_code;
                         //If PS Kernel error, add cmd obj to CU_error_cmds map; Right now this is only for PS Kernels
-                        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "Session id: %d, type: %s, PS Kernel error code: %d", s_handle.session_id, xma_core::get_session_name(s_handle.session_type).c_str(), cu_cmd->return_code);
+                        ert_read_return_code(cu_cmd_pkt, return_code);
+                        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "Session id: %d, type: %s, PS Kernel error code: %d", s_handle.session_id, xma_core::get_session_name(s_handle.session_type).c_str(), return_code);
                         if (s_handle.session_type < XMA_ADMIN) {
                             priv1->kernel_complete_count++;
                             priv1->kernel_complete_total++;
                         }
                         notify_execbo_is_free = true;
                         ebo.in_use = false;
-                        cu_cmd->state = ERT_CMD_STATE_MAX;
+                        //cu_cmd->state = ERT_CMD_STATE_MAX;
                         auto itr_tmp1 = priv1->CU_error_cmds.emplace(ebo.cu_cmd_id1, std::move(priv1->CU_cmds[ebo.cu_cmd_id1]));
                         priv1->CU_cmds.erase(ebo.cu_cmd_id1);
                         itr_tmp1.first->second.cmd_finished = true;
-                        itr_tmp1.first->second.return_code = cu_cmd->return_code;
+                        itr_tmp1.first->second.return_code = return_code;
                         itr_tmp1.first->second.cmd_state = xma_cmd_state::psk_error;
                         priv1->num_cu_cmds--;
-                    } else if (cu_cmd->state == ERT_CMD_STATE_ERROR ||
-                    	       cu_cmd->state == ERT_CMD_STATE_ABORT ||
-                    	       cu_cmd->state == ERT_CMD_STATE_TIMEOUT ||
-                    	       cu_cmd->state >= ERT_CMD_STATE_NORESPONSE) {
+                    } else if (cu_state == ERT_CMD_STATE_ERROR ||
+                        cu_state == ERT_CMD_STATE_ABORT ||
+                        cu_state == ERT_CMD_STATE_TIMEOUT ||
+                        cu_state >= ERT_CMD_STATE_NORESPONSE) {
                         //Check for invalid/error execo state
-                        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "Session id: %d, type: %s, Unexpected ERT_CMD_STATE. state=%s", s_handle.session_id, xma_core::get_session_name(s_handle.session_type).c_str(), xma_core::get_cu_cmd_state(cu_cmd).c_str());
+                        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "Session id: %d, type: %s, Unexpected ERT_CMD_STATE. state=%s", s_handle.session_id, xma_core::get_session_name(s_handle.session_type).c_str(), xma_core::get_cu_cmd_state(cu_state).c_str());
                         std::string err_tmp("XMA FATAL: Session id: ");
                         err_tmp.append(std::to_string(s_handle.session_id));
                         err_tmp.append(", type: ");
                         err_tmp.append(xma_core::get_session_name(s_handle.session_type));
                         err_tmp.append("; Unexpected ERT_CMD_STATE. state=");
-                        err_tmp.append(xma_core::get_cu_cmd_state(cu_cmd));
+                        err_tmp.append(xma_core::get_cu_cmd_state(cu_state));
                         throw std::runtime_error(err_tmp);
                     }
                 }
@@ -613,24 +621,32 @@ int32_t check_all_execbo(XmaSession s_handle) {
                 int32_t val = *ebo_it;
                 auto& ebo = priv1->kernel_execbos[val];
                 if (ebo.in_use) {
-                    ert_start_kernel_cmd *cu_cmd = 
-                        (ert_start_kernel_cmd*)ebo.data;
-                    if (cu_cmd->state == ERT_CMD_STATE_COMPLETED) {
+                    // only for PS Kernels, will be removed after PS kernel migration to xrt::kernel
+                    auto cu_cmd_pkt = 
+                        reinterpret_cast<ert_start_kernel_cmd*>(ebo.xrt_run.get_ert_packet());
+                    if (!cu_cmd_pkt) {
+                        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "check_all_execbo : Invalid ert_start_kernel_cmd\n");
+                        return XMA_ERROR;
+                    }
+                    auto cu_state = ebo.xrt_run.state();                    
+                    if (cu_state == ERT_CMD_STATE_COMPLETED) {
                         if (s_handle.session_type < XMA_ADMIN) {
                             priv1->kernel_complete_count++;
                             priv1->kernel_complete_total++;
                         }
                         ebo.in_use = false;
-                        cu_cmd->state = ERT_CMD_STATE_MAX;
+                        //cu_cmd->state = ERT_CMD_STATE_MAX;
                         notify_work_item_done_1plus = true;
                         notify_execbo_is_free = true;
                         priv1->CU_cmds.erase(ebo.cu_cmd_id1);
                         priv1->num_cu_cmds--;
                         //priv1->execbo_lru.emplace_back(val);Let's not reuse execbo immediately after completion
                         ebo_it = priv1->execbo_to_check.erase(ebo_it);
-                    } else if (cu_cmd->state == ERT_CMD_STATE_SKERROR) {
+                    } else if (cu_state == ERT_CMD_STATE_SKERROR) {
+                        uint32_t return_code;
                         //If PS Kernel error, add cmd obj to CU_error_cmds map; Right now this is only for PS Kernels
-                        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "Session id: %d, type: %s, PS Kernel error code: %d", s_handle.session_id, xma_core::get_session_name(s_handle.session_type).c_str(), cu_cmd->return_code);
+                        ert_read_return_code(cu_cmd_pkt, return_code);
+                        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "Session id: %d, type: %s, PS Kernel error code: %d", s_handle.session_id, xma_core::get_session_name(s_handle.session_type).c_str(), return_code);
                         if (s_handle.session_type < XMA_ADMIN) {
                             priv1->kernel_complete_count++;
                             priv1->kernel_complete_total++;
@@ -638,26 +654,26 @@ int32_t check_all_execbo(XmaSession s_handle) {
                         notify_execbo_is_free = true;
                         notify_work_item_done_1plus = true;
                         ebo.in_use = false;
-                        cu_cmd->state = ERT_CMD_STATE_MAX;
+                        //cu_cmd->state = ERT_CMD_STATE_MAX;
                         auto itr_tmp1 = priv1->CU_error_cmds.emplace(ebo.cu_cmd_id1, std::move(priv1->CU_cmds[ebo.cu_cmd_id1]));
                         priv1->CU_cmds.erase(ebo.cu_cmd_id1);
                         itr_tmp1.first->second.cmd_finished = true;
-                        itr_tmp1.first->second.return_code = cu_cmd->return_code;
+                        itr_tmp1.first->second.return_code = return_code;
                         itr_tmp1.first->second.cmd_state = xma_cmd_state::psk_error;
                         priv1->num_cu_cmds--;
                         ebo_it = priv1->execbo_to_check.erase(ebo_it);
-                    } else if (cu_cmd->state == ERT_CMD_STATE_ERROR ||
-                    	       cu_cmd->state == ERT_CMD_STATE_ABORT ||
-                    	       cu_cmd->state == ERT_CMD_STATE_TIMEOUT ||
-                    	       cu_cmd->state >= ERT_CMD_STATE_NORESPONSE) {
+                    } else if (cu_state == ERT_CMD_STATE_ERROR || 
+                        cu_state == ERT_CMD_STATE_ABORT ||
+                        cu_state == ERT_CMD_STATE_TIMEOUT ||
+                        cu_state >= ERT_CMD_STATE_NORESPONSE) {
                         //Check for invalid/error execo state
-                        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "Session id: %d, type: %s, Unexpected ERT_CMD_STATE. state=%s", s_handle.session_id, xma_core::get_session_name(s_handle.session_type).c_str(), xma_core::get_cu_cmd_state(cu_cmd).c_str());
+                        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "Session id: %d, type: %s, Unexpected ERT_CMD_STATE. state=%s", s_handle.session_id, xma_core::get_session_name(s_handle.session_type).c_str(), xma_core::get_cu_cmd_state(cu_state).c_str());
                         std::string err_tmp("XMA FATAL: Session id: ");
                         err_tmp.append(std::to_string(s_handle.session_id));
                         err_tmp.append(", type: ");
                         err_tmp.append(xma_core::get_session_name(s_handle.session_type));
                         err_tmp.append("; Unexpected ERT_CMD_STATE. state=");
-                        err_tmp.append(xma_core::get_cu_cmd_state(cu_cmd));
+                        err_tmp.append(xma_core::get_cu_cmd_state(cu_state));
                         throw std::runtime_error(err_tmp);
                     } else {
                         ebo_it++;
@@ -690,6 +706,29 @@ int32_t check_all_execbo(XmaSession s_handle) {
         }
     }
 
+    return XMA_SUCCESS;
+}
+
+// xma_check_device_buffer() - Checks the given XmaBufferObj is valid or not.
+int32_t xma_check_device_buffer(const XmaBufferObj* b_obj) {
+    if (!b_obj) {
+        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "xma_check_device_buffer failed. XMABufferObj failed allocation\n");
+        return XMA_ERROR;
+    }
+
+    auto b_obj_priv = reinterpret_cast<XmaBufferObjPrivate*>(b_obj->private_do_not_touch);
+    if (!b_obj_priv) {
+        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "xma_check_device_buffer failed. XMABufferObj failed allocation\n");
+        return XMA_ERROR;
+    }
+    if (b_obj->dev_index < 0 || xrt_core::bo::group_id(b_obj_priv->xrt_bo) < 0) {
+        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "xma_check_device_buffer failed. XMABufferObj failed allocation\n");
+        return XMA_ERROR;
+    }
+    if (b_obj_priv->dummy != (void*)(((uint64_t)b_obj_priv) | signature)) {
+        xma_logmsg(XMA_ERROR_LOG, XMAUTILS_MOD, "xma_check_device_buffer failed. XMABufferObj is corrupted.\n");
+        return XMA_ERROR;
+    }
     return XMA_SUCCESS;
 }
 

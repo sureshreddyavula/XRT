@@ -1,18 +1,6 @@
-/**
- * Copyright (C) 2019-2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2022 Xilinx, Inc
+// Copyright (C) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 
 #ifndef __XBUtilities_h_
 #define __XBUtilities_h_
@@ -22,92 +10,58 @@
 #include "core/common/device.h"
 #include "core/common/query_requests.h"
 
-#include <string>
-#include <memory>
-#include <map>
+#include <chrono>
 #include <iostream>
+#include <map>
+#include <memory>
+#include <string>
 #include <vector>
-#include <boost/property_tree/ptree.hpp>
-#include <boost/program_options.hpp>
+
 #include <boost/algorithm/string.hpp>
+#include <boost/program_options.hpp>
+#include <boost/property_tree/ptree.hpp>
 
 namespace XBUtilities {
-  typedef enum {
-    MT_MESSAGE,
-    MT_INFO,
-    MT_WARNING,
-    MT_ERROR,
-    MT_VERBOSE,
-    MT_FATAL,
-    MT_TRACE,
-    MT_UNKNOWN, 
-  } MessageType;
 
-  /**
-   * Enables / Disables verbosity
-   * 
-   * @param _bVerbose true - enable verbosity
-   *                  false - disable verbosity (default)
-   */
-  void setVerbose(bool _bVerbose);
-  bool getVerbose();
-  void setTrace(bool _bVerbose);
+  class Timer {
+  private:
+    std::chrono::high_resolution_clock::time_point m_time_start;
 
-  void setShowHidden(bool _bShowHidden);
-  bool getShowHidden();
+  public:
+    Timer() { reset(); }
 
-  void setForce(bool _bForce);
-  bool getForce();
+    std::chrono::duration<double> get_elapsed_time() 
+    {
+      std::chrono::high_resolution_clock::time_point time_end = std::chrono::high_resolution_clock::now();
+      return std::chrono::duration<double>(time_end - m_time_start);
+    }
 
-  void disable_escape_codes( bool _disable );
-  bool is_escape_codes_disabled();  
+    void reset() { m_time_start = std::chrono::high_resolution_clock::now(); }
 
-  void message_(MessageType _eMT, const std::string& _msg, bool _endl = true, std::ostream & _ostream = std::cout);
-
-  void message(const std::string& _msg, bool _endl = true, std::ostream & _ostream = std::cout); 
-  void info(const std::string& _msg, bool _endl = true);
-  void warning(const std::string& _msg, bool _endl = true);
-  void error(const std::string& _msg, bool _endl = true);
-  void verbose(const std::string& _msg, bool _endl = true);
-  void fatal(const std::string& _msg, bool _endl = true);
-  void trace(const std::string& _msg, bool _endl = true);
-
-  void trace_print_tree(const std::string & _name, 
-                        const boost::property_tree::ptree & _pt);
-
-  bool can_proceed(bool force=false);
+    static std::string
+    format_time(std::chrono::duration<double> duration);
+  };
+ 
   void can_proceed_or_throw(const std::string& info, const std::string& error);
 
-  void sudo_or_throw(const std::string& msg);
-  void print_exception_and_throw_cancel(const xrt_core::error& e);
-  void print_exception_and_throw_cancel(const std::runtime_error& e);
+  void print_exception(const std::system_error& e);
 
-  std::string wrap_paragraphs( const std::string & unformattedString,
-                               unsigned int indentWidth,
-                               unsigned int columnWidth,
-                               bool indentFirstLine);
+  void xrt_version_cmp(bool isUserDomain);
+
+
   void collect_devices( const std::set<std::string>  &_deviceBDFs,
                         bool _inUserDomain,
                         xrt_core::device_collection &_deviceCollection);
 
+  std::shared_ptr<xrt_core::device> get_device (const std::string& deviceBDF, bool in_user_domain, bool print_warning = true);
+
+  std::string get_device_class(const std::string& deviceBDF, bool in_user_domain);
+
   boost::property_tree::ptree
   get_available_devices(bool inUserDomain);
-  
-  template <typename T>
-  std::vector<T> as_vector( boost::property_tree::ptree const& pt, 
-                            boost::property_tree::ptree::key_type const& key) 
-  {
-    std::vector<T> r;
 
-    boost::property_tree::ptree::const_assoc_iterator it = pt.find(key);
-
-    if( it != pt.not_found()) {
-      for (auto& item : pt.get_child(key)) 
-        r.push_back(item.second);
-    }
-    return r;
-  }
-
+  std::string
+  str_available_devs(bool _inUserDomain);
 
    /**
    * get_axlf_section() - Get section from the file passed in
@@ -130,46 +84,71 @@ namespace XBUtilities {
 
   xrt_core::query::reset_type str_to_reset_obj(const std::string& str);
 
+  std::string
+  get_xrt_pretty_version();
+
   /**
-   * OEM ID is a unique number called as the 
+   * OEM ID is a unique number called as the
    * Private Enterprise Number (PEN) maintained by IANA
-   * 
+   *
    * Return: Manufacturer's name
    */
-  std::string 
+  std::string
   parse_oem_id(const std::string& oemid);
 
-  std::string 
+  std::string
   parse_clock_id(const std::string& id);
+
+
+  std::string
+  string_to_UUID(std::string str);
+
+  enum class unit
+  {
+    bytes,
+    Hertz
+  };
+  uint64_t
+  string_to_base_units(std::string str, const unit& conversion_unit);
+
+  inline bool
+  is_power_of_2(const uint64_t x)
+  {
+    /*
+    * Verify that the given value is greater than zero
+    * and that only one bit is set in the given value
+    * if only one bit is set this implies the given value is a power of 2
+    */
+    return (x != 0) && ((x & (x - 1)) == 0);
+  }
 
  /*
   * xclbin locking
   */
   struct xclbin_lock
   {
-    xclDeviceHandle m_handle;
+    xrt_core::device* m_device;
     xuid_t m_uuid;
 
-    xclbin_lock(std::shared_ptr<xrt_core::device> _dev)
-      : m_handle(_dev->get_device_handle())
+    xclbin_lock(xrt_core::device* device)
+      : m_device(device)
     {
-      auto xclbinid = xrt_core::device_query<xrt_core::query::xclbin_uuid>(_dev);
+      auto xclbinid = xrt_core::device_query<xrt_core::query::xclbin_uuid>(m_device);
 
       uuid_parse(xclbinid.c_str(), m_uuid);
 
       if (uuid_is_null(m_uuid))
         throw std::runtime_error("'uuid' invalid, please re-program xclbin.");
 
-      if (xclOpenContext(m_handle, m_uuid, std::numeric_limits<unsigned int>::max(), true))
-        throw std::runtime_error("'Failed to lock down xclbin");
+      m_device->open_context(m_uuid, std::numeric_limits<unsigned int>::max(), true);
     }
 
-    ~xclbin_lock(){
-      xclCloseContext(m_handle, m_uuid, std::numeric_limits<unsigned int>::max());
+    ~xclbin_lock()
+    {
+      m_device->close_context(m_uuid, std::numeric_limits<unsigned int>::max());
     }
   };
 
 };
 
 #endif
-

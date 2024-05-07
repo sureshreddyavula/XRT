@@ -1,18 +1,6 @@
-/**
- * Copyright (C) 2019-2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2020 Xilinx, Inc
+// Copyright (C) 2022 Advanced Micro Devices, Inc. - All rights reserved
 
 /*
  * Xilinx Management Proxy Daemon (MPD) for cloud.
@@ -31,7 +19,7 @@
 #include <netinet/in.h>
 #include <libudev.h>
 #include <boost/algorithm/string.hpp>
-#include "boost/filesystem.hpp"
+#include <filesystem>
 
 #include <fstream>
 #include <vector>
@@ -58,7 +46,12 @@ enum Hotplug_state {
     MAILBOX_ADDED,
 };
 static bool quit = false;
-static const std::string plugin_path("/opt/xilinx/xrt/lib/libmpd_plugin.so");
+#ifdef XRT_INSTALL_PREFIX
+    #define MPD_PLUGIN_PATH XRT_INSTALL_PREFIX "/xrt/lib/libmpd_plugin.so"
+#else
+    #define MPD_PLUGIN_PATH "/opt/xilinx/xrt/lib/libmpd_plugin.so"
+#endif
+static const std::string plugin_path(MPD_PLUGIN_PATH);
 static struct mpd_plugin_callbacks plugin_cbs;
 static std::map<std::string, std::atomic<bool>> threads_handling;
 static std::map<std::string, enum Hotplug_state> state_machine;
@@ -121,7 +114,7 @@ std::string Mpd::get_xocl_major_minor(const std::string &sysfs_name)
     if (!file_exist(sysfs_base + sysfs_name + "/drm"))
             return "";
 
-    boost::filesystem::directory_iterator dir(sysfs_base + sysfs_name + "/drm"), end;
+    std::filesystem::directory_iterator dir(sysfs_base + sysfs_name + "/drm"), end;
     while (dir != end) {
         std::string fn = dir->path().filename().string();
         if (fn.find("render") != std::string::npos) {
@@ -181,7 +174,7 @@ bool Mpd::device_in_container(const std::string major_minor, std::string &path)
     for (auto &t : folder) {
         if (!file_exist(cgroup_base + t))
             continue;
-        boost::filesystem::recursive_directory_iterator dir(cgroup_base + t), end;
+        std::filesystem::recursive_directory_iterator dir(cgroup_base + t), end;
         while (dir != end) {
             std::string fn = dir->path().filename().string();
             if (!fn.compare(target)) {
@@ -310,7 +303,7 @@ void Mpd::run()
      *
      */
     for (size_t i = 0; i < total; i++) {
-        std::string sysfs_name = pcidev::get_dev(i, true)->sysfs_name;
+        std::string sysfs_name = xrt_core::pci::get_dev(i, true)->m_sysfs_name;
 	std::string major_minor;;
 	major_minor = get_xocl_major_minor(sysfs_name);
 
@@ -328,7 +321,7 @@ void Mpd::run()
         if (total == 0)
             syslog(LOG_INFO, "no device found");
         for (size_t i = 0; i < total; i++) {
-            std::string sysfs_name = pcidev::get_dev(i, true)->sysfs_name;
+            std::string sysfs_name = xrt_core::pci::get_dev(i, true)->m_sysfs_name;
 
             if (state_machine[sysfs_name] != MAILBOX_ADDED)
                 continue;
@@ -524,6 +517,19 @@ int Mpd::localMsgHandler(const pcieFunc& dev, std::unique_ptr<sw_msg>& orig,
              *((int *)(processed->payloadData())));
         break;
     }
+    case XCL_MAILBOX_REQ_LOAD_SLOT_XCLBIN: {//mandatory for every plugin for multislot support
+        Sw_mb_container c(sizeof(int), orig->id());
+        if (plugin_cbs.mb_req.load_slot_xclbin) {
+            int *resp = reinterpret_cast<int *>(c.get_payload_buf());
+	    /* Req data has both slot id and xclbin data encoded */
+            const char *req_data = reinterpret_cast<char *>(req->data);
+            c.set_hook(std::bind(plugin_cbs.mb_req.load_slot_xclbin, dev.getIndex(), req_data, resp));
+        }
+        processed = c.get_response();
+        dev.log(LOG_INFO, "mpd daemon: response %d sent ret = %d", req->req,
+             *((int *)(processed->payloadData())));
+        break;
+    }
     case XCL_MAILBOX_REQ_PEER_DATA: {//optional. aws plugin need to implement this.
         xcl_mailbox_subdev_peer *subdev_req =
             reinterpret_cast<xcl_mailbox_subdev_peer *>(req->data);
@@ -666,7 +672,7 @@ int Mpd::localMsgHandler(const pcieFunc& dev, std::unique_ptr<sw_msg>& orig,
 // No retry is ever conducted.
 void Mpd::mpd_getMsg(size_t index)
 {
-    std::string sysfs_name = pcidev::get_dev(index, true)->sysfs_name;
+    std::string sysfs_name = xrt_core::pci::get_dev(index, true)->m_sysfs_name;
     std::shared_ptr<Msgq<queue_msg>> msgq = threads_msgq[sysfs_name];
     int msdfd = -1, mbxfd = -1;
     int ret = 0;
@@ -799,7 +805,7 @@ void Mpd::mpd_getMsg(size_t index)
         close(msdfd);
 
     dev.log(LOG_INFO, "mpd_getMsg thread for %s exit!!",
-	pcidev::get_dev(index)->sysfs_name.c_str());
+	xrt_core::pci::get_dev(index)->m_sysfs_name.c_str());
 }
 
 // Client of MPD handling msg. Will quit on any error from either local mailbox or socket fd.
@@ -807,7 +813,7 @@ void Mpd::mpd_getMsg(size_t index)
 void Mpd::mpd_handleMsg(size_t index)
 {
     pcieFunc dev(index);
-    std::string sysfs_name = pcidev::get_dev(index, true)->sysfs_name;
+    std::string sysfs_name = xrt_core::pci::get_dev(index, true)->m_sysfs_name;
     std::shared_ptr<Msgq<queue_msg>> msgq = threads_msgq[sysfs_name];
     for ( ;; ) {
         struct queue_msg msg;
@@ -824,7 +830,7 @@ void Mpd::mpd_handleMsg(size_t index)
     threads_handling[sysfs_name] = false;
 
     dev.log(LOG_INFO, "mpd_handleMsg thread for %s exit!!",
-	pcidev::get_dev(index)->sysfs_name.c_str());
+	xrt_core::pci::get_dev(index)->m_sysfs_name.c_str());
 }
 
 /*

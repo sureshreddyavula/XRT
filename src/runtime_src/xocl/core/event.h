@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -57,7 +57,7 @@ public:
   using event_callback_list = std::vector<event_callback_type>;
 
   using action_enqueue_type = std::function<void (event*)>;
-  using action_profile_type = std::function<void (event*, cl_int, const std::string&)>;
+  using action_profile_type = std::function<void (event*, cl_int)>;
   using action_debug_type = std::function<void (event*)>;
   using action_lop_type = std::function<void (event*, cl_int)>;
 
@@ -134,16 +134,16 @@ public:
   /*virtual*/ void
   set_profile_action(event::action_profile_type&& action)
   {
-    if (xrt_xocl::config::get_timeline_trace() ||
-	xrt_xocl::config::get_opencl_trace())
+    if (xrt_xocl::config::get_opencl_trace() ||
+        xrt_xocl::config::get_host_trace())
       m_profile_action = std::move(action);
   }
 
   void
   set_profile_counter_action(event::action_profile_type&& action)
   {
-    if (xrt_xocl::config::get_profile() ||
-	xrt_xocl::config::get_opencl_summary())
+    if (xrt_xocl::config::get_opencl_trace() ||
+        xrt_xocl::config::get_host_trace())
       m_profile_counter_action = std::move(action) ;
   }
 
@@ -163,17 +163,17 @@ public:
    * doesn't enable profiling.
    */
   /*virtual*/ void
-  trigger_profile_action(cl_int status, const std::string& cuname= "")
+  trigger_profile_action(cl_int status)
   {
     if (m_profile_action)
-      m_profile_action(this,status,cuname);
+      m_profile_action(this,status);
   }
 
   void
-  trigger_profile_counter_action(cl_int status, const std::string& cuname = "")
+  trigger_profile_counter_action(cl_int status)
   {
     if (m_profile_counter_action)
-      m_profile_counter_action(this, status, cuname) ;
+      m_profile_counter_action(this, status) ;
   }
 
   void
@@ -617,10 +617,10 @@ public:
   }
 
   void
-  trigger_profile_action(cl_int status, const std::string& cuname="")
+  trigger_profile_action(cl_int status)
   {
     if (m_profile_action)
-      m_profile_action(this,status,cuname);
+      m_profile_action(this,status);
   }
 #endif
 

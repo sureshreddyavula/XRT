@@ -1,25 +1,14 @@
-/**
- * Copyright (C) 2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2020-2022 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
 #ifndef PCIE_NOOP_DEVICE_LINUX_H
 #define PCIE_NOOP_DEVICE_LINUX_H
 
 #include "core/common/ishim.h"
 #include "core/common/query_requests.h"
 #include "core/pcie/common/device_pcie.h"
+
+#include "shim_int.h"
 
 namespace xrt_core { namespace noop {
 
@@ -33,9 +22,39 @@ public:
 private:
   // Private look up function for concrete query::request
   virtual const query::request&
-  lookup_query(query::key_type query_key) const
+  lookup_query(query::key_type query_key) const override;
+
+  std::unique_ptr<hwctx_handle>
+  create_hw_context(const xrt::uuid& xclbin_uuid,
+                    const xrt::hw_context::cfg_param_type& cfg_param,
+                    xrt::hw_context::access_mode mode) const override
   {
-    throw query::no_such_key(query_key);
+    return xrt::shim_int::create_hw_context(get_device_handle(), xclbin_uuid, cfg_param, mode);
+  }
+
+  void
+  register_xclbin(const xrt::xclbin& xclbin) const override
+  {
+    xrt::shim_int::register_xclbin(get_device_handle(), xclbin);
+  }
+
+  std::unique_ptr<buffer_handle>
+  alloc_bo(size_t size, uint64_t flags) override
+  {
+    return xrt::shim_int::alloc_bo(get_device_handle(), size, xcl_bo_flags{flags}.flags);
+  }
+
+  std::unique_ptr<buffer_handle>
+  alloc_bo(void* userptr, size_t size, uint64_t flags) override
+  {
+    return xrt::shim_int::alloc_bo(get_device_handle(), userptr, size, xcl_bo_flags{flags}.flags);
+  }
+
+  void
+  get_device_info(xclDeviceInfo2 *info) override
+  {
+    if (auto ret = xclGetDeviceInfo2(get_device_handle(), info))
+      throw system_error(ret, "failed to get device info");
   }
 };
 

@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
+ * Copyright (C) 2022-2024 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,69 +15,62 @@
  * under the License.
  */
 
-#define XDP_SOURCE
+#define XDP_PLUGIN_SOURCE
 
+#include <array>
 #include <string>
 #include <vector>
-#include <iostream>
 
 // For HAL applications
-#include "core/common/xrt_profiling.h"
 #include "core/common/message.h"
+#include "core/common/system.h"
+#include "core/include/xrt/xrt_device.h"
 
-#include "xdp/profile/writer/device_trace/device_trace_writer.h"
-
-#include "xdp/profile/plugin/device_offload/hal/hal_device_offload_plugin.h"
 #include "xdp/profile/database/database.h"
-#include "xdp/profile/plugin/vp_base/utility.h"
-
 #include "xdp/profile/device/device_intf.h"
 #include "xdp/profile/device/hal_device/xdp_hal_device.h"
-#include "xdp/profile/database/events/creator/device_event_trace_logger.h"
-
-#include "core/common/system.h"
-#include "core/common/message.h"
+#include "xdp/profile/device/utility.h"
+#include "xdp/profile/plugin/device_offload/hal/hal_device_offload_plugin.h"
+#include "xdp/profile/plugin/vp_base/info.h"
+#include "xdp/profile/plugin/vp_base/utility.h"
+#include "xdp/profile/writer/device_trace/device_trace_writer.h"
 
 namespace xdp {
 
   HALDeviceOffloadPlugin::HALDeviceOffloadPlugin() : DeviceOffloadPlugin()
   {
-    // If we aren't the plugin that is handling the device offload, don't
-    //  do anything.
-    if (!active) return ;
+    db->registerInfo(info::device_offload) ;
 
-    // Open all of the devices that exist so we can keep our own pointer
-    //  to access them.
-    uint32_t index = 0 ;
-    void* handle = xclOpen(index, "/dev/null", XCL_INFO) ;
-    
-    while (handle != nullptr)
-    {
-      // First, keep track of all open handles
-      deviceHandles.push_back(handle) ;
+    // Open all existing devices so that XDP can access the owned handles
+    uint32_t numDevices = xrt_core::get_total_devices(true).second;
+    uint32_t index = 0;
+    while (index < numDevices) {
+      try {
+        xrtDevices.push_back(std::make_unique<xrt::device>(index));
 
-      // Second, add all the information and a writer for this device
-      char pathBuf[512] ;
-      memset(pathBuf, 0, 512) ;
-      xclGetDebugIPlayoutPath(handle, pathBuf, 512) ;
+        auto ownedHandle = xrtDevices[index]->get_handle()->get_device_handle();
+        std::string path = util::getDebugIpLayoutPath(ownedHandle);
 
-      std::string path(pathBuf) ;
-      addDevice(path) ;
+        if ("" != path) {
+          addDevice(path); 
 
-      // Now, keep track of the device ID for this device so we can use
-      //  our own handle
-      deviceIdToHandle[db->addDevice(path)] = handle ;
+          // Now, map device ID of this device with device handle owned by XDP
+          deviceIdToHandle[db->addDevice(path)] = ownedHandle;
+        }
 
-      // Move on to the next device
-      ++index ;
-      handle = xclOpen(index, "/dev/null", XCL_INFO) ;
+        // Move on to the next device
+        ++index;
+      } catch (const std::runtime_error& e) {
+        std::string msg = "Could not open device at index " + std::to_string(index) + e.what();
+        xrt_core::message::send(xrt_core::message::severity_level::error, "XRT", msg);
+        ++index;
+        continue;
+      }
     }
   }
 
   HALDeviceOffloadPlugin::~HALDeviceOffloadPlugin()
   {
-    if (!active) return ;
-
     if (VPDatabase::alive())
     {
       // If we are destroyed before the database, we need to
@@ -86,77 +80,38 @@ namespace xdp {
 
       readTrace() ;
       readCounters() ;
-      XDPPlugin::endWrite(false);
+      XDPPlugin::endWrite();
       db->unregisterPlugin(this) ;
     }
 
     clearOffloaders();
-
-    for (auto h : deviceHandles)
-    {
-      xclClose(h) ;
-    }
   }
 
   void HALDeviceOffloadPlugin::readTrace()
   {
-    if (!active) return ;
-
-    for (auto o : offloaders) {
+    for (const auto& o : offloaders) {
       auto offloader = std::get<0>(o.second) ;
-
-      try {
-        if(offloader->continuous_offload()) {
-          offloader->stop_offload();
-          // To avoid a race condition, wait until the thread is stopped
-          while (offloader->get_status() != OffloadThreadStatus::STOPPED) ;
-        } else {
-          offloader->read_trace();
-          offloader->read_trace_end();
-        }
-        checkTraceBufferFullness(offloader, o.first);
-      } catch (std::exception& /*e*/) {
-      }
+      flushTraceOffloader(offloader);
+      checkTraceBufferFullness(offloader, o.first);
     }
-  }
-
-  void HALDeviceOffloadPlugin::writeAll(bool openNewFiles)
-  {
-    if (!active) return ;
-    DeviceOffloadPlugin::writeAll(openNewFiles) ;
   }
 
   // This function will only be called if an active device is going
   //  to be reprogrammed.  We can assume the device is good.
   void HALDeviceOffloadPlugin::flushDevice(void* handle)
   {
-    if (!active) return ;
-    
     // For HAL devices, the pointer passed in is an xrtDeviceHandle
-    char pathBuf[512] ;
-    memset(pathBuf, 0, 512) ;
-    xclGetDebugIPlayoutPath(handle, pathBuf, 512) ;
-
-    std::string path(pathBuf) ;
+    std::string path = util::getDebugIpLayoutPath(handle);
+    if (path == "")
+      return ;
     
     uint64_t deviceId = db->addDevice(path) ;
 
-    if (offloaders.find(deviceId) != offloaders.end())
-    {
-      try {
-        auto offloader = std::get<0>(offloaders[deviceId]) ;
-        if (offloader->continuous_offload()) {
-          offloader->stop_offload() ;
-          // To avoid a race condition, wait until the offloader has stopped
-          while(offloader->get_status() != OffloadThreadStatus::STOPPED) ;
-        }
-        else {
-          offloader->read_trace() ;
-        }
-      } catch (std::exception& /*e*/) {
-      }
+    if (offloaders.find(deviceId) != offloaders.end()) {
+      auto offloader = std::get<0>(offloaders[deviceId]) ;
+      flushTraceOffloader(offloader);
     }
-    readCounters() ;
+    readCounters();
 
     clearOffloader(deviceId) ;
     (db->getStaticInfo()).deleteCurrentlyUsedDeviceInterface(deviceId) ;
@@ -164,17 +119,13 @@ namespace xdp {
 
   void HALDeviceOffloadPlugin::updateDevice(void* userHandle)
   {
-    if (!active) return ;
-
     // For HAL devices, the pointer passed in is an xrtDeviceHandle.
     //  We will query information on that passed in handle, but we
     //  should user our own locally opened handle to access the physical
     //  device.
-    char pathBuf[512] ;
-    memset(pathBuf, 0, 512) ;
-    xclGetDebugIPlayoutPath(userHandle, pathBuf, 512) ;
-
-    std::string path(pathBuf) ;
+    std::string path = util::getDebugIpLayoutPath(userHandle);
+    if (path == "")
+      return ;
 
     uint64_t deviceId = db->addDevice(path) ;
     void* ownedHandle = deviceIdToHandle[deviceId] ;
@@ -197,31 +148,16 @@ namespace xdp {
     //  will be needed later
     (db->getStaticInfo()).updateDevice(deviceId, userHandle) ;
     {
-      struct xclDeviceInfo2 info ;
-      if (xclGetDeviceInfo2(userHandle, &info) == 0)
-      {
-        (db->getStaticInfo()).setDeviceName(deviceId, std::string(info.mName));
-      }
+      std::string deviceName = util::getDeviceName(userHandle);
+      if (deviceName != "")
+        (db->getStaticInfo()).setDeviceName(deviceId, deviceName);
     }
 
     // For the HAL level, we must create a device interface using 
     //  the xdp::HalDevice to communicate with the physical device
     DeviceIntf* devInterface = (db->getStaticInfo()).getDeviceIntf(deviceId);
-    if(nullptr == devInterface) {
-      // If DeviceIntf is not already created, create a new one to communicate with physical device
-      devInterface = new DeviceIntf() ;
-      try {
-        devInterface->setDevice(new HalDevice(ownedHandle)) ;
-        devInterface->readDebugIPlayout() ;      
-      }
-      catch(std::exception& /*e*/)
-      {
-        // Read debug IP layout could throw an exception
-        delete devInterface ;
-        return;
-      }
-      (db->getStaticInfo()).setDeviceIntf(deviceId, devInterface);
-    }
+    if (devInterface == nullptr)
+      devInterface = db->getStaticInfo().createDeviceIntf(deviceId, new HalDevice(ownedHandle));
 
     configureDataflow(deviceId, devInterface) ;
     addOffloader(deviceId, devInterface) ;
@@ -236,8 +172,10 @@ namespace xdp {
 
     // Once the device has been set up, add additional information to 
     //  the static database
-    (db->getStaticInfo()).setMaxReadBW(deviceId, devInterface->getMaxBwRead()) ;
-    (db->getStaticInfo()).setMaxWriteBW(deviceId, devInterface->getMaxBwWrite());
+    (db->getStaticInfo()).setHostMaxReadBW(deviceId, devInterface->getHostMaxBwRead()) ;
+    (db->getStaticInfo()).setHostMaxWriteBW(deviceId, devInterface->getHostMaxBwWrite());
+    (db->getStaticInfo()).setKernelMaxReadBW(deviceId, devInterface->getKernelMaxBwRead()) ;
+    (db->getStaticInfo()).setKernelMaxWriteBW(deviceId, devInterface->getKernelMaxBwWrite());
   }
   
 } // end namespace xdp

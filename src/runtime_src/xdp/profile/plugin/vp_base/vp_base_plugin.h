@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -41,18 +42,20 @@ namespace xdp {
     std::atomic<bool> is_write_thread_active;
     std::thread write_thread;
     // Trace dump thread control
-    bool stop_writer = false;
-    std::mutex mtx_writer;
-    std::condition_variable cv_writer;
+    bool stop_writer_thread = false;
+    std::mutex mtx_writer_thread;
+    std::condition_variable cv_writer_thread;
     // Returns false if stop_trace_dump == true.
     // Stops trace writing thread when host program is ending
     // even if the thread is asleep
     template<class Duration>
     bool writeCondWaitFor(Duration duration) {
-      std::unique_lock<std::mutex> lk(mtx_writer);
-      return !cv_writer.wait_for(lk, duration, [this]() { return stop_writer; });
+      std::unique_lock<std::mutex> lk(mtx_writer_thread);
+      return !cv_writer_thread.wait_for(lk, duration, [this]() { return stop_writer_thread; });
     }
-    void writeContinuous(unsigned int interval, std::string type);
+    void writeContinuous(unsigned int interval, std::string type, bool openNewFiles);
+    // Mutex to access writer list
+    std::mutex mtx_writer_list;
 
   protected:
     // A link to the single instance of the database that all plugins
@@ -64,27 +67,28 @@ namespace xdp {
 
     // If there is something that is common amongst all plugins when
     //  dealing with emulation flows.
-    XDP_EXPORT virtual void emulationSetup() ;
+    XDP_CORE_EXPORT virtual void emulationSetup() ;
 
-    XDP_EXPORT void startWriteThread(unsigned int interval, std::string type);
-    XDP_EXPORT void endWrite(bool openNewFiles);
+    XDP_CORE_EXPORT void startWriteThread(unsigned int interval, std::string type, bool openNewFiles = true);
+    XDP_CORE_EXPORT void endWrite();
+    XDP_CORE_EXPORT void trySafeWrite(const std::string& type, bool openNewFiles);
 
   public:
-    XDP_EXPORT XDPPlugin() ;
-    XDP_EXPORT virtual ~XDPPlugin() ;
+    XDP_CORE_EXPORT XDPPlugin() ;
+    XDP_CORE_EXPORT virtual ~XDPPlugin() ;
     
     inline VPDatabase* getDatabase() { return db ; }
 
     // When the database gets reset or at the end of execution,
     //  the plugins must make sure all of their writers dump a complete file
-    XDP_EXPORT virtual void writeAll(bool openNewFiles = true) ;
+    XDP_CORE_EXPORT virtual void writeAll(bool openNewFiles = true) ;
 
     // Messages may be broadcast from the database to all plugins using
     //  this function
-    XDP_EXPORT virtual void broadcast(VPDatabase::MessageType msg,
+    XDP_CORE_EXPORT virtual void broadcast(VPDatabase::MessageType msg,
 				      void* blob = nullptr) ;
 
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     static unsigned int get_trace_file_dump_int_s ();
   } ;
 

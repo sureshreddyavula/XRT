@@ -8,12 +8,11 @@ if (XMA_VERBOSE)
 endif()
 
 add_compile_options("-fPIC")
-add_compile_options("-Wall" "-Werror")
+add_compile_options( ${XRT_WARN_OPTS} )
 set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-Bsymbolic")
 set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
 
 add_subdirectory(src)
-add_subdirectory(xma_legacy)
 
 #Install all header files with directory structure
 #Don't remove trailing/ in include/

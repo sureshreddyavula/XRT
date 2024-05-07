@@ -1,71 +1,105 @@
-/*
- *  Copyright (C) 2021, Xilinx Inc
- *
- *  This file is dual licensed.  It may be redistributed and/or modified
- *  under the terms of the Apache 2.0 License OR version 2 of the GNU
- *  General Public License.
- *
- *  Apache License Verbiage
- *
- *  Licensed under the Apache License, Version 2.0 (the "License");
- *  you may not use this file except in compliance with the License.
- *  You may obtain a copy of the License at
- *
- *  http://www.apache.org/licenses/LICENSE-2.0
- *
- *  Unless required by applicable law or agreed to in writing, software
- *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- *  See the License for the specific language governing permissions and
- *  limitations under the License.
- *
- *  GPL license Verbiage:
- *
- *  This program is free software; you can redistribute it and/or
- *  modify it under the terms of the GNU General Public License as
- *  published by the Free Software Foundation; either version 2 of the
- *  License, or (at your option) any later version.  This program is
- *  distributed in the hope that it will be useful, but WITHOUT ANY
- *  WARRANTY; without even the implied warranty of MERCHANTABILITY or
- *  FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
- *  License for more details.  You should have received a copy of the
- *  GNU General Public License along with this program; if not, write
- *  to the Free Software Foundation, Inc., 59 Temple Place, Suite 330,
- *  Boston, MA 02111-1307 USA
- *
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2021-2022 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
+#ifndef SHIM_INT_H_
+#define SHIM_INT_H_
 
-#ifndef _SHIM_INT_H_
-#define _SHIM_INT_H_
+#include "core/include/xrt.h"
+#include "core/include/xrt_hwqueue.h"
+#include "core/include/xrt/xrt_hw_context.h"
+#include "core/common/cuidx_type.h"
+#include "core/common/shim/buffer_handle.h"
+#include "core/common/shim/hwctx_handle.h"
+#include "core/common/shim/hwqueue_handle.h"
+#include "core/common/shim/shared_handle.h"
 
+#include <string>
 
-/* This file defines internal shim APIs, which is not end user visible.
- * You cannot include this file without include xrt.h.
- * This header file should not be published to xrt release include/ folder.
- */
-#ifdef _XCL_XRT_CORE_H_
+namespace xrt {
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+class xclbin;
+class uuid;
 
-/**
- * xclOpenByBDF() - Open a device and obtain its handle by PCI BDF
- *
- * @bdf:           Deice PCE BDF
- *
- * Return:         Device handle
- */
+namespace shim_int {
+
+// This file defines internal shim APIs, which is not end user visible.
+// This header file should not be published to xrt release include/ folder.
+
+// open_by_bdf() - Open a device and obtain its handle by PCI BDF
+//
+// @bdf:           Deice PCE BDF
+// Return:         Device handle
+//
+// Throws on error
 XCL_DRIVER_DLLESPEC
 xclDeviceHandle
-xclOpenByBDF(const char *bdf);
+open_by_bdf(const std::string& bdf);
 
-#ifdef __cplusplus
-}
-#endif
+// open_cu_context() - Open a shared/exclusive context on a named compute unit
+//
+// @handle:        Device handle
+// @hwctx:         Hardware context in which to open the CU
+// @cuname:        Name of compute unit to open
+// Returns:        The cuidx assigned by the driver
+//
+// Throws on error
+xrt_core::cuidx_type
+open_cu_context(xclDeviceHandle handle, const xrt::hw_context& hwctx, const std::string& cuname);
 
-#else
-#error "Must include xrt.h before include this file"
-#endif
+// close_cu_context() - Close a previously opened CU context
+//
+// @handle:        Device handle
+// @hwctx:         The hardware context in which this CU was opened
+// @cuidx:         UUID of the xclbin image with the CU to open a context on
+//
+// Throws on error, e.g. the CU context was not opened previously
+void
+close_cu_context(xclDeviceHandle handle, const xrt::hw_context& hwctx, xrt_core::cuidx_type cuidx);
+
+// alloc_bo()
+std::unique_ptr<xrt_core::buffer_handle>
+alloc_bo(xclDeviceHandle, size_t size, unsigned int flags);
+
+// alloc_userptr_bo()
+std::unique_ptr<xrt_core::buffer_handle>
+alloc_bo(xclDeviceHandle, void* userptr, size_t size, unsigned int flags);
+
+// import_bo
+std::unique_ptr<xrt_core::buffer_handle>
+import_bo(xclDeviceHandle, xrt_core::shared_handle::export_handle);
+
+// create_hw_context() -
+std::unique_ptr<xrt_core::hwctx_handle>
+create_hw_context(xclDeviceHandle handle,
+                  const xrt::uuid& xclbin_uuid,
+                  const xrt::hw_context::cfg_param_type& cfg_param,
+                  xrt::hw_context::access_mode mode);
+
+// get_hw_queue() -
+xrt_core::hwqueue_handle*
+get_hw_queue(xclDeviceHandle handle, xrt_core::hwctx_handle* ctxhdl);
+
+// register_xclbin() -
+void
+register_xclbin(xclDeviceHandle handle, const xrt::xclbin& xclbin);
+
+// submit_command() -
+void
+submit_command(xclDeviceHandle handle, xrt_core::hwqueue_handle* qhdl, xrt_core::buffer_handle* cmdbo);
+
+// wait_command() -
+int
+wait_command(xclDeviceHandle handle, xrt_core::hwqueue_handle* qhdl, xrt_core::buffer_handle* cmdbo, int timeout_ms);
+
+// exec_buf() - Exec Buf with hw ctx handle.
+void
+exec_buf(xclDeviceHandle handle, xrt_core::buffer_handle* bohdl, xrt_core::hwctx_handle* ctxhdl);
+
+// get_buffer_handle - get xrt_core::buffer handle from
+// raw handle returned by shim, this function is implemented
+// only in edge shim
+std::unique_ptr<xrt_core::buffer_handle>
+get_buffer_handle(xclDeviceHandle handle, unsigned int bhdl);
+}} // shim_int, xrt
 
 #endif

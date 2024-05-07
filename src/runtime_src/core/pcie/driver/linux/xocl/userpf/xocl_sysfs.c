@@ -1,23 +1,15 @@
-/*
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright (C) 2016-2020 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
  * A GEM style device manager for PCIe based OpenCL accelerators.
  *
- * Copyright (C) 2016-2020 Xilinx, Inc. All rights reserved.
- *
  * Authors: Lizhi.Hou@xilinx.com
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 #include "common.h"
+#include "xclfeatures.h"
 #include "kds_core.h"
 
-extern int kds_mode;
 extern int kds_echo;
 
 /* Attributes followed by bin_attributes. */
@@ -31,13 +23,22 @@ static ssize_t xclbinuuid_show(struct device *dev,
 	xuid_t *xclbin_id = NULL;
 	ssize_t cnt = 0;
 	int err = 0;
+	int i = 0;
 
-	err = XOCL_GET_XCLBIN_ID(xdev, xclbin_id);
-	if (err)
-		return cnt;
+	for (i = 0; i < MAX_SLOT_SUPPORT; i++) {
+		err = XOCL_GET_XCLBIN_ID(xdev, xclbin_id, i);
+		if (err)
+			return cnt;
 
-	cnt = sprintf(buf, "%pUb\n", xclbin_id ? xclbin_id : 0);
-	XOCL_PUT_XCLBIN_ID(xdev);
+		if (!xclbin_id)
+			continue;
+
+		cnt += sprintf(buf + cnt, "%pUb\n", xclbin_id ? xclbin_id : 0);
+
+		XOCL_PUT_XCLBIN_ID(xdev, i);
+		xclbin_id = NULL;
+	}
+
 	return cnt;
 }
 
@@ -78,18 +79,13 @@ static ssize_t xocl_errors_show(struct device *dev,
 {
 	struct xocl_dev *xdev = dev_get_drvdata(dev);
 	struct xcl_errors *err = xdev->core.errors;
-	int size = 0, i = 0;
+	int size = 0;
 	if (!err)
-		return sprintf(buf, "%s\n", "Error: Device errors not found");
+		return sprintf(buf, "%d%d, %s\n", 0, 0, "Error: Device errors not found");
 
-	size += sprintf(buf, "Num of xocl_errors: %d\n", err->num_err);
-	for (i = 0; i < err->num_err; i++) {
-		size += sprintf(buf + size, "Error# %d: PID: %d, Timestamp: %llu, Class: %llu, Module: %llu, Severity: %llu, Code: %llu\n", 
-			i, err->errors[i].pid, err->errors[i].ts, XRT_ERROR_CLASS(err->errors[i].err_code),
-			XRT_ERROR_MODULE(err->errors[i].err_code),
-			XRT_ERROR_SEVERITY(err->errors[i].err_code),
-			XRT_ERROR_NUM(err->errors[i].err_code));
-	}
+	size = sizeof(xcl_errors);
+
+	memcpy(buf, err, size);
 	return size;
 }
 static DEVICE_ATTR_RO(xocl_errors);
@@ -102,16 +98,26 @@ static ssize_t kdsstat_show(struct device *dev,
 	int size = 0, err;
 	xuid_t *xclbin_id = NULL;
 	pid_t *plist = NULL;
-	u32 clients, i;
+	u32 clients = 0;
+	u32 i = 0;
 
-	err = XOCL_GET_XCLBIN_ID(xdev, xclbin_id);
-	if (err) {
-		size += sprintf(buf + size, "unable to give xclbin id");
-		return size;
+	for (i = 0; i < MAX_SLOT_SUPPORT; i++) {
+		err = XOCL_GET_XCLBIN_ID(xdev, xclbin_id, i);
+		if (err) {
+			size += sprintf(buf + size, "unable to give xclbin id");
+			return size;
+		}
+
+		if (!xclbin_id)
+			continue;
+
+		size += sprintf(buf + size, "xclbin:\t\t\t%pUb\n",
+				xclbin_id ? xclbin_id : 0);
+		
+		XOCL_PUT_XCLBIN_ID(xdev, i);
+		xclbin_id = NULL;
 	}
 
-	size += sprintf(buf + size, "xclbin:\t\t\t%pUb\n",
-		xclbin_id ? xclbin_id : 0);
 	size += sprintf(buf + size, "outstanding execs:\t%d\n",
 		atomic_read(&xdev->outstanding_execs));
 	size += sprintf(buf + size, "total execs:\t\t%lld\n",
@@ -123,7 +129,6 @@ static ssize_t kdsstat_show(struct device *dev,
 	for (i = 0; i < clients; i++)
 		size += sprintf(buf + size, "\t\t\t%d\n", plist[i]);
 	vfree(plist);
-	XOCL_PUT_XCLBIN_ID(xdev);
 	return size;
 }
 static DEVICE_ATTR_RO(kdsstat);
@@ -140,10 +145,13 @@ static ssize_t xocl_mm_stat(struct xocl_dev *xdev, char *buf, bool raw)
 	const char *raw_fmt = "%llu %d %llu\n";
 	struct mem_topology *topo = NULL;
 	struct drm_xocl_mm_stat stat;
+	const char *bo_txt_fmt = "[%s] %lluKB %dBOs\n";
+	const char *bo_types[XOCL_BO_USAGE_TOTAL];
+	uint32_t legacy_slot_id = DEFAULT_PL_SLOT;
 
 	mutex_lock(&xdev->dev_lock);
 
-	err = XOCL_GET_GROUP_TOPOLOGY(xdev, topo);
+	err = XOCL_GET_MEM_TOPOLOGY(xdev, topo, legacy_slot_id);
 	if (err) {
 		mutex_unlock(&xdev->dev_lock);
 		return err;
@@ -155,6 +163,7 @@ static ssize_t xocl_mm_stat(struct xocl_dev *xdev, char *buf, bool raw)
 	}
 
 	for (i = 0; i < topo->m_count; i++) {
+		memset(&stat, 0, sizeof(struct drm_xocl_mm_stat));
 		xocl_mm_get_usage_stat(XOCL_DRM(xdev), i, &stat);
 
 		if (raw) {
@@ -179,9 +188,42 @@ static ssize_t xocl_mm_stat(struct xocl_dev *xdev, char *buf, bool raw)
 		buf += count;
 		size += count;
 	}
+	/* -- Separator for bo stats -- */
+	if (raw)
+		count = sprintf(buf, raw_fmt, -EINVAL, -EINVAL, -EINVAL);
+	else
+		count = sprintf(buf, txt_fmt,
+			"== BO Stats Below ==",
+			"NA", 0, 0, 0, 0);
+
+	/* -- Append bo stats -- */
+	buf += count;
+	size += count;
+	bo_types[XOCL_BO_USAGE_NORMAL] = "Regular";
+	bo_types[XOCL_BO_USAGE_USERPTR] = "UserPointer";
+	bo_types[XOCL_BO_USAGE_P2P] = "P2P";
+	bo_types[XOCL_BO_USAGE_DEV_ONLY] = "DeviceOnly";
+	bo_types[XOCL_BO_USAGE_IMPORT] = "Imported";
+	bo_types[XOCL_BO_USAGE_EXECBUF] = "ExecBuf";
+	bo_types[XOCL_BO_USAGE_CMA] = "CMA";
+	for (i = 0; i < XOCL_BO_USAGE_TOTAL; i++) {
+		xocl_bo_get_usage_stat(XOCL_DRM(xdev), i, &stat);
+		if (raw) {
+			count = sprintf(buf, raw_fmt,
+				stat.memory_usage,
+				stat.bo_count, 0);
+		} else {
+			count = sprintf(buf, bo_txt_fmt,
+				bo_types[i],
+				stat.memory_usage / 1024,
+				stat.bo_count);
+		}
+		buf += count;
+		size += count;
+	}
 
 done:
-	XOCL_PUT_GROUP_TOPOLOGY(xdev);
+	XOCL_PUT_MEM_TOPOLOGY(xdev, legacy_slot_id);
 	mutex_unlock(&xdev->dev_lock);
 	return size;
 }
@@ -216,34 +258,19 @@ kds_echo_store(struct device *dev, struct device_attribute *da,
 	       const char *buf, size_t count)
 {
 	struct xocl_dev *xdev = dev_get_drvdata(dev);
-	u32 clients = 0;
 
-	/* TODO: this should be as simple as */
-	/* return stroe_kds_echo(&XDEV(xdev)->kds, buf, count); */
-
-	if (!kds_mode)
-		clients = get_live_clients(xdev, NULL);
-
-	return store_kds_echo(&XDEV(xdev)->kds, buf, count,
-			      kds_mode, clients, &kds_echo);
+	return store_kds_echo(&XDEV(xdev)->kds, buf, count, &kds_echo);
 }
 static DEVICE_ATTR(kds_echo, 0644, kds_echo_show, kds_echo_store);
 
 static ssize_t
-kds_mode_show(struct device *dev, struct device_attribute *attr, char *buf)
-{
-	return sprintf(buf, "%d\n", kds_mode);
-}
-static DEVICE_ATTR_RO(kds_mode);
-
-static ssize_t
-kds_numcdma_show(struct device *dev, struct device_attribute *attr, char *buf)
+kds_numcdmas_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
 	struct xocl_dev *xdev = dev_get_drvdata(dev);
 	struct kds_sched *kds = &XDEV(xdev)->kds;
 	return sprintf(buf, "%d\n", kds->cu_mgmt.num_cdma);
 }
-static DEVICE_ATTR_RO(kds_numcdma);
+static DEVICE_ATTR_RO(kds_numcdmas);
 
 static ssize_t
 kds_stat_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -259,30 +286,123 @@ kds_stat_show(struct device *dev, struct device_attribute *attr, char *buf)
 static DEVICE_ATTR_RO(kds_stat);
 
 static ssize_t
-kds_custat_raw_show(struct device *dev, struct device_attribute *attr, char *buf)
+kds_cuctx_stat_raw_show(struct file *filp, struct kobject *kobj,
+        struct bin_attribute *attr, char *buffer, loff_t offset, size_t count)
 {
-	struct xocl_dev *xdev = dev_get_drvdata(dev);
-	ssize_t ret;
+	struct xocl_dev *xdev = dev_get_drvdata(container_of(kobj, struct device, kobj));
+	ssize_t ret = 0;
 
 	mutex_lock(&xdev->dev_lock);
-	ret = show_kds_custat_raw(&XDEV(xdev)->kds, buf);
+	ret = show_kds_cuctx_stat_raw(&XDEV(xdev)->kds, buffer, count, offset, DOMAIN_PL);
 	mutex_unlock(&xdev->dev_lock);
 	return ret;
 }
-static DEVICE_ATTR_RO(kds_custat_raw);
+static struct bin_attribute kds_cuctx_stat_raw_attr = {
+	.attr = {
+		.name = "kds_cuctx_stat_raw",
+		.mode = 0444
+	},
+	.read = kds_cuctx_stat_raw_show,
+	.write = NULL,
+	.size = 0
+};
 
 static ssize_t
-kds_scustat_raw_show(struct device *dev, struct device_attribute *attr, char *buf)
+kds_scuctx_stat_raw_show(struct file *filp, struct kobject *kobj,
+        struct bin_attribute *attr, char *buffer, loff_t offset, size_t count)
 {
-	struct xocl_dev *xdev = dev_get_drvdata(dev);
-	ssize_t ret;
+	struct xocl_dev *xdev = dev_get_drvdata(container_of(kobj, struct device, kobj));
+	ssize_t ret = 0;
 
 	mutex_lock(&xdev->dev_lock);
-	ret = show_kds_scustat_raw(&XDEV(xdev)->kds, buf);
+	ret = show_kds_cuctx_stat_raw(&XDEV(xdev)->kds, buffer, count, offset, DOMAIN_PS);
 	mutex_unlock(&xdev->dev_lock);
 	return ret;
 }
-static DEVICE_ATTR_RO(kds_scustat_raw);
+static struct bin_attribute kds_scuctx_stat_raw_attr = {
+	.attr = {
+		.name = "kds_scuctx_stat_raw",
+		.mode = 0444
+	},
+	.read = kds_scuctx_stat_raw_show,
+	.write = NULL,
+	.size = 0
+};
+
+static ssize_t
+kds_custat_raw_show(struct file *filp, struct kobject *kobj,
+	struct bin_attribute *attr, char *buffer, loff_t offset, size_t count)
+{
+	struct xocl_dev *xdev = dev_get_drvdata(container_of(kobj, struct device, kobj));
+	ssize_t ret = 0;
+
+	/**
+	 * The CU data will not be consistent between multiple calls to
+	 * this function. Meaning large sysfs reads requests may have strange
+	 * output results if the CUs change mid read.
+	 * This was an acceptable cost to simplify the logic as it is a rare
+	 * condition.
+	 */
+
+	/* Populate the allocated buffer with CU data */
+	mutex_lock(&xdev->dev_lock);
+	ret = show_kds_custat_raw(&XDEV(xdev)->kds, buffer, count, offset);
+	mutex_unlock(&xdev->dev_lock);
+
+	return ret;
+}
+
+static struct bin_attribute kds_custat_raw_attr = {
+	.attr = {
+		.name = "kds_custat_raw",
+		.mode = 0444
+	},
+	.read = kds_custat_raw_show,
+	.write = NULL,
+	.size = 0
+};
+
+static ssize_t
+kds_scustat_raw_show(struct file *filp, struct kobject *kobj,
+	struct bin_attribute *attr, char *buffer, loff_t offset, size_t count)
+{
+	struct xocl_dev *xdev = dev_get_drvdata(container_of(kobj, struct device, kobj));
+	ssize_t ret = 0;
+
+	/**
+	 * The CU data will not be consistent between multiple calls to
+	 * this function. Meaning large sysfs reads requests may have strange
+	 * output results if the CUs change mid read.
+	 * This was an acceptable cost to simplify the logic as it is a rare
+	 * condition.
+	 */
+
+	/* Populate the allocated buffer with CU data */
+	mutex_lock(&xdev->dev_lock);
+	ret = show_kds_scustat_raw(&XDEV(xdev)->kds, buffer, count, offset);
+	mutex_unlock(&xdev->dev_lock);
+
+	return ret;
+}
+
+static struct bin_attribute kds_scustat_raw_attr = {
+	.attr = {
+		.name = "kds_scustat_raw",
+		.mode = 0444
+	},
+	.read = kds_scustat_raw_show,
+	.write = NULL,
+	.size = 0
+};
+
+static ssize_t
+device_bad_state_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct xocl_dev *xdev = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%d\n", XDEV(xdev)->kds.bad_state);
+}
+static DEVICE_ATTR_RO(device_bad_state);
 
 static ssize_t
 kds_interrupt_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -308,19 +428,18 @@ kds_interrupt_store(struct device *dev, struct device_attribute *da,
 		return -ENODEV;
 
 	mutex_lock(&XDEV(xdev)->kds.lock);
-	if (kds_mode)
-		live_clients = kds_live_clients_nolock(&XDEV(xdev)->kds, NULL);
-	else
-		live_clients = get_live_clients(xdev, NULL);
+	live_clients = kds_live_clients_nolock(&XDEV(xdev)->kds, NULL);
 
 	if (live_clients > 0) {
 		mutex_unlock(&XDEV(xdev)->kds.lock);
 		return -EBUSY;
 	}
 
-	if (!kds->cu_intr_cap)
+	/* If cfg_gpio device exist, shell supports CU to host interrupt */
+	if (!CFG_GPIO_OPS(xdev))
 		goto done;
 
+	kds->cu_intr_cap = 1;
 	/* The last character of buf is '\n' */
 	if (!strncmp(buf, "ert", count-1))
 		cu_intr = 0;
@@ -329,15 +448,25 @@ kds_interrupt_store(struct device *dev, struct device_attribute *da,
 	else
 		goto done;
 
-	if (kds->cu_intr == cu_intr)
+	if (KDS_SETTING(kds->cu_intr) == cu_intr)
 		goto done;
 
-	if (cu_intr)
-		xocl_ert_user_disable(xdev);
-	else
-		xocl_ert_user_enable(xdev);
+	if (ERT_USER_DEV(xdev)) {
+		if (cu_intr) {
+			xocl_ert_user_disable(xdev);
+			xocl_kds_cus_enable(xdev);
+		} else {
+			xocl_kds_cus_disable(xdev);
+			xocl_ert_user_enable(xdev);
+		}
+	} else {
+		if (cu_intr)
+			xocl_gpio_cfg(xdev, INTR_TO_CU);
+		else
+			xocl_gpio_cfg(xdev, INTR_TO_ERT);
+	}
 
-	kds->cu_intr = cu_intr;
+	kds->cu_intr = KDS_SET_SYSFS_BIT(cu_intr);
 	kds_cfg_update(&XDEV(xdev)->kds);
 
 done:
@@ -346,6 +475,30 @@ done:
 	return count;
 }
 static DEVICE_ATTR(kds_interrupt, 0644, kds_interrupt_show, kds_interrupt_store);
+
+static ssize_t
+kds_interval_store(struct device *dev, struct device_attribute *da,
+	       const char *buf, size_t count)
+{
+	struct xocl_dev *xdev = dev_get_drvdata(dev);
+	u32 interval;
+
+	if (kstrtou32(buf, 10, &interval) == -EINVAL)
+		return -EINVAL;
+
+	XDEV(xdev)->kds.interval = interval;
+
+	return count;
+}
+
+static ssize_t
+kds_interval_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct xocl_dev *xdev = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%d\n", XDEV(xdev)->kds.interval);
+}
+static DEVICE_ATTR(kds_interval, 0644, kds_interval_show, kds_interval_store);
 
 static ssize_t
 ert_disable_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -378,10 +531,7 @@ ert_disable_store(struct device *dev, struct device_attribute *da,
 		return -ENODEV;
 
 	mutex_lock(&XDEV(xdev)->kds.lock);
-	if (kds_mode)
-		live_clients = kds_live_clients_nolock(&XDEV(xdev)->kds, NULL);
-	else
-		live_clients = get_live_clients(xdev, NULL);
+	live_clients = kds_live_clients_nolock(&XDEV(xdev)->kds, NULL);
 
 	if (live_clients > 0) {
 		mutex_unlock(&XDEV(xdev)->kds.lock);
@@ -394,7 +544,7 @@ ert_disable_store(struct device *dev, struct device_attribute *da,
 	}
 
 	/* If ERT subdev doesn't present, cound not enable ERT */
-	if (kds_mode && !XDEV(xdev)->kds.ert)
+	if (!XDEV(xdev)->kds.ert)
 		disable = 1;
 
 	/* once ini_disable set to true, xrt.ini could not
@@ -452,6 +602,28 @@ static ssize_t shutdown_store(struct device *dev,
 	return count;
 }
 static DEVICE_ATTR(shutdown, 0644, shutdown_show, shutdown_store);
+
+static ssize_t dev_hotplug_done_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct xocl_dev *xdev = dev_get_drvdata(dev);
+	
+	return sprintf(buf, "%d\n", atomic_read(&xdev->dev_hotplug_done));
+}
+
+static ssize_t dev_hotplug_done_store(struct device *dev,
+	struct device_attribute *da, const char *buf, size_t count)
+{
+	struct xocl_dev *xdev = dev_get_drvdata(dev);
+	u32 val;
+	
+	if (kstrtou32(buf, 10, &val) == -EINVAL)
+		return -EINVAL;
+	
+	atomic_set(&xdev->dev_hotplug_done, val);
+	return count;
+}
+static DEVICE_ATTR(dev_hotplug_done, 0644, dev_hotplug_done_show, dev_hotplug_done_store);
 
 static ssize_t mig_calibration_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
@@ -593,6 +765,43 @@ static ssize_t ready_show(struct device *dev,
 
 static DEVICE_ATTR_RO(ready);
 
+static ssize_t vmr_status_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct xocl_dev *xdev = dev_get_drvdata(dev);
+	void *blob = NULL;
+	const struct VmrStatus *vmr_status = NULL;
+	int proplen = 0;
+	ssize_t cnt = 0;
+
+	blob = xdev->core.fdt_blob;
+	if (!blob) {
+		xocl_err(dev, "Failed to get FDT blob");
+		return 0;
+	}
+
+	vmr_status = (struct VmrStatus*) fdt_getprop(blob, 0, "vmr_status", &proplen);
+
+	if (!vmr_status) {
+		xocl_info(dev, "Did not find vmr_status prop");
+		return 0;
+	}
+
+	if (proplen != sizeof(struct VmrStatus)) {
+		xocl_err(dev, "Invalid vmr_status length");
+		return 0;
+	}
+
+	cnt += sprintf(buf + cnt, "HAS_FPT:%d\n", vmr_status->has_fpt);
+	cnt += sprintf(buf + cnt, "BOOT_ON_DEFAULT:%d\n", vmr_status->boot_on_default);
+	cnt += sprintf(buf + cnt, "BOOT_ON_BACKUP:%d\n", vmr_status->boot_on_backup);
+	cnt += sprintf(buf + cnt, "BOOT_ON_RECOVERY:%d\n", vmr_status->boot_on_recovery);
+
+	return cnt;
+}
+
+static DEVICE_ATTR_RO(vmr_status);
+
 static ssize_t interface_uuids_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
@@ -641,14 +850,24 @@ static ssize_t ulp_uuids_show(struct device *dev,
 	struct xocl_dev *xdev = dev_get_drvdata(dev);
 	const void *uuid;
 	int node = -1, off = 0;
+	int ret = 0;
+	uint32_t slot_id = 0;
+	struct xocl_axlf_obj_cache *axlf_obj = NULL;
 
-	if (!xdev->ulp_blob || fdt_check_header(xdev->ulp_blob))
+	ret = xocl_get_pl_slot(xdev, &slot_id);
+        if (ret) {
+                userpf_err(xdev, "Xclbin is not present");
+                return ret;
+        }
+
+	axlf_obj = XDEV(xdev)->axlf_obj[slot_id];
+	if (!axlf_obj->ulp_blob || fdt_check_header(axlf_obj->ulp_blob))
 		return -EINVAL;
 
-	for (node = xocl_fdt_get_next_prop_by_name(xdev, xdev->ulp_blob,
-		-1, PROP_INTERFACE_UUID, &uuid, NULL);
+	for (node = xocl_fdt_get_next_prop_by_name(xdev, axlf_obj->ulp_blob,
+			-1, PROP_INTERFACE_UUID, &uuid, NULL);
 	    uuid && node > 0;
-	    node = xocl_fdt_get_next_prop_by_name(xdev, xdev->ulp_blob,
+	    node = xocl_fdt_get_next_prop_by_name(xdev, axlf_obj->ulp_blob,
 		node, PROP_INTERFACE_UUID, &uuid, NULL))
 		off += sprintf(buf + off, "%s\n", (char *)uuid);
 
@@ -686,6 +905,32 @@ static ssize_t nodma_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(nodma);
 
+static ssize_t host_mem_size_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct xocl_dev *xdev = dev_get_drvdata(dev);
+	uint64_t val = 0;
+
+	if (xdev->cma_bank)
+		val = xdev->cma_bank->entry_sz * xdev->cma_bank->entry_num;
+
+	return sprintf(buf, "%lld\n", val);
+}
+static DEVICE_ATTR_RO(host_mem_size);
+
+static ssize_t versal_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct xocl_dev *xdev = dev_get_drvdata(dev);
+	uint32_t val = 0;
+
+	val = (XOCL_DSA_IS_VERSAL(XDEV(xdev)) ||
+	       XOCL_DSA_IS_VERSAL_ES3(XDEV(xdev))) ? 1 : 0;
+
+	return sprintf(buf, "%d\n", val);
+}
+static DEVICE_ATTR_RO(versal);
+
 /* - End attributes-- */
 static struct attribute *xocl_attrs[] = {
 	&dev_attr_xclbinuuid.attr,
@@ -695,13 +940,11 @@ static struct attribute *xocl_attrs[] = {
 	&dev_attr_kdsstat.attr,
 	&dev_attr_memstat.attr,
 	&dev_attr_memstat_raw.attr,
-	&dev_attr_kds_mode.attr,
 	&dev_attr_kds_echo.attr,
-	&dev_attr_kds_numcdma.attr,
+	&dev_attr_kds_numcdmas.attr,
 	&dev_attr_kds_stat.attr,
-	&dev_attr_kds_custat_raw.attr,
-	&dev_attr_kds_scustat_raw.attr,
 	&dev_attr_kds_interrupt.attr,
+	&dev_attr_kds_interval.attr,
 	&dev_attr_ert_disable.attr,
 	&dev_attr_dev_offline.attr,
 	&dev_attr_mig_calibration.attr,
@@ -714,11 +957,15 @@ static struct attribute *xocl_attrs[] = {
 	&dev_attr_config_mailbox_channel_switch.attr,
 	&dev_attr_config_mailbox_comm_id.attr,
 	&dev_attr_ready.attr,
+	&dev_attr_vmr_status.attr,
 	&dev_attr_interface_uuids.attr,
 	&dev_attr_logic_uuids.attr,
 	&dev_attr_ulp_uuids.attr,
 	&dev_attr_mig_cache_update.attr,
 	&dev_attr_nodma.attr,
+	&dev_attr_host_mem_size.attr,
+	&dev_attr_versal.attr,
+	&dev_attr_device_bad_state.attr,
 	NULL,
 };
 
@@ -729,6 +976,7 @@ static struct attribute *xocl_attrs[] = {
  */
 static struct attribute *xocl_persist_attrs[] = {
 	&dev_attr_shutdown.attr,
+	&dev_attr_dev_hotplug_done.attr,
 	&dev_attr_user_pf.attr,
 	NULL,
 };
@@ -774,6 +1022,10 @@ static struct bin_attribute fdt_blob_attr = {
 
 static struct bin_attribute  *xocl_bin_attrs[] = {
 	&fdt_blob_attr,
+	&kds_custat_raw_attr,
+	&kds_scustat_raw_attr,
+	&kds_cuctx_stat_raw_attr,
+	&kds_scuctx_stat_raw_attr,
 	NULL,
 };
 

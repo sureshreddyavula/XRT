@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2020 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Authors: Lizhi.Hou@xilinx.com
  *
@@ -26,33 +27,32 @@ MODULE_PARM_DESC(p2p_max_bar_size,
 	"Maximum P2P BAR size in GB, default is 128");
 
 
-#if KERNEL_VERSION(4, 5, 0) > LINUX_VERSION_CODE && \
-	(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0))
-#define P2P_API_V0
+#if defined(RHEL_RELEASE_VERSION) /* CentOS/RedHat specific check */
+	#if RHEL_RELEASE_CODE > RHEL_RELEASE_VERSION(7, 3) && \
+		  RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(7, 6)
+		#define P2P_API_V1
+	#elif RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(7, 6) && \
+		  RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(8, 6)
+		#define P2P_API_V2
+	#else
+		#define P2P_API_V3
+	#endif
+
+#elif KERNEL_VERSION(4, 5, 0) > LINUX_VERSION_CODE && \
+	  (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 0))
+	#define P2P_API_V0
 #elif KERNEL_VERSION(4, 16, 0) > LINUX_VERSION_CODE && \
-	(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
-#define P2P_API_V1
+	  (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
+	#define P2P_API_V1
 #elif KERNEL_VERSION(5, 10, 0) > LINUX_VERSION_CODE && \
-	(LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0))
-#define P2P_API_V2
+	  (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 16, 0))
+	#define P2P_API_V2
 #elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0)
-#define P2P_API_V3
-#elif defined(RHEL_RELEASE_VERSION) /* CentOS/RedHat specific check */
-
-#if RHEL_RELEASE_CODE > RHEL_RELEASE_VERSION(7, 3) && \
-	RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(7, 6)
-#define P2P_API_V1
-#elif RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(7, 6)
-#define P2P_API_V2
+	#define P2P_API_V3
 #endif
 
-#endif
 
-#if defined(P2P_API_V3)
-#warning "P2P not ported to Linux kernel 5.10"
-#endif
-
-#if defined(P2P_API_V1) || defined(P2P_API_V2)
+#if defined(P2P_API_V1) || defined(P2P_API_V2) || defined(P2P_API_V3)
 #include <linux/memremap.h>
 #endif
 
@@ -161,7 +161,7 @@ struct p2p_mem_chunk {
 	/* Used by kernel API */
 	struct percpu_ref	xpmc_percpu_ref;
 	struct completion	xpmc_comp;
-#ifdef  P2P_API_V2
+#if defined(P2P_API_V2) || defined(P2P_API_V3)
 	struct dev_pagemap	xpmc_pgmap;
 #endif
 };
@@ -389,22 +389,22 @@ static int p2p_mem_chunk_reserve(struct p2p *p2p, struct p2p_mem_chunk *chk)
 		chk->xpmc_pgmap.res = res;
 
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 3, 0)
-#if defined(RHEL_RELEASE_CODE)
-#if RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(8, 2)
+	#if defined(RHEL_RELEASE_CODE)
+		#if RHEL_RELEASE_CODE < RHEL_RELEASE_VERSION(8, 2)
+			chk->xpmc_pgmap.ref = pref;
+			chk->xpmc_pgmap.altmap_valid = false;
+			#if RHEL_RELEASE_CODE == RHEL_RELEASE_VERSION(8, 1)
+				chk->xpmc_pgmap.kill = p2p_percpu_ref_kill_noop;
+			#endif
+		#else
+			chk->xpmc_pgmap.type = MEMORY_DEVICE_PCI_P2PDMA;
+		#endif
+	#else
 		chk->xpmc_pgmap.ref = pref;
 		chk->xpmc_pgmap.altmap_valid = false;
-#if RHEL_RELEASE_CODE == RHEL_RELEASE_VERSION(8, 1)
-		chk->xpmc_pgmap.kill = p2p_percpu_ref_kill_noop;
-#endif
+	#endif
 #else
-		chk->xpmc_pgmap.type = MEMORY_DEVICE_PCI_P2PDMA;
-#endif
-#else
-		chk->xpmc_pgmap.ref = pref;
-		chk->xpmc_pgmap.altmap_valid = false;
-#endif
-#else
-		chk->xpmc_pgmap.type = MEMORY_DEVICE_PCI_P2PDMA;
+	chk->xpmc_pgmap.type = MEMORY_DEVICE_PCI_P2PDMA;
 #endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 20, 2) && \
@@ -418,6 +418,26 @@ static int p2p_mem_chunk_reserve(struct p2p *p2p, struct p2p_mem_chunk *chk)
 			percpu_ref_kill(pref);
 		}
 	}
+
+#elif   defined(P2P_API_V3)
+                ret = devm_add_action_or_reset(dev, p2p_percpu_ref_exit, pref);
+                if (ret) {
+                        p2p_err(p2p, "add exit action failed");
+                        percpu_ref_exit(pref);
+                } else {
+                        chk->xpmc_pgmap.type = MEMORY_DEVICE_PCI_P2PDMA;
+                        chk->xpmc_pgmap.range.start = res.start;
+                        chk->xpmc_pgmap.range.end = res.end;
+                        chk->xpmc_pgmap.nr_range = 1;
+
+
+                        chk->xpmc_va = devm_memremap_pages(dev, &chk->xpmc_pgmap);
+                        ret = devm_add_action_or_reset(dev, p2p_percpu_ref_kill, pref);
+                        if (ret) {
+                                p2p_err(p2p, "add kill action failed");
+                                percpu_ref_kill(pref);
+                        }
+                }
 #endif
 
 	devres_close_group(dev, chk->xpmc_res_grp);
@@ -1202,7 +1222,7 @@ static int p2p_adjust_mem_topo(struct platform_device *pdev, void *mem_topo)
 	for (i = 0; i< topo->m_count; ++i) {
 		if (!XOCL_IS_P2P_MEM(topo, i) || !topo->m_mem_data[i].m_used)
 			continue;
-		if (IS_HOST_MEM(topo->m_mem_data[i].m_tag))
+		if (convert_mem_tag(topo->m_mem_data[i].m_tag) == MEM_TAG_HOST)
 			continue;
 
 		sz = roundup((topo->m_mem_data[i].m_size << 10), align);
@@ -1220,7 +1240,7 @@ static int p2p_adjust_mem_topo(struct platform_device *pdev, void *mem_topo)
 	for (i = 0; i< topo->m_count; ++i) {
 		if (!XOCL_IS_P2P_MEM(topo, i) || !topo->m_mem_data[i].m_used)
 			continue;
-		if (IS_HOST_MEM(topo->m_mem_data[i].m_tag))
+		if (convert_mem_tag(topo->m_mem_data[i].m_tag) == MEM_TAG_HOST)
 			continue;
 
 		sz = roundup((topo->m_mem_data[i].m_size << 10), align);
@@ -1326,8 +1346,12 @@ static ssize_t config_show(struct device *dev,
 
 	for (i = 0; i < P2P_BANK_CONF_NUM && p2p->bank_conf[i].size != 0; i++) {
 		char *tag = p2p->bank_conf[i].bank_tag;
-		count += snprintf(buf + count, PAGE_SIZE - count, "%d:%s:%ld\n", i,
+		int n = snprintf(buf + count, PAGE_SIZE - count, "%d:%s:%ld\n", i,
 			tag ? tag : "", p2p->bank_conf[i].size);
+
+		if (n < 0 || n >= PAGE_SIZE - count)
+			break; // Can't fit in
+		count += n;
 	}
 
 	mutex_unlock(&p2p->p2p_lock);
@@ -1361,6 +1385,9 @@ static ssize_t p2p_enable_store(struct device *dev, struct device_attribute *da,
 	xdev_handle_t xdev = xocl_get_xdev(p2p->pdev);
 	ulong range = 0;
 	u32 val = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EACCES;
 
 	if (kstrtou32(buf, 10, &val) == -EINVAL)
 		return -EINVAL;

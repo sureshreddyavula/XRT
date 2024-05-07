@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018-2021 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2018-2022 Xilinx, Inc. All rights reserved.
  *
  * Authors:
  *
@@ -19,9 +19,6 @@
 #include "xocl_drv.h"
 #include "version.h"
 #include "xocl_fdt.h"
-
-/* TODO: remove this with old kds */
-extern int kds_mode;
 
 struct ip_node {
 	const char *name;
@@ -232,10 +229,6 @@ static void *p2p_build_priv(xdev_handle_t xdev_hdl, void *subdev, size_t *len)
 	if (node >= 0)
 		return NULL;
 
-	node = fdt_path_offset(blob, "/" NODE_ENDPOINTS "/" NODE_QDMA4);
-	if (node >= 0)
-		return NULL;
-
 	p2p_priv = xocl_subdev_priv_alloc(sizeof(*p2p_priv));
 	if (!p2p_priv)
 		return NULL;
@@ -367,25 +360,9 @@ static struct xocl_subdev_map subdev_map[] = {
 	},
 	{
 		.id = XOCL_SUBDEV_DMA,
-		.dev_name = XOCL_QDMA4,
-		.res_array = (struct xocl_subdev_res[]) {
-			{.res_name = NODE_QDMA4},
-			{.res_name = NODE_STM4},
-			{.res_name = NODE_QDMA4_CSR},
-			{NULL},
-		},
-		.required_ip = 1,
-		.flags = 0,
-		.build_priv_data = NULL,
-		.devinfo_cb = NULL,
-		.max_level = XOCL_SUBDEV_LEVEL_PRP,
-       	},
-	{
-		.id = XOCL_SUBDEV_DMA,
 		.dev_name = XOCL_QDMA,
 		.res_array = (struct xocl_subdev_res[]) {
 			{.res_name = NODE_QDMA},
-			{.res_name = NODE_STM},
 			{NULL},
 		},
 		.required_ip = 1,
@@ -438,8 +415,8 @@ static struct xocl_subdev_map subdev_map[] = {
 		.max_level = XOCL_SUBDEV_LEVEL_PRP,
  	},
 	{
-		.id = XOCL_SUBDEV_COMMAND_QUEUE,
-		.dev_name = XOCL_COMMAND_QUEUE,
+		.id = XOCL_SUBDEV_ERT_CTRL,
+		.dev_name = XOCL_ERT_CTRL,
 		.res_array = (struct xocl_subdev_res[]) {
 			{.res_name = NODE_ERT_CQ_USER, .regmap_name = PROP_ERT_CQ},
 			{.res_name = NODE_ERT_CQ_USER, .regmap_name = PROP_ERT_LEGACY},
@@ -450,21 +427,25 @@ static struct xocl_subdev_map subdev_map[] = {
 		.build_priv_data = ert_build_priv,
 		.devinfo_cb = NULL,
 		.max_level = XOCL_SUBDEV_LEVEL_PRP,
- 	},
- 	{
-		.id = XOCL_SUBDEV_MB_SCHEDULER,
-		.dev_name = XOCL_MB_SCHEDULER,
+	},
+	{
+		/* Platform has XGQ IP, in this case, there is no CQ. */
+		.id = XOCL_SUBDEV_ERT_CTRL,
+		.dev_name = XOCL_ERT_CTRL_VERSAL,
 		.res_array = (struct xocl_subdev_res[]) {
-			{.res_name = NODE_ERT_SCHED},
-			{.res_name = NODE_ERT_CQ_USER},
+			{.res_name = NODE_XGQ_USR_RING_BASE},
+			{.res_name = NODE_XGQ_USR_SQ_00_BASE},
+			{.res_name = NODE_XGQ_USR_SQ_01_BASE},
+			{.res_name = NODE_XGQ_USR_SQ_02_BASE},
+			{.res_name = NODE_XGQ_USR_SQ_03_BASE},
 			{NULL},
 		},
-		.required_ip = 2,
+		.required_ip = 1,
 		.flags = XOCL_SUBDEV_MAP_USERPF_ONLY,
-		.build_priv_data = ert_build_priv,
+		.build_priv_data = NULL,
 		.devinfo_cb = NULL,
 		.max_level = XOCL_SUBDEV_LEVEL_PRP,
- 	},
+	},
 	{
 		.id = XOCL_SUBDEV_XVC_PUB,
 		.dev_name = XOCL_XVC_PUB,
@@ -782,7 +763,7 @@ static struct xocl_subdev_map subdev_map[] = {
 		.flags = 0,
 		.build_priv_data = NULL,
 		.devinfo_cb = NULL,
-		.max_level = XOCL_SUBDEV_LEVEL_PRP,
+		.max_level = XOCL_SUBDEV_LEVEL_URP,
 	},
 	{
 		.id = XOCL_SUBDEV_P2P,
@@ -801,7 +782,33 @@ static struct xocl_subdev_map subdev_map[] = {
 		.id = XOCL_SUBDEV_UARTLITE,
 		.dev_name = XOCL_UARTLITE,
 		.res_array = (struct xocl_subdev_res[]) {
-			{.res_name = NODE_ERT_UARTLITE},
+			{.res_name = NODE_ERT_UARTLITE_00},
+			{NULL},
+		},
+		.required_ip = 1,
+		.flags = 0,
+		.build_priv_data = NULL,
+		.devinfo_cb = NULL,
+		.max_level = XOCL_SUBDEV_LEVEL_PRP,
+	},
+	{
+		.id = XOCL_SUBDEV_UARTLITE_01,
+		.dev_name = XOCL_UARTLITE,
+		.res_array = (struct xocl_subdev_res[]) {
+			{.res_name = NODE_ERT_UARTLITE_01},
+			{NULL},
+		},
+		.required_ip = 1,
+		.flags = 0,
+		.build_priv_data = NULL,
+		.devinfo_cb = NULL,
+		.max_level = XOCL_SUBDEV_LEVEL_PRP,
+	},
+	{
+		.id = XOCL_SUBDEV_UARTLITE_02,
+		.dev_name = XOCL_UARTLITE,
+		.res_array = (struct xocl_subdev_res[]) {
+			{.res_name = NODE_ERT_UARTLITE_02},
 			{NULL},
 		},
 		.required_ip = 1,
@@ -821,7 +828,7 @@ static struct xocl_subdev_map subdev_map[] = {
 		.flags = 0,
 		.build_priv_data = NULL,
 		.devinfo_cb = NULL,
-		.max_level = XOCL_SUBDEV_LEVEL_PRP,
+		.max_level = XOCL_SUBDEV_LEVEL_URP,
 	},
 	{
 		.id = XOCL_SUBDEV_PCIE_FIREWALL,
@@ -910,7 +917,8 @@ static bool get_userpf_info(void *fdt, int node, u32 pf)
 	offset = fdt_parent_offset(fdt, node);
 	val = fdt_get_name(fdt, offset, NULL);
 
-	if (!val || strncmp(val, NODE_ENDPOINTS, strlen(NODE_PROPERTIES)))
+	if (!val || (strncmp(val, NODE_ENDPOINTS, strlen(NODE_ENDPOINTS))
+			&& strncmp(val, NODE_BARS, strlen(NODE_BARS))))
 		return true;
 
 	do {
@@ -1378,15 +1386,6 @@ static int xocl_fdt_parse_subdevs(xdev_handle_t xdev_hdl, char *blob,
 		j++;
 
 	for (id = 0; id < XOCL_SUBDEV_NUM; id++) { 
-		/* workaround MB_SCHEDULER and INTC resource conflict
-		 * Remove below if expression when MB_SCHEDULER is removed
-		 *
-		 * Skip MB_SCHEDULER if kds_mode is 1. So that INTC subdev could
-		 * get resources.
-		 */
-		if (id == XOCL_SUBDEV_MB_SCHEDULER && kds_mode)
-			continue;
-
 		for (j = 0; j < ARRAY_SIZE(subdev_map); j++) {
 			map_p = &subdev_map[j];
 			if (map_p->id != id)
@@ -1424,7 +1423,6 @@ static void xocl_pack_subdev(xdev_handle_t xdev_hdl, struct xocl_subdev *subdev)
 
 	BUG_ON(!subdev || !subdev->res || !subdev->res_name || !subdev->bar_idx);
 
-		xocl_xdev_info(xdev_hdl, "####res num %d", subdev->info.num_res);
 	res = kzalloc(sizeof (struct resource)
 		* subdev->info.num_res, GFP_KERNEL);
 	res_name = kzalloc(XOCL_SUBDEV_RES_NAME_LEN
@@ -1459,6 +1457,80 @@ static void xocl_pack_subdev(xdev_handle_t xdev_hdl, struct xocl_subdev *subdev)
 	for (i = 0; i < subdev->info.num_res; i++)
 		subdev->info.res[i].name = subdev->res_name +
 			i * XOCL_SUBDEV_RES_NAME_LEN;
+}
+
+static int xocl_fdt_get_pci_addr(xdev_handle_t xdev_hdl)
+{
+        struct xocl_dev_core    *core = XDEV(xdev_hdl);
+        int offset;
+        const u32* bar;
+        const u32* pfn;
+        const u64* io_off;
+        u32 pf, bar_idx;
+        int ret = 0, count = 0;
+
+#if PF == MGMTPF
+        pf = 0;
+#else
+        pf = 1;
+#endif
+
+        if (!core->fdt_blob) {
+                xocl_xdev_err(xdev_hdl, "fdt blob is empty");
+                return -EINVAL;
+        }
+
+        offset = fdt_path_offset(core->fdt_blob, "/" NODE_PCIE "/" NODE_BARS);
+        if (offset < 0) {
+                xocl_xdev_dbg(xdev_hdl, "pcie bars nodes are not present in firmware data");
+                return -EINVAL;
+        }
+
+        core->bars = kmalloc(sizeof(struct pci_bars) * NUM_PCI_BARS, GFP_KERNEL);
+        if (!core->bars) {
+                ret = -ENOMEM;
+                goto done;
+        }
+        memset(core->bars, 0, sizeof(struct pci_bars) * NUM_PCI_BARS);
+
+        for (offset = fdt_first_subnode(core->fdt_blob, offset);
+                offset >= 0;
+                offset = fdt_next_subnode(core->fdt_blob, offset)) {
+
+                pfn = fdt_getprop(core->fdt_blob, offset, PROP_PF_NUM, NULL);
+                if (!pfn) {
+                        xocl_xdev_err(xdev_hdl, "failed to get physical_function of pci node");
+                        ret = -EINVAL;
+                        goto done;
+                }
+                if (be32_to_cpu(*pfn) != pf)
+                        continue;
+
+                bar = fdt_getprop(core->fdt_blob, offset, PROP_BAR_IDX, NULL);
+                if (!bar) {
+                        xocl_xdev_err(xdev_hdl, "failed to get bar idx");
+                        ret = -EINVAL;
+                        goto done;
+                }
+                io_off = fdt_getprop(core->fdt_blob, offset, PROP_IO_OFFSET, NULL);
+                if (!io_off) {
+                        xocl_xdev_err(xdev_hdl, "failed to get offset, range of pci node");
+                        ret = -EINVAL;
+                        goto done;
+                }
+                bar_idx = be32_to_cpu(*bar);
+                core->bars[bar_idx].base_addr = be64_to_cpu(io_off[0]);
+                core->bars[bar_idx].range = be64_to_cpu(io_off[1]);
+                count++;
+        }
+
+done:
+	if(ret || count == 0) {
+		kfree(core->bars);
+		core->bars = NULL;
+		return ret;
+	}
+        return 0;
 }
 
 int xocl_fdt_parse_blob(xdev_handle_t xdev_hdl, char *blob, u32 blob_sz,
@@ -1546,25 +1618,43 @@ int xocl_fdt_check_uuids(xdev_handle_t xdev_hdl, const void *blob,
 	// comment this out for debugging xclbin download only
 	//return 0;
 
-	if (!blob || !subset_blob) {
-		xocl_xdev_err(xdev_hdl, "blob is NULL");
+	/*
+	 * There is case where xclbin is built with raptor flow, but shell
+	 * isn't. So in this case, blob is null, subset_blob is not, and
+	 * we don't expect to see interface_uuid in xclbin partition
+	 * metadata
+	 */
+	if (!subset_blob || fdt_check_header(subset_blob)) {
+		xocl_xdev_err(xdev_hdl, "invalid subset blob");
 		return -EINVAL;
 	}
 
-	if (fdt_check_header(blob) || fdt_check_header(subset_blob)) {
-		xocl_xdev_err(xdev_hdl, "Invalid fdt blob");
-		return -EINVAL;
-	}
-
+	/*
+	 * If there is no interface_uuid in partition metadata, we don't
+	 * check blp/plp and compare. This is valid case.
+	 */
 	subset_offset = fdt_path_offset(subset_blob, INTERFACES_PATH);
-	if (subset_offset < 0) {
-		xocl_xdev_err(xdev_hdl, "Invalid subset_offset %d",
-			       	subset_offset);
+	if (subset_offset < 0)
+		return 0;
+
+	subset_offset = fdt_first_subnode(subset_blob, subset_offset);
+	if (subset_offset < 0)
+		return 0;
+
+	subset_int_uuid = fdt_getprop(subset_blob, subset_offset,
+		"interface_uuid", NULL);
+	if (!subset_int_uuid)
+		return 0;
+
+	/*
+	 * there is interface uuid in xclbin. we need to check blp/plp
+	 */
+	if (!blob || fdt_check_header(blob)) {
+		xocl_xdev_err(xdev_hdl, "invalid blob");
 		return -EINVAL;
 	}
 
-	for (subset_offset = fdt_first_subnode(subset_blob, subset_offset);
-		subset_offset >= 0;
+	for (; subset_offset >= 0;
 		subset_offset = fdt_next_subnode(subset_blob, subset_offset)) {
 		subset_int_uuid = fdt_getprop(subset_blob, subset_offset,
 				"interface_uuid", NULL);
@@ -1692,6 +1782,9 @@ int xocl_fdt_blob_input(xdev_handle_t xdev_hdl, char *blob, u32 blob_sz,
 	if (core->fdt_blob)
 		vfree(core->fdt_blob);
 
+	if (core->bars)
+		kfree(core->bars);
+
 	if (core->dyn_subdev_store) {
 		for (i = 0; i < core->dyn_subdev_num; i++)
 			xocl_subdev_dyn_free(core->dyn_subdev_store + i);
@@ -1701,6 +1794,10 @@ int xocl_fdt_blob_input(xdev_handle_t xdev_hdl, char *blob, u32 blob_sz,
 
 	core->fdt_blob = output_blob;
 	core->fdt_blob_sz = fdt_totalsize(output_blob);
+
+	/* get pci bar mappings of CPM */
+	xocl_fdt_get_pci_addr(core);
+
 	core->dyn_subdev_store = subdevs;
 
 	for (i = 0; i < core->dyn_subdev_num; i++)
@@ -1976,14 +2073,8 @@ const char *xocl_fdt_get_ert_fw_ver(xdev_handle_t xdev_hdl, void *blob)
 			break;
 		}
 	}
-	if (fw_ver) {
+	if (fw_ver)
 		xocl_xdev_dbg(xdev_hdl, "Load embedded scheduler firmware %s", fw_ver);
-		/* if firmware_branch_name is "legacy", XRT loads the sched.bin */
-		if (!strcmp(fw_ver, "legacy")) {
-			xocl_xdev_dbg(xdev_hdl, "Firmware branch name is legacy. Loading default sched.bin");
-			return NULL;
-		}
-	}
 
 	return fw_ver;
 }

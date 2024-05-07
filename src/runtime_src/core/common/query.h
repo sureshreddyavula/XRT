@@ -17,8 +17,9 @@
 #ifndef xrt_core_common_query_h
 #define xrt_core_common_query_h
 
+#include <boost/format.hpp>
+
 #include <stdexcept>
-#include <boost/any.hpp>
 
 namespace xrt_core {
 
@@ -69,29 +70,92 @@ struct request
   ~request()
   {}
   
-  virtual boost::any
+  virtual std::any
   get(const device*) const
   { throw std::runtime_error("query request requires arguments"); }
 
-  virtual boost::any
-  get(const device*, const boost::any&) const
+  virtual std::any
+  get(const device*, const std::any&) const
   { throw std::runtime_error("query request does not support one argument"); }
 
-  virtual boost::any
-  get(const device*, const boost::any&, const boost::any&) const
+  virtual std::any
+  get(const device*, const std::any&, const std::any&) const
   { throw std::runtime_error("query does not support two arguments"); }
 
-  virtual boost::any
+  virtual std::any
   get(const device*, modifier, const std::string&) const
   { throw std::runtime_error("query does not support modifier"); }
 
-  virtual boost::any
-  get(const device*, const boost::any&, const boost::any&, const boost::any&) const
+  virtual std::any
+  get(const device*, const std::any&, const std::any&, const std::any&) const
   { throw std::runtime_error("query does not support three argunents"); }
 
   virtual void
-  put(const device*, const boost::any&) const
+  put(const device*, const std::any&) const
   { throw std::runtime_error("query update does not support one argument"); }
+};
+
+// Base class for query exceptions.
+//
+// Provides granularity for calling code to catch errors specific to
+// query request which are often acceptable errors because some
+// devices may not support all types of query requests.
+//
+// Other non query exceptions signal a different kind of error which
+// should maybe not be caught.
+//
+// The addition of the query request exception hierarchy does not
+// break existing code that catches std::exception (or all errors)
+// because ultimately the base query exception is-a std::exception
+class exception : public std::runtime_error
+{
+public:
+  explicit
+  exception(const std::string& err)
+    : std::runtime_error(err)
+  { /*empty*/ }
+};
+
+class no_such_key : public exception
+{
+  key_type m_key;
+
+  using qtype = std::underlying_type<query::key_type>::type;
+public:
+  explicit
+  no_such_key(key_type k)
+    : exception(boost::str(boost::format("No such query request (%d)") % static_cast<qtype>(k)))
+    , m_key(k)
+  {}
+
+  no_such_key(key_type k, const std::string& msg)
+    : exception(msg)
+    , m_key(k)
+  {}
+
+  key_type
+  get_key() const
+  {
+    return m_key;
+  }
+};
+
+class sysfs_error : public exception
+{
+public:
+  explicit
+  sysfs_error(const std::string& msg)
+    : exception(msg)
+  { /*empty*/ }
+};
+
+class not_supported : public exception
+{
+public:
+  explicit
+  not_supported(const std::string& msg)
+    : exception(msg)
+  { /*empty*/ }
 };
 
 } // query

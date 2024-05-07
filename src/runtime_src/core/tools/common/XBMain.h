@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2019-2020 Xilinx, Inc
+ * Copyright (C) 2019-2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -20,6 +20,7 @@
 // Include files
 
 // Please keep these to the bare minimum
+#include "XBHelpMenusCore.h"
 #include "XBHelpMenus.h"
 #include <string>
     
@@ -27,5 +28,6 @@
 void main_(int argc, char** argv, 
            const std::string & _executable,
            const std::string & _description,
-           const SubCmdsCollection & _SubCmds);
+           const SubCmdsCollection & _SubCmds,
+           const boost::property_tree::ptree& configurations);
 #endif

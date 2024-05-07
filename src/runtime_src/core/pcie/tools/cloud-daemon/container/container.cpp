@@ -1,18 +1,6 @@
-/*
- * Copyright (C) 2019 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019 Xilinx, Inc
+// Copyright (C) 2022 Advanced Micro Devices, Inc. - All rights reserved
 
 #include <errno.h>
 
@@ -35,7 +23,9 @@
 #include <iomanip>
 #include <fstream>
 #include <uuid/uuid.h>
+#define OPENSSL_SUPPRESS_DEPRECATED
 #include <openssl/md5.h>
+#undef OPENSSL_SUPPRESS_DEPRECATED
 #include "xclbin.h"
 #include "container.h"
 
@@ -54,7 +44,7 @@ void fini(void *mpc_cookie);
 int init(mpd_plugin_callbacks *cbs)
 {
     int ret = 1;
-    auto total = pcidev::get_dev_total();
+    auto total = xrt_core::pci::get_dev_total();
     if (total == 0) {
         syslog(LOG_INFO, "Container: no device found");
         return ret;
@@ -159,7 +149,7 @@ Container::~Container()
 
 Container::Container(size_t index)
 {
-    mgmtDev = pcidev::get_dev(index, false);
+    mgmtDev = xrt_core::pci::get_dev(index, false);
 }
 
 //private methods, vendor dependant
@@ -187,14 +177,21 @@ struct xclbin_repo {
     const char *md5; //md5 of the xclbin metadata. should be the primary key of DB of the repo
     const char *path; //path to xclbin file
 };
+#ifdef XRT_INSTALL_PREFIX
+    #define VERIFY_XCLBIN_PATH XRT_INSTALL_PREFIX "/dsa/xilinx_u280_xdma_201910_1/test/verify.xclbin"
+    #define BANDWIDTH_XCLBIN_PATH XRT_INSTALL_PREFIX "/dsa/xilinx_u280_xdma_201910_1/test/bandwidth.xclbin"
+#else
+    #define VERIFY_XCLBIN_PATH "/opt/xilinx/dsa/xilinx_u280_xdma_201910_1/test/verify.xclbin"
+    #define BANDWIDTH_XCLBIN_PATH "/opt/xilinx/dsa/xilinx_u280_xdma_201910_1/test/bandwidth.xclbin"
+#endif
 static struct xclbin_repo repo[2] = {
     {
         .md5 = "d9662fc2a45422d5f7c80f57dae4c8db",
-        .path = "/opt/xilinx/dsa/xilinx_u280_xdma_201910_1/test/verify.xclbin",
+        .path = VERIFY_XCLBIN_PATH,
     },
     {
         .md5 = "97aefd0cd3dd9a96cc5d24c9afcd3818",
-        .path = "/opt/xilinx/dsa/xilinx_u280_xdma_201910_1/test/bandwidth.xclbin",
+        .path = BANDWIDTH_XCLBIN_PATH,
     },
 }; // there are only 2 xclbins in the sample code
 

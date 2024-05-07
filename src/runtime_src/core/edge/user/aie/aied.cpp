@@ -24,6 +24,7 @@
 #include "aied.h"
 #include "core/edge/include/zynq_ioctl.h"
 #include "core/edge/user/shim.h"
+#include "core/common/config_reader.h"
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/json_parser.hpp>
 
@@ -33,6 +34,7 @@ Aied::Aied(xrt_core::device* device): mCoreDevice(device)
 {
   done = false;
   pthread_create(&ptid, NULL, &Aied::pollAIE, this);
+  pthread_setname_np(ptid, "Graph Status");
 }
 
 Aied::~Aied()
@@ -54,10 +56,16 @@ Aied::pollAIE(void* arg)
 
   signal(SIGUSR1, signalHandler);
 
+  if (!xrt_core::config::get_enable_aied())
+    return NULL;
+
   /* Ever running thread */
   while (1) {
+    /* Give up the cpu to the other threads. We are running this in an
+     * infinite for loop */
+    sleep(1);
     /* Calling XRT interface to wait for commands */
-    if (drv->xclAIEGetCmd(&cmd) != 0) {
+    if (ai->mGraphs.empty() || drv->xclAIEGetCmd(&cmd) != 0) {
       /* break if destructor called */
       if (ai->done)
         return NULL;

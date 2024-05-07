@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -21,17 +21,22 @@
 
 namespace xdp {
 
-  class OpenCLTraceProfilingPlugin : public XDPPlugin
+  class OpenCLTracePlugin : public XDPPlugin
   {
   private:
-    bool continuous_trace ;
+    // There should only ever be one instance of the OpenCLTracePlugin,
+    // and it is destroyed at the end of the program.  To prevent access after
+    // the instance has been destroyed we have this guard.
+    static bool live;
 
   protected:
     virtual void emulationSetup() ;
 
   public:
-    OpenCLTraceProfilingPlugin() ;
-    ~OpenCLTraceProfilingPlugin() ;
+    OpenCLTracePlugin() ;
+    ~OpenCLTracePlugin() ;
+
+    static bool alive() { return OpenCLTracePlugin::live; }
   } ;
 
 }

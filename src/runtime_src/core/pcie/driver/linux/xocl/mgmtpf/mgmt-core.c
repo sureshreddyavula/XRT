@@ -1,36 +1,32 @@
-/*
- * Simple Driver for Management PF
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright (C) 2017-2022 Xilinx, Inc
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved
  *
- * Copyright (C) 2017-2020 Xilinx, Inc.
+ * Simple Driver for Management PF
  *
  * Code borrowed from Xilinx SDAccel XDMA driver
  *
  * Author(s):
  * Sonal Santan <sonal.santan@xilinx.com>
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
  */
 #include "mgmt-core.h"
-#include <linux/ioctl.h>
-#include <linux/module.h>
-#include <linux/vmalloc.h>
-#include <linux/version.h>
-#include <linux/fs.h>
-#include <linux/platform_device.h>
-#include <linux/i2c.h>
+
 #include <linux/crc32c.h>
-#include "../xocl_drv.h"
+#include <linux/fs.h>
+#include <linux/ioctl.h>
+#include <linux/i2c.h>
+#include <linux/module.h>
+#include <linux/platform_device.h>
+#include <linux/version.h>
+#include <linux/vmalloc.h>
+
 #include "version.h"
 #include "xclbin.h"
+#include "../xocl_drv.h"
 #include "../xocl_xclbin.h"
+
+#define SIZE_4KB  4096
 
 static const struct pci_device_id pci_ids[] = {
 	XOCL_MGMT_PCI_IDS,
@@ -191,6 +187,21 @@ failed:
 	unmap_bars(lro);
 	return ret;
 }
+/* function to map the bar, read the value and unmap the bar */
+uint32_t mgmt_bar_read32(struct xclmgmt_dev *lro, uint32_t bar_off)
+{
+	int rc = 0;
+	uint32_t val = 0;
+
+	rc = map_bars(lro);
+	if (rc)
+		return val;
+
+	val = ioread32(lro->core.bar_addr + bar_off);
+
+	unmap_bars(lro);
+	return val;
+}
 
 void store_pcie_link_info(struct xclmgmt_dev *lro)
 {
@@ -319,9 +330,17 @@ static int bridge_mmap(struct file *file, struct vm_area_struct *vma)
 	 * and prevent the pages from being swapped out
 	 */
 #ifndef VM_RESERVED
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
 	vma->vm_flags |= VM_IO | VM_DONTEXPAND | VM_DONTDUMP;
 #else
+	vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+#endif
+#else
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
 	vma->vm_flags |= VM_IO | VM_RESERVED;
+#else
+	vm_flags_set(vma, VM_IO | VM_RESERVED);
+#endif
 #endif
 
 	/* make MMIO accessible to user space */
@@ -504,6 +523,13 @@ static void check_pcie_link_toggle(struct xclmgmt_dev *lro, int clear)
 }
 
 
+static int xocl_check_firewall(struct xclmgmt_dev *lro, int *level)
+{
+	return (AF_CB(lro, check_firewall)) ?
+		xocl_af_check(lro, level) :
+		xocl_xgq_check_firewall(lro);
+}
+
 static int health_check_cb(void *data)
 {
 	struct xclmgmt_dev *lro = (struct xclmgmt_dev *)data;
@@ -538,7 +564,7 @@ static int health_check_cb(void *data)
 	 * it possibly still has chance to read clock and
 	 * sensor information etc.
 	 */
-	tripped = xocl_af_check(lro, NULL);
+	tripped = xocl_check_firewall(lro, NULL);
 
 reset:
 	if (latched || tripped) {
@@ -595,9 +621,14 @@ static int xclmgmt_icap_get_data_impl(struct xclmgmt_dev *lro, void *buf)
 {
 	struct xcl_pr_region *hwicap = NULL;
 	int err = 0;
+	uint32_t slot_id = 0;
 	xuid_t *xclbin_id = NULL;
 
-	err = XOCL_GET_XCLBIN_ID(lro, xclbin_id);
+	err = xocl_get_pl_slot(lro, &slot_id);
+	if (err)
+		return err;
+
+	err = XOCL_GET_XCLBIN_ID(lro, xclbin_id, slot_id);
 	if (err)
 		return err;
 
@@ -614,7 +645,7 @@ static int xclmgmt_icap_get_data_impl(struct xclmgmt_dev *lro, void *buf)
 	hwicap->mig_calib = lro->ready ? xocl_icap_get_data(lro, MIG_CALIB) : 0;
 	hwicap->data_retention = xocl_icap_get_data(lro, DATA_RETAIN);
 
-	XOCL_PUT_XCLBIN_ID(lro);
+	XOCL_PUT_XCLBIN_ID(lro, slot_id);
 
 	return 0;
 }
@@ -622,14 +653,35 @@ static int xclmgmt_icap_get_data_impl(struct xclmgmt_dev *lro, void *buf)
 static void xclmgmt_clock_get_data_impl(struct xclmgmt_dev *lro, void *buf)
 {
 	struct xcl_pr_region *hwicap = NULL;
+	int ret = 0;
 
 	hwicap = (struct xcl_pr_region *)buf;
-	hwicap->freq_0 = xocl_clock_get_data(lro, CLOCK_FREQ_0);
+	ret = xocl_clock_get_data(lro, CLOCK_FREQ_0);
+	if (ret == -ENODEV) {
+		hwicap->freq_0 = xocl_xgq_clock_get_data(lro, CLOCK_FREQ_0);
+		hwicap->freq_1 = xocl_xgq_clock_get_data(lro, CLOCK_FREQ_1);
+		hwicap->freq_2 = xocl_xgq_clock_get_data(lro, CLOCK_FREQ_2);
+		hwicap->freq_cntr_0 = xocl_xgq_clock_get_data(lro, FREQ_COUNTER_0);
+		hwicap->freq_cntr_1 = xocl_xgq_clock_get_data(lro, FREQ_COUNTER_1);
+		hwicap->freq_cntr_2 = xocl_xgq_clock_get_data(lro, FREQ_COUNTER_2);
+		return;
+	}
+
+	hwicap->freq_0 = ret;
 	hwicap->freq_1 = xocl_clock_get_data(lro, CLOCK_FREQ_1);
 	hwicap->freq_2 = xocl_clock_get_data(lro, CLOCK_FREQ_2);
 	hwicap->freq_cntr_0 = xocl_clock_get_data(lro, FREQ_COUNTER_0);
 	hwicap->freq_cntr_1 = xocl_clock_get_data(lro, FREQ_COUNTER_1);
 	hwicap->freq_cntr_2 = xocl_clock_get_data(lro, FREQ_COUNTER_2);
+}
+
+static void xclmgmt_multislot_version(struct xclmgmt_dev *lro, void *buf)
+{
+	struct xcl_multislot_info *slot_info = (struct xcl_multislot_info *)buf;
+
+	/* Fill the icap version here */
+	slot_info->multislot_version = MULTISLOT_VERSION;
+	mgmt_info(lro, "Multislot Version : %x\n", slot_info->multislot_version);
 }
 
 static void xclmgmt_icap_get_data(struct xclmgmt_dev *lro, void *buf)
@@ -704,10 +756,13 @@ static void xclmgmt_subdev_get_data(struct xclmgmt_dev *lro, size_t offset,
 	lro->userpf_blob_updated = false;
 }
 
-static int xclmgmt_read_subdev_req(struct xclmgmt_dev *lro, char *data_ptr, void **resp, size_t *sz)
+static int xclmgmt_read_subdev_req(struct xclmgmt_dev *lro, void *data_ptr, void **resp, size_t *sz)
 {
 	size_t resp_sz = 0, current_sz = 0, entry_sz = 0, entries = 0;
-	struct xcl_mailbox_subdev_peer *subdev_req = (struct xcl_mailbox_subdev_peer *)data_ptr;
+	struct xcl_mailbox_req *req = (struct xcl_mailbox_req *)data_ptr;
+	struct xcl_mailbox_subdev_peer *subdev_req =
+			(struct xcl_mailbox_subdev_peer *)req->data;
+	int ret = 0;
 
 	BUG_ON(!lro);
 
@@ -723,9 +778,14 @@ static int xclmgmt_read_subdev_req(struct xclmgmt_dev *lro, char *data_ptr, void
 		*resp = vzalloc(current_sz);
 		(void) xclmgmt_icap_get_data(lro, *resp);
 		break;
+	case XCL_MULTISLOT_VERSION:
+		current_sz = sizeof(struct xcl_multislot_info);
+		*resp = vzalloc(current_sz);
+		xclmgmt_multislot_version(lro, *resp);
+		break;
 	case XCL_MIG_ECC:
-		/* when allocating response buffer, 
-		 * we shall use remote_entry_size * min(local_num_entries, remote_num_entries), 
+		/* when allocating response buffer,
+		 * we shall use remote_entry_size * min(local_num_entries, remote_num_entries),
 		 * and check the final total buffer size.
 		 * when filling up each entry, we should use min(local_entry_size, remote_entry_size)
 		 * when moving to next entry, we should use remote_entry_size as step size.
@@ -757,6 +817,31 @@ static int xclmgmt_read_subdev_req(struct xclmgmt_dev *lro, char *data_ptr, void
 		xclmgmt_subdev_get_data(lro, subdev_req->offset,
 			subdev_req->size, resp, &current_sz);
 		break;
+	case XCL_SDR_BDINFO:
+		current_sz = SIZE_4KB;
+		*resp = vzalloc(current_sz);
+		ret = xocl_hwmon_sdm_get_sensors(lro, *resp, XCL_SDR_BDINFO, req->flags);
+		break;
+	case XCL_SDR_TEMP:
+		current_sz = SIZE_4KB;
+		*resp = vzalloc(current_sz);
+		ret = xocl_hwmon_sdm_get_sensors(lro, *resp, XCL_SDR_TEMP, req->flags);
+		break;
+	case XCL_SDR_VOLTAGE:
+		current_sz = SIZE_4KB;
+		*resp = vzalloc(current_sz);
+		ret = xocl_hwmon_sdm_get_sensors(lro, *resp, XCL_SDR_VOLTAGE, req->flags);
+		break;
+	case XCL_SDR_CURRENT:
+		current_sz = SIZE_4KB;
+		*resp = vzalloc(current_sz);
+		ret = xocl_hwmon_sdm_get_sensors(lro, *resp, XCL_SDR_CURRENT, req->flags);
+		break;
+	case XCL_SDR_POWER:
+		current_sz = SIZE_4KB;
+		*resp = vzalloc(current_sz);
+		ret = xocl_hwmon_sdm_get_sensors(lro, *resp, XCL_SDR_POWER, req->flags);
+		break;
 	default:
 		break;
 	}
@@ -764,7 +849,8 @@ static int xclmgmt_read_subdev_req(struct xclmgmt_dev *lro, char *data_ptr, void
 	if (!*resp)
 		return -EINVAL;
 	*sz = resp_sz;
-	return 0;
+
+	return ret;
 }
 
 static bool xclmgmt_is_same_domain(struct xclmgmt_dev *lro,
@@ -795,6 +881,7 @@ void xclmgmt_mailbox_srv(void *arg, void *data, size_t len,
 	u64 msgid, int err, bool sw_ch)
 {
 	int ret = 0;
+	uint32_t legacy_slot_id = DEFAULT_PL_SLOT;
 	uint64_t ch_switch = 0;
 	struct xclmgmt_dev *lro = (struct xclmgmt_dev *)arg;
 	struct xcl_mailbox_req *req = (struct xcl_mailbox_req *)data;
@@ -877,7 +964,48 @@ void xclmgmt_mailbox_srv(void *arg, void *data, size_t len,
 		} else {
 			memcpy(buf, xclbin, xclbin_len);
 
-			ret = xocl_xclbin_download(lro, buf);
+			/* For legacy case always download to slot 0 */
+			ret = xocl_xclbin_download(lro, buf, legacy_slot_id);
+
+			vfree(buf);
+		}
+		(void) xocl_peer_response(lro, req->req, msgid, &ret,
+			sizeof(ret));
+		break;
+	}
+	case XCL_MAILBOX_REQ_LOAD_XCLBIN_SLOT_KADDR: {
+		void *buf = NULL;
+		struct axlf *xclbin = NULL;
+		uint64_t xclbin_len = 0;
+		uint32_t slot_id = 0;
+		struct xcl_mailbox_bitstream_slot_kaddr *mb_kaddr =
+			(struct xcl_mailbox_bitstream_slot_kaddr *)req->data;
+		u64 ch_state = 0;
+
+		(void) xocl_mailbox_get(lro, CHAN_STATE, &ch_state);
+		if ((ch_state & XCL_MB_PEER_SAME_DOMAIN) == 0) {
+			mgmt_err(lro, "can't load xclbin via kva, dropped\n");
+			break;
+		}
+
+		if (payload_len < sizeof(*mb_kaddr)) {
+			mgmt_err(lro, "peer request dropped, wrong size\n");
+			break;
+		}
+		xclbin = (struct axlf *)mb_kaddr->addr;
+		xclbin_len = xclbin->m_header.m_length;
+		slot_id = mb_kaddr->slot_idx;
+		/*
+		 * The xclbin download may take a while. Make a local copy of
+		 * xclbin in case peer frees it too early due to a timeout
+		 */
+		buf = vmalloc(xclbin_len);
+		if (buf == NULL) {
+			ret = -ENOMEM;
+		} else {
+			memcpy(buf, xclbin, xclbin_len);
+
+			ret = xocl_xclbin_download(lro, buf, slot_id);
 
 			vfree(buf);
 		}
@@ -888,6 +1016,7 @@ void xclmgmt_mailbox_srv(void *arg, void *data, size_t len,
 	case XCL_MAILBOX_REQ_LOAD_XCLBIN: {
 		uint64_t xclbin_len = 0;
 		struct axlf *xclbin = (struct axlf *)req->data;
+		bool fetch = (atomic_read(&lro->config_xclbin_change) == 1);
 
 		if (payload_len < sizeof(*xclbin)) {
 			mgmt_err(lro, "peer request dropped, wrong size\n");
@@ -898,7 +1027,62 @@ void xclmgmt_mailbox_srv(void *arg, void *data, size_t len,
 			mgmt_err(lro, "peer request dropped, wrong size\n");
 			break;
 		}
-		ret = xocl_xclbin_download(lro, xclbin);
+
+		/*
+		 * User may transfer a fake xclbin which doesn't have bitstream
+		 * In this case, 'config_xclbin_change' has to be set, and we
+		 * will go to fetch the real xclbin.
+		 * Note:
+		 * 1. it is up to the admin to put authentificated xclbins at
+		 *    predefined location
+		 */
+		if (fetch)
+			ret = xclmgmt_xclbin_fetch_and_download(lro, xclbin,
+					legacy_slot_id);
+		else
+			/* For legacy case always download to slot 0 */
+			ret = xocl_xclbin_download(lro, xclbin, legacy_slot_id);
+
+		(void) xocl_peer_response(lro, req->req, msgid, &ret,
+				sizeof(ret));
+		break;
+	}
+	case XCL_MAILBOX_REQ_LOAD_SLOT_XCLBIN: {
+		uint64_t xclbin_len = 0;
+		uint32_t slot_id = 0;
+		struct xcl_mailbox_bitstream_slot_xclbin *mb_xclbin =
+			(struct xcl_mailbox_bitstream_slot_xclbin *)req->data;
+		struct axlf *xclbin = NULL;
+		bool fetch = (atomic_read(&lro->config_xclbin_change) == 1);
+
+		slot_id = mb_xclbin->slot_idx;
+		xclbin = (struct axlf *)((uint64_t)req->data +
+				sizeof(struct xcl_mailbox_bitstream_slot_xclbin));
+
+		if (payload_len < sizeof(*xclbin)) {
+			mgmt_err(lro, "peer request dropped, wrong size\n");
+			break;
+		}
+
+		xclbin_len = xclbin->m_header.m_length;
+		if (payload_len < xclbin_len) {
+			mgmt_err(lro, "peer request dropped, wrong size\n");
+			break;
+		}
+
+		/*
+		 * User may transfer a fake xclbin which doesn't have bitstream
+		 * In this case, 'config_xclbin_change' has to be set, and we
+		 * will go to fetch the real xclbin.
+		 * Note:
+		 * 1. it is up to the admin to put authentificated xclbins at
+		 *    predefined location
+		 */
+		if (fetch)
+			ret = xclmgmt_xclbin_fetch_and_download(lro, xclbin, legacy_slot_id);
+		else
+			ret = xocl_xclbin_download(lro, xclbin, slot_id);
+
 		(void) xocl_peer_response(lro, req->req, msgid, &ret,
 			sizeof(ret));
 		break;
@@ -911,10 +1095,17 @@ void xclmgmt_mailbox_srv(void *arg, void *data, size_t len,
 			break;
 		}
 
+		/*
+		 * On versal, there is no icap mgmt;
+		 * On VMR system, there is no icap mgmt and clock subdev;
+		 */
 		ret = xocl_icap_ocl_update_clock_freq_topology(lro, clk);
 		if (ret == -ENODEV)
 			ret = xocl_clock_freq_scaling_by_request(lro,
-			    clk->ocl_target_freq, ARRAY_SIZE(clk->ocl_target_freq), 1);
+				clk->ocl_target_freq, ARRAY_SIZE(clk->ocl_target_freq), 1);
+		if (ret == -ENODEV)
+			ret = xocl_xgq_clk_scaling(lro,
+				clk->ocl_target_freq, ARRAY_SIZE(clk->ocl_target_freq), 1);
 
 		(void) xocl_peer_response(lro, req->req, msgid, &ret,
 			sizeof(ret));
@@ -930,7 +1121,7 @@ void xclmgmt_mailbox_srv(void *arg, void *data, size_t len,
 			break;
 		}
 
-		ret = xclmgmt_read_subdev_req(lro, req->data, &resp, &sz);
+		ret = xclmgmt_read_subdev_req(lro, data, &resp, &sz);
 		if (ret) {
 			/* if can't get data, return 0 as response */
 			ret = 0;
@@ -1024,6 +1215,26 @@ void xclmgmt_mailbox_srv(void *arg, void *data, size_t len,
 		(void) xocl_peer_response(lro, req->req, msgid, &ret, sizeof(ret));
 		break;
 	}
+	case XCL_MAILBOX_REQ_SDR_DATA: {
+		size_t sz = 0;
+		void *resp = NULL;
+		struct xcl_mailbox_subdev_peer *subdev_req = (struct xcl_mailbox_subdev_peer *)req->data;
+		if (payload_len < sizeof(*subdev_req)) {
+			mgmt_err(lro, "peer request (%d) dropped, wrong size\n", XCL_MAILBOX_REQ_SDR_DATA);
+			break;
+		}
+
+		ret = xclmgmt_read_subdev_req(lro, data, &resp, &sz);
+		if (ret) {
+			/* if can't get data, return 0 as response */
+			ret = 0;
+			(void) xocl_peer_response(lro, req->req, msgid, &ret, sizeof(ret));
+		} else {
+			(void) xocl_peer_response(lro, req->req, msgid, resp, sz);
+		}
+		vfree(resp);
+		break;
+	}
 	default:
 		mgmt_err(lro, "unknown peer request opcode: %d\n", req->req);
 		break;
@@ -1060,10 +1271,9 @@ void xclmgmt_connect_notify(struct xclmgmt_dev *lro, bool online)
  */
 static void xclmgmt_extended_probe(struct xclmgmt_dev *lro)
 {
-	int ret;
+	int ret = 0;
 	struct xocl_board_private *dev_info = &lro->core.priv;
-	struct pci_dev *pdev = lro->pci_dev;
-	int i;
+	int i = 0;
 
 	lro->core.thread_arg.thread_cb = health_check_cb;
 	lro->core.thread_arg.arg = lro;
@@ -1097,20 +1307,22 @@ static void xclmgmt_extended_probe(struct xclmgmt_dev *lro)
 	 * data after the platform has been reset
 	 */
 	ret = xocl_subdev_create_by_id(lro, XOCL_SUBDEV_AF);
-	if (ret && ret != -ENODEV) {
-		xocl_err(&pdev->dev, "failed to register firewall\n");
+	if (ret && (ret != -ENODEV)) {
+		mgmt_err(lro, "Failed to register firewall");
 		goto fail_all_subdev;
 	}
+
 	if (dev_info->flags & XOCL_DSAFLAG_AXILITE_FLUSH)
 		platform_axilite_flush(lro);
 
 	ret = xocl_subdev_create_all(lro);
 	if (ret) {
-		xocl_err(&pdev->dev, "failed to register subdevs %d", ret);
+		mgmt_err(lro, "Failed to register subdevs %d", ret);
 		goto fail_all_subdev;
 	}
-	xocl_info(&pdev->dev, "created all sub devices");
+	mgmt_info(lro, "Created all sub devices");
 
+	/* Attempt to load firmware and get the appropriate device */
 	if (!(dev_info->flags & (XOCL_DSAFLAG_SMARTN | XOCL_DSAFLAG_VERSAL | XOCL_DSAFLAG_MPSOC)))
 		ret = xocl_icap_download_boot_firmware(lro);
 
@@ -1152,13 +1364,13 @@ static void xclmgmt_extended_probe(struct xclmgmt_dev *lro)
 
 	/* Notify our peer that we're listening. */
 	xclmgmt_connect_notify(lro, true);
-	xocl_info(&pdev->dev, "device fully initialized\n");
+	mgmt_info(lro, "device fully initialized\n");
 	return;
 
 fail_all_subdev:
 	xocl_subdev_destroy_all(lro);
 fail:
-	xocl_err(&pdev->dev, "failed to fully probe device, err: %d\n", ret);
+	mgmt_err(lro, "failed to fully probe device, err: %d\n", ret);
 }
 
 int xclmgmt_config_pci(struct xclmgmt_dev *lro)
@@ -1233,10 +1445,11 @@ static void xclmgmt_work_cb(struct work_struct *work)
  */
 static int xclmgmt_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
-	int rc = 0, i;
+	int rc = 0;
+	int i = 0;
 	struct xclmgmt_dev *lro = NULL;
-	struct xocl_board_private *dev_info;
-	char wq_name[15];
+	struct xocl_board_private *dev_info = NULL;
+	char wq_name[15] = {0};
 
 	xocl_info(&pdev->dev, "Driver: %s", XRT_DRIVER_VERSION);
 	xocl_info(&pdev->dev, "probe(pdev = 0x%p, pci_id = 0x%p)\n", pdev, id);
@@ -1283,11 +1496,6 @@ static int xclmgmt_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	xocl_fill_dsa_priv(lro, (struct xocl_board_private *)id->driver_data);
 	dev_info = &lro->core.priv;
 
-	/* map BARs */
-	rc = map_bars(lro);
-	if (rc)
-		goto err_map;
-
 	lro->instance = XOCL_DEV_ID(pdev);
 	rc = create_char(lro);
 	if (rc) {
@@ -1321,9 +1529,11 @@ static int xclmgmt_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	if ((dev_info->flags & XOCL_DSAFLAG_MFG) != 0) {
 		(void) xocl_subdev_create_all(lro);
+		xocl_drvinst_set_offline(lro, false);
 		return 0;
 	}
 
+	/* Detect if the device is ready for operations */
 	xclmgmt_extended_probe(lro);
 
 	/*
@@ -1331,17 +1541,25 @@ static int xclmgmt_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	 * is loaded to provide basic info about the board. Also, need
 	 * FLASH to be able to flash new shell.
 	 */
-	(void) xocl_subdev_create_by_id(lro, XOCL_SUBDEV_FEATURE_ROM);
-	(void) xocl_subdev_create_by_id(lro, XOCL_SUBDEV_FLASH);
+	rc = xocl_subdev_create_by_id(lro, XOCL_SUBDEV_FEATURE_ROM);
+	if (rc && (rc != -ENODEV))
+		mgmt_err(lro, "Failed to create ROM subdevice");
+
+	rc = xocl_subdev_create_by_id(lro, XOCL_SUBDEV_FLASH);
+	if (rc && (rc != -ENODEV))
+		mgmt_err(lro, "Failed to create Flash subdevice");
 
 	/*
 	 * if can not find BLP metadata, it has to bring up flash and xmc to
 	 * allow user switch BLP
 	 */
-	(void) xocl_subdev_create_by_level(lro, XOCL_SUBDEV_LEVEL_BLD);
-	(void) xocl_subdev_create_vsec_devs(lro);
+	rc = xocl_subdev_create_by_level(lro, XOCL_SUBDEV_LEVEL_BLD);
+	if (rc && (rc != -ENODEV))
+		mgmt_err(lro, "Failed to create BLD level");
 
-	xocl_pmc_enable_reset(lro);
+	rc = xocl_subdev_create_vsec_devs(lro);
+	if (rc && (rc != -ENODEV))
+		mgmt_err(lro, "Failed to create VSEC devices");
 
 	/*
 	 * For u30 whose reset relies on SC, and the cmc is running on ps, we
@@ -1357,6 +1575,7 @@ static int xclmgmt_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (!xocl_ps_wait(lro))
 		xocl_xmc_get_serial_num(lro);
 
+	(void) xocl_hwmon_sdm_get_sensors_list(lro, true);
 	xocl_drvinst_set_offline(lro, false);
 	return 0;
 
@@ -1365,8 +1584,6 @@ err_init_sysfs:
 err_create_wq:
 	destroy_sg_char(&lro->user_char_dev);
 err_cdev:
-	unmap_bars(lro);
-err_map:
 	xocl_free_dev_minor(lro);
 err_alloc_minor:
 	xocl_subdev_fini(lro);
@@ -1416,9 +1633,6 @@ static void xclmgmt_remove(struct pci_dev *pdev)
 	/* remove user character device */
 	destroy_sg_char(&lro->user_char_dev);
 
-	/* unmap the BARs */
-	unmap_bars(lro);
-
 	pci_disable_device(pdev);
 
 	xocl_free_dev_minor(lro);
@@ -1429,6 +1643,8 @@ static void xclmgmt_remove(struct pci_dev *pdev)
 		vfree(lro->userpf_blob);
 	if (lro->core.blp_blob)
 		vfree(lro->core.blp_blob);
+	if (lro->core.bars)
+		kfree(lro->core.bars);
 
 	if (lro->preload_xclbin)
 		vfree(lro->preload_xclbin);
@@ -1503,6 +1719,8 @@ static int (*drv_reg_funcs[])(void) __initdata = {
 	xocl_init_pmc,
 	xocl_init_icap_controller,
 	xocl_init_pcie_firewall,
+	xocl_init_xgq,
+	xocl_init_hwmon_sdm,
 };
 
 static void (*drv_unreg_funcs[])(void) = {
@@ -1537,6 +1755,8 @@ static void (*drv_unreg_funcs[])(void) = {
 	xocl_fini_pmc,
 	xocl_fini_icap_controller,
 	xocl_fini_pcie_firewall,
+	xocl_fini_xgq,
+	xocl_fini_hwmon_sdm,
 };
 
 static int __init xclmgmt_init(void)
@@ -1544,7 +1764,13 @@ static int __init xclmgmt_init(void)
 	int res, i;
 
 	pr_info(DRV_NAME " init()\n");
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
 	xrt_class = class_create(THIS_MODULE, "xrt_mgmt");
+#else
+	xrt_class = class_create("xrt_mgmt");
+#endif
+
 	if (IS_ERR(xrt_class))
 		return PTR_ERR(xrt_class);
 

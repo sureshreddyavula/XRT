@@ -1,19 +1,6 @@
-/**
- * Copyright (C) 2016-2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2016-2022 Xilinx, Inc
+// Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
 #ifndef xrt_device_hal_h
 #define xrt_device_hal_h
 
@@ -26,9 +13,11 @@
 #include "core/include/xrt.h"
 #include "core/include/experimental/xrt_device.h"
 
-#include "xclperf.h"
-#include "xcl_app_debug.h"
-#include "xstream.h"
+#include "core/include/xdp/app_debug.h"
+#include "core/include/xdp/common.h"
+#include "core/include/xdp/counters.h"
+#include "core/include/xdp/trace.h"
+
 #include "ert.h"
 
 #include <memory>
@@ -71,16 +60,6 @@ enum class queue_type : unsigned short
  ,max=3
 };
 
-typedef uint64_t StreamHandle;
-typedef void*    StreamBuf;
-typedef uint64_t StreamBufHandle;
-typedef uint32_t StreamAttributes;
-typedef uint32_t StreamXferFlags;
-typedef uint64_t StreamFlags;
-
-using StreamXferReq = stream_xfer_req;
-using StreamXferCompletions = streams_poll_req_completions;
-using StreamOptType = stream_opt_type;
 /**
  * Helper class to encapsulate return values from HAL operations.
  *
@@ -106,6 +85,27 @@ public:
 
   bool valid() const { return m_valid; }
   ReturnValueType get() const { return m_value; }
+};
+
+template <>
+class operations_result<std::string>
+{
+  std::string m_value;
+  bool m_valid;
+
+public:
+  operations_result(std::string&& s)
+    : m_value(std::move(s))
+    , m_valid(true)
+  {}
+
+  operations_result()
+    : m_value("")
+    , m_valid(false)
+  {}
+
+  bool valid() const { return m_valid; }
+  std::string get() const { return m_value; }
 };
 
 template <>
@@ -253,10 +253,6 @@ public:
   copy(const buffer_object_handle& dst_bo, const buffer_object_handle& src_bo, size_t sz,
        size_t dst_offset, size_t src_offset) = 0;
 
-  virtual void
-  fill_copy_pkt(const buffer_object_handle& dst_boh, const buffer_object_handle& src_boh
-                ,size_t sz, size_t dst_offset, size_t src_offset,ert_start_copybo_cmd* pkt) = 0;
-
   virtual size_t
   read_register(size_t offset, void* buffer, size_t size) = 0;
 
@@ -286,38 +282,6 @@ public:
   {
     throw std::runtime_error("exec_wait not supported");
   }
-
-public:
-  virtual int
-  createWriteStream(StreamFlags flags, hal::StreamAttributes attr, uint64_t route, uint64_t flow, hal::StreamHandle *stream) = 0;
-
-  virtual int
-  createReadStream(StreamFlags flags, hal::StreamAttributes attr, uint64_t route, uint64_t flow, hal::StreamHandle *stream) = 0;
-
-  virtual int
-  closeStream(hal::StreamHandle stream) = 0;
-
-  virtual StreamBuf
-  allocStreamBuf(size_t size, hal::StreamBufHandle *buf) = 0;
-
-  virtual int
-  freeStreamBuf(hal::StreamBufHandle buf) = 0;
-
-  virtual ssize_t
-  writeStream(hal::StreamHandle stream, const void* ptr, size_t size, hal::StreamXferReq* req ) = 0;
-
-  virtual ssize_t
-  readStream(hal::StreamHandle stream, void* ptr, size_t size, hal::StreamXferReq* req) = 0;
-
-  virtual int
-  pollStreams(StreamXferCompletions* comps, int min, int max, int* actual, int timeout) = 0;
-
-  virtual int
-  pollStream(hal::StreamHandle stream, StreamXferCompletions* comps, int min, int max, int* actual, int timeout) = 0;
-
-  virtual int
-  setStreamOpt(hal::StreamHandle stream, int type, uint32_t val) = 0;
-
 
 public:
   /**
@@ -485,13 +449,13 @@ public:
 
   // Following functions are undocumented profiling functions
   virtual operations_result<size_t>
-  clockTraining(xclPerfMonType)
+  clockTraining(xdp::MonitorType)
   {
     return operations_result<size_t>();
   }
 
   virtual operations_result<uint32_t>
-  countTrace(xclPerfMonType)
+  countTrace(xdp::MonitorType)
   {
     return operations_result<uint32_t>();
   }
@@ -509,19 +473,31 @@ public:
   }
 
   virtual operations_result<double>
-  getDeviceMaxRead()
+  getHostMaxRead()
   {
     return operations_result<double>();
   }
 
   virtual operations_result<double>
-  getDeviceMaxWrite()
+  getHostMaxWrite()
+  {
+    return operations_result<double>();
+  }
+
+  virtual operations_result<double>
+  getKernelMaxRead()
+  {
+    return operations_result<double>();
+  }
+
+  virtual operations_result<double>
+  getKernelMaxWrite()
   {
     return operations_result<double>();
   }
 
   virtual operations_result<size_t>
-  readCounters(xclPerfMonType, xclCounterResults&)
+  readCounters(xdp::MonitorType, xdp::CounterResults&)
   {
     return operations_result<size_t>();
   }
@@ -534,7 +510,7 @@ public:
 
 
   virtual operations_result<size_t>
-  readTrace(xclPerfMonType type, xclTraceResultsVector&)
+  readTrace(xdp::MonitorType type, xdp::TraceEventsVector&)
   {
     return operations_result<size_t>();
   }
@@ -558,56 +534,56 @@ public:
   }
 
   virtual operations_result<void>
-  setProfilingSlots(xclPerfMonType type, uint32_t)
+  setProfilingSlots(xdp::MonitorType type, uint32_t)
   {
     return operations_result<void>();
   }
 
   virtual operations_result<uint32_t>
-  getProfilingSlots(xclPerfMonType type)
+  getProfilingSlots(xdp::MonitorType type)
   {
     return operations_result<uint32_t>();
   }
 
   virtual operations_result<void>
-  getProfilingSlotName(xclPerfMonType type, uint32_t slotnum,
+  getProfilingSlotName(xdp::MonitorType type, uint32_t slotnum,
                        char* slotName, uint32_t length)
   {
     return operations_result<void>();
   }
 
   virtual operations_result<uint32_t>
-  getProfilingSlotProperties(xclPerfMonType type, uint32_t slotnum)
+  getProfilingSlotProperties(xdp::MonitorType type, uint32_t slotnum)
   {
     return operations_result<uint32_t>();
   }
 
   virtual operations_result<void>
-  configureDataflow(xclPerfMonType, unsigned *ip_config)
+  configureDataflow(xdp::MonitorType, unsigned *ip_config)
   {
     return operations_result<void>();
   }
 
   virtual operations_result<size_t>
-  startCounters(xclPerfMonType)
+  startCounters(xdp::MonitorType)
   {
     return operations_result<size_t>();
   }
 
   virtual operations_result<size_t>
-  startTrace(xclPerfMonType, uint32_t)
+  startTrace(xdp::MonitorType, uint32_t)
   {
     return operations_result<size_t>();
   }
 
   virtual operations_result<size_t>
-  stopCounters(xclPerfMonType)
+  stopCounters(xdp::MonitorType)
   {
     return operations_result<size_t>();
   }
 
   virtual operations_result<size_t>
-  stopTrace(xclPerfMonType)
+  stopTrace(xdp::MonitorType)
   {
     return operations_result<size_t>();
   }
@@ -675,10 +651,6 @@ XRT_EXPORT
 device_list
 loadDevices();
 
-XRT_EXPORT
-void
-load_xdp();
-
 } // namespace hal
 
 namespace hal2 {
@@ -696,7 +668,7 @@ namespace hal2 {
  *   Number of devices probed by the dll
  */
 void
-createDevices(hal::device_list&,const std::string&,void*,unsigned int);
+createDevices(hal::device_list&, const std::string&, unsigned int);
 
 } // namespace hal2
 

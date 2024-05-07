@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -16,7 +17,7 @@
 
 #include <iomanip>
 
-#define XDP_SOURCE
+#define XDP_CORE_SOURCE
 
 #include "xdp/profile/database/events/device_events.h"
 #include "xdp/profile/database/static_info_database.h"
@@ -91,17 +92,25 @@ namespace xdp {
   }
 
   DeviceMemoryAccess::DeviceMemoryAccess(uint64_t s_id, double ts, VTFEventType ty,
-                                         uint64_t devId, uint32_t monId, int32_t cuIdx)
+                                         uint64_t devId, uint32_t monId, int32_t cuIdx,
+                                         uint64_t memStrId)
                     : VTFDeviceEvent(s_id, ts, ty, devId, monId),
                       cuId(cuIdx),
+                      memoryName(memStrId),
                       // Until implemented, provide a default value for all members
-                      portName(0), memoryName(0), argumentNames(0), burstLength(0),
+                      portName(0), argumentNames(0), burstLength(0),
                       numBytes(0)
   {
   }
 
   DeviceMemoryAccess::~DeviceMemoryAccess()
   {
+  }
+
+  void DeviceMemoryAccess::dump(std::ofstream& fout, uint32_t bucket)
+  {
+    VTFEvent::dump(fout, bucket) ;
+    fout << "," << memoryName << std::endl;
   }
 
   DeviceStreamAccess::DeviceStreamAccess(uint64_t s_id, double ts, VTFEventType ty,

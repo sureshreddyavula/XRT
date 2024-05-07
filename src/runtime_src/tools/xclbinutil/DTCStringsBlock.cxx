@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2018 Xilinx, Inc
+ * Copyright (C) 2018, 2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -17,17 +17,19 @@
 #include "DTCStringsBlock.h"
 
 #include "XclBinUtilities.h"
+#include <boost/format.hpp>
+
 namespace XUtil = XclBinUtilities;
 
 
-DTCStringsBlock::DTCStringsBlock() 
-  : m_pDTCStringBlock(new std::ostringstream())
+DTCStringsBlock::DTCStringsBlock()
+    : m_pDTCStringBlock(new std::ostringstream())
 {
   // Empty
 }
 
 
-DTCStringsBlock::~DTCStringsBlock() 
+DTCStringsBlock::~DTCStringsBlock()
 {
   if (m_pDTCStringBlock != NULL) {
     delete m_pDTCStringBlock;
@@ -42,8 +44,8 @@ DTCStringsBlock::parseDTCStringsBlock(const char* _pBuffer, const unsigned int _
   XUtil::TRACE("Examining and extracting strings from the strings block image.");
 
   // Validate the buffer
-  if (_pBuffer == NULL ) {
-     throw std::runtime_error("ERROR: The given buffer pointer is NULL.");
+  if (_pBuffer == NULL) {
+    throw std::runtime_error("ERROR: The given buffer pointer is NULL.");
   }
 
   if (_size == 0) {
@@ -64,12 +66,12 @@ DTCStringsBlock::parseDTCStringsBlock(const char* _pBuffer, const unsigned int _
       int bufferLen = (index - lastIndex);
       std::string dtcString(&_pBuffer[lastIndex], bufferLen);
 
-      XUtil::TRACE(XUtil::format("Adding DTCString: %s", dtcString.c_str()).c_str());
+      XUtil::TRACE(boost::format("Adding DTCString: %s") % dtcString);
       unsigned int offset = addString(dtcString);
-      
+
       if (offset != lastIndex) {
-        std::string err = XUtil::format("ERROR: DTC string offset mismatch.  Expected: 0x%x, Actual: 0x%x", lastIndex, offset);
-        throw std::runtime_error(err);
+        auto errMsg = boost::format("ERROR: DTC string offset mismatch.  Expected: 0x%x, Actual: 0x%x") % lastIndex % offset;
+        throw std::runtime_error(errMsg.str());
       }
 
       ++index;
@@ -78,47 +80,47 @@ DTCStringsBlock::parseDTCStringsBlock(const char* _pBuffer, const unsigned int _
   }
 }
 
-uint32_t 
-DTCStringsBlock::addString(const std::string _dtcString)
+uint32_t
+DTCStringsBlock::addString(const std::string& _dtcString)
 {
   // Has the string already been added
   std::string haystackString = m_pDTCStringBlock->str();
   std::size_t index = 0;
 
   // Create a new string that "includes" the null termination character
-  std::string sNeedleString(_dtcString.c_str(), _dtcString.length()+ 1);
+  std::string sNeedleString(_dtcString.c_str(), _dtcString.length() + 1);
   index = haystackString.find(sNeedleString);
 
   // Did we find it?
   if (index != std::string::npos) {
-    return (uint32_t) index;
+    return (uint32_t)index;
   }
 
   // Not found, lets add it
   index = m_pDTCStringBlock->tellp();
 
   *m_pDTCStringBlock << _dtcString << '\0';
- 
-  return (uint32_t) index;
+
+  return (uint32_t)index;
 }
 
 
-std::string  
+std::string
 DTCStringsBlock::getString(unsigned int _offset) const
 {
   std::string blockString = m_pDTCStringBlock->str();
 
   if (_offset > blockString.size()) {
-    std::string err = XUtil::format("ERROR: Offset (0x%x) is greater then the string buffer (0x%x).", _offset, blockString.size());
-    throw std::runtime_error(err);
+    auto errMsg = boost::format("ERROR: Offset (0x%x) is greater then the string buffer (0x%x).") %  _offset % blockString.size();
+    throw std::runtime_error(errMsg.str());
   }
 
-  std::string returnString(blockString.c_str()+_offset);
+  std::string returnString(blockString.c_str() + _offset);
   return returnString;
 }
 
 
-void 
+void
 DTCStringsBlock::marshalToDTC(std::ostream& _buf) const
 {
   std::string blockString = m_pDTCStringBlock->str();

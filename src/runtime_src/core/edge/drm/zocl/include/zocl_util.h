@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR Apache-2.0 */
 /*
- * Copyright (C) 2016-2021 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2016-2022 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Author(s):
  *        Min Ma <min.ma@xilinx.com>
@@ -12,22 +13,20 @@
 #ifndef _ZOCL_UTIL_H_
 #define _ZOCL_UTIL_H_
 
+#include "zocl_lib.h"
 #include "kds_core.h"
 #include "zocl_error.h"
 #include "zynq_ioctl.h"
-
-#define zocl_err(dev, fmt, args...)     \
-	dev_err(dev, "%s: "fmt, __func__, ##args)
-#define zocl_info(dev, fmt, args...)    \
-	dev_info(dev, "%s: "fmt, __func__, ##args)
-#define zocl_dbg(dev, fmt, args...)     \
-	dev_dbg(dev, "%s: "fmt, __func__, ##args)
 
 #define _4KB	0x1000
 #define _8KB	0x2000
 #define _64KB	0x10000
 
+#define MAX_PR_SLOT_NUM	32
 #define MAX_CU_NUM     128
+/* Apertures contains both ip and debug ip information */
+#define MAX_APT_NUM		2*MAX_CU_NUM
+#define EMPTY_APT_VALUE		((phys_addr_t) -1)
 #define CU_SIZE        _64KB
 #define PR_ISO_SIZE    _4KB
 
@@ -47,7 +46,10 @@
  * Get the bank index from BO creation flags.
  * bits  0 ~ 15: DDR BANK index
  */
-#define	GET_MEM_BANK(x)		((x) & 0xFFFF)
+#define MEM_BANK_SHIFT_BIT	11
+#define	GET_MEM_INDEX(x)	((x) & 0xFFFF)
+#define	GET_SLOT_INDEX(x)	(((x) >> MEM_BANK_SHIFT_BIT) & 0x7FF)
+#define SET_MEM_INDEX(x, y)	(((x) << MEM_BANK_SHIFT_BIT) | y)
 
 #define ZOCL_GET_ZDEV(ddev) (ddev->dev_private)
 
@@ -61,6 +63,7 @@ struct addr_aperture {
 	size_t		size;
 	u32		prop;
 	int		cu_idx;
+	u32		slot_idx;
 };
 
 enum zocl_mem_type {
@@ -69,19 +72,40 @@ enum zocl_mem_type {
 	ZOCL_MEM_TYPE_STREAMING		= 2,
 };
 
+/* Possible slots Types for ZOCL */
+enum zocl_slot_type {
+	ZOCL_SLOT_TYPE_PHY			= 0,
+	ZOCL_SLOT_TYPE_VIRT			= 1
+};
+
+/* Possible XCLBIN Types that ZOCL supports */
+enum zocl_xclbin_type {
+	ZOCL_XCLBIN_TYPE_FULL			= 0,
+	ZOCL_XCLBIN_TYPE_PL_ONLY		= 1,
+	ZOCL_XCLBIN_TYPE_AIE_ONLY		= 2,
+	ZOCL_XCLBIN_TYPE_PS			= 3
+};
+
+/* Hard coded XCLBIN slot id for AIE in ZOCL */
+enum zocl_xclbin_slot {
+	ZOCL_DEFAULT_XCLBIN_SLOT		= 0,
+	ZOCL_AIE_ONLY_XCLBIN_SLOT		= 1
+};
+
 /*
  * Memory structure in zocl driver. There will be an array of this
  * structure where each element is representing each section in
  * the memory topology in xclbin.
  */
 struct zocl_mem {
+	u32			zm_mem_idx;
 	enum zocl_mem_type	zm_type;
 	unsigned int		zm_used;
 	u64			zm_base_addr;
 	u64			zm_size;
 	struct drm_zocl_mm_stat zm_stat;
-	struct drm_mm          *zm_mm;    /* DRM MM node for PL-DDR */
-	struct list_head 	zm_mm_list;
+	struct list_head	link;
+	struct list_head        zm_list;
 };
 
 /*
@@ -90,6 +114,7 @@ struct zocl_mem {
  */
 struct zdev_data {
 	char fpga_driver_name[64];
+	char fpga_driver_new_name[64];
 };
 
 struct aie_metadata {
@@ -97,37 +122,60 @@ struct aie_metadata {
 	void *data;
 };
 
+struct drm_zocl_slot {
+	u32			 slot_idx;
+	u32			 slot_type;
+	u32			 xclbin_type;
+	struct mem_topology	*topology;
+	struct ip_layout	*ip;
+	struct debug_ip_layout	*debug_ip;
+	struct connectivity	*connectivity;
+	struct axlf             *axlf;
+	size_t                   axlf_size;
+	struct aie_metadata	 aie_data;
+
+	u64			 pr_isolation_addr;
+	u16			 pr_isolation_freeze;
+	u16			 pr_isolation_unfreeze;
+	int			 partial_overlay_id;
+
+	int			 ksize;
+	char			*kernels;
+
+	struct zocl_xclbin	*slot_xclbin;
+	struct mutex		 slot_xclbin_lock;
+};
+
+struct zocl_cu_subdev {
+	unsigned int		 cu_num;
+	unsigned int             irq[MAX_CU_NUM];
+	struct platform_device	*cu_pldev[MAX_CU_NUM];
+	struct addr_aperture	*apertures;
+	unsigned int		 num_apts;
+	struct mutex		 lock;
+};
+
 struct drm_zocl_dev {
 	struct drm_device       *ddev;
 	struct fpga_manager     *fpga_mgr;
 	struct zocl_ert_dev     *ert;
-	struct iommu_domain     *domain;
+	struct iommu_domain	*domain;
 	phys_addr_t              host_mem;
 	resource_size_t          host_mem_len;
 	/* Record start address, this is only for MPSoC as PCIe platform */
 	phys_addr_t		 res_start;
-	unsigned int		 cu_num;
-	unsigned int             irq[MAX_CU_NUM];
 	struct sched_exec_core  *exec;
-	unsigned int		 num_mem;
-	struct zocl_mem		*mem;
+	/* Zocl driver memory list head */
+	struct list_head	 zm_list_head;
+	struct drm_mm           *zm_drm_mm;    /* DRM MM node for PL-DDR */
 	struct mutex		 mm_lock;
 	struct mutex		 aie_lock;
 
 	struct list_head	 ctx_list;
 
-	struct mem_topology	*topology;
-	struct ip_layout	*ip;
-	struct debug_ip_layout	*debug_ip;
-	struct connectivity	*connectivity;
-	struct addr_aperture	*apertures;
-	struct axlf             *axlf;
-	size_t                   axlf_size;
-	struct aie_metadata	 aie_data;
-	unsigned int		 num_apts;
-
+	struct zocl_cu_subdev	 cu_subdev;
+	struct platform_device	*cu_intc;
 	struct kds_sched	 kds;
-	struct platform_device	*cu_pldev[MAX_CU_NUM];
 
 	/*
 	 * This RW lock is to protect the sysfs nodes exported
@@ -144,20 +192,14 @@ struct drm_zocl_dev {
 	struct dma_chan		*zdev_dma_chan;
 	struct mailbox		*zdev_mailbox;
 	const struct zdev_data	*zdev_data_info;
-	u64			pr_isolation_addr;
-	struct zocl_xclbin	*zdev_xclbin;
-	struct mutex		zdev_xclbin_lock;
-	struct generic_cu	*generic_cu;
-	int			 ksize;
-	char			*kernels;
-	struct zocl_error	zdev_error;
+	struct zocl_error	 zdev_error;
 	struct zocl_aie		*aie;
-	struct zocl_watchdog_dev *watchdog;
-	u16			pr_isolation_freeze;
-	u16			pr_isolation_unfreeze;
-	int 			partial_overlay_id;
-	int			full_overlay_id;
+
+	int			 num_pr_slot;
+	int			 full_overlay_id;
+	struct drm_zocl_slot	*pr_slot[MAX_PR_SLOT_NUM];
 };
 
-int zocl_kds_update(struct drm_zocl_dev *zdev, struct drm_zocl_kds *cfg);
+int zocl_kds_update(struct drm_zocl_dev *zdev, struct drm_zocl_slot *slot,
+		    struct drm_zocl_kds *cfg);
 #endif

@@ -33,19 +33,13 @@
 class SectionHeader {
  public:
   SectionHeader();
-  virtual ~SectionHeader();
 
  public:
   void readXclBinBinarySection(std::fstream& _istream, unsigned int _section);
 
  private:
-  enum axlf_section_kind m_eType;  /* Type of section */
+  axlf_section_kind m_eType;  /* Type of section */
   std::string m_name;              /* Name of section (not really used in the xclbin anymore */
-
- private:
-  // Purposefully private and undefined ctors...
-  SectionHeader(const SectionHeader& obj);
-  SectionHeader& operator=(const SectionHeader& obj);
 };
 
 

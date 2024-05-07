@@ -32,7 +32,7 @@
 
 namespace XUtil = XclBinUtilities;
 
-std::string  
+std::string
 XclBinUtilities::get_dtype_str(DType data_type)
 {
   switch (data_type) {
@@ -66,7 +66,8 @@ XclBinUtilities::get_dtype_str(DType data_type)
 
 void
 XclBinUtilities::TRACE_PrintTree(const std::string& msg,
-                                 const rapidjson::Document& doc) {
+                                 const rapidjson::Document& doc)
+{
   // Only report data in verbose mode
   if (!XUtil::getVerbose())
     return;
@@ -85,8 +86,9 @@ XclBinUtilities::TRACE_PrintTree(const std::string& msg,
 
 // Determine what the expected type is for the given scope
 XclBinUtilities::DType
-XclBinUtilities::get_expected_type( const std::string& scope,
-                                    const XclBinUtilities::KeyTypeCollection& keyTypeCollection) {
+XclBinUtilities::get_expected_type(const std::string& scope,
+                                   const XclBinUtilities::KeyTypeCollection& keyTypeCollection)
+{
   // Check to see if there is a mapping for this scope
   auto it = std::find_if(keyTypeCollection.begin(),
                          keyTypeCollection.end(),
@@ -123,7 +125,7 @@ void recursive_transformation(const std::string& scope,
 
       if (attribute.IsObject()) {
         for (auto itr2 = attribute.MemberBegin(); itr2 != attribute.MemberEnd(); ++itr2) {
-          recursive_transformation(scope + "[]" + itr2->name.GetString(), itr2, keyTypeCollection);
+          recursive_transformation(scope + "[]::" + itr2->name.GetString(), itr2, keyTypeCollection);
         }
       }
     }
@@ -163,7 +165,7 @@ void recursive_transformation(const std::string& scope,
         }
         try {
           // Supports both base 10 and 16 (e.g., "0x..."
-          itrObject->value.SetUint64(std::stoull(itrObject->value.GetString(),0,0));
+          itrObject->value.SetUint64(std::stoull(itrObject->value.GetString(), 0, 0));
         } catch (...) {
           std::string errMsg = (boost::format("Error: Malformed integer: '%s'") % workingString).str();
           throw std::runtime_error(errMsg);
@@ -178,10 +180,11 @@ void recursive_transformation(const std::string& scope,
 // Transform the rapidjson primitives to their expected values
 void
 XclBinUtilities::transform_to_primatives(rapidjson::Document& doc,
-                                         const KeyTypeCollection& keyTypeCollection) {
+                                         const KeyTypeCollection& keyTypeCollection)
+{
   if (doc.IsObject()) {
     for (auto itr = doc.MemberBegin(); itr != doc.MemberEnd(); ++itr) {
-      recursive_transformation(std::string("#")+itr->name.GetString(), itr, keyTypeCollection);
+      recursive_transformation(std::string("#") + itr->name.GetString(), itr, keyTypeCollection);
     }
   }
 }
@@ -191,7 +194,8 @@ static void
 recursive_write_cbor(const std::string& scope,
                      const rapidjson::Value& attribute,
                      const XUtil::KeyTypeCollection& keyTypeCollection,
-                     std::ostringstream& buffer) {
+                     std::ostringstream& buffer)
+{
   XUtil::TRACE((boost::format("EScope: %s") % scope).str());
 
   // Serialize the MAP of items (Note: Objects are maps)
@@ -249,7 +253,8 @@ recursive_write_cbor(const std::string& scope,
 void
 XclBinUtilities::write_cbor(rapidjson::Document& doc,
                             const KeyTypeCollection& keyTypeCollection,
-                            std::ostringstream& buffer) {
+                            std::ostringstream& buffer)
+{
 
   auto mapSize = doc.MemberCount();
 
@@ -271,7 +276,8 @@ XclBinUtilities::write_cbor(rapidjson::Document& doc,
 void
 recursive_read_cbor(std::istream& istr,
                     rapidjson::Value& aValue,
-                    rapidjson::Document::AllocatorType& allocator) {
+                    rapidjson::Document::AllocatorType& allocator)
+{
   XclBinUtilities::MajorTypes majorType;
   uint64_t count = 0;
   XclBinUtilities::get_next_type_and_count(istr, majorType, count);
@@ -339,12 +345,13 @@ recursive_read_cbor(std::istream& istr,
 
 void
 XclBinUtilities::read_cbor(std::istream& istr,
-                           rapidjson::Document& doc) {
+                           rapidjson::Document& doc)
+{
   MajorTypes majorType;
   uint64_t count = 0;
 
   XclBinUtilities::get_next_type_and_count(istr, majorType, count);
-  if (majorType !=MajorTypes:: map_of_items)
+  if (majorType != MajorTypes:: map_of_items)
     throw std::runtime_error("Error: CBOR images does not start with Major Type 5 'Map of Items'");
 
   // We are working with a map of items, indicate so in the document
@@ -369,9 +376,9 @@ XclBinUtilities::read_cbor(std::istream& istr,
 #ifndef ENABLE_JSON_SCHEMA_VALIDATION
 
 void
-XclBinUtilities::validate_against_schema( const std::string &, 
-                                          const rapidjson::Document &, 
-                                          const std::string &)
+XclBinUtilities::validate_against_schema(const std::string&,
+                                         const rapidjson::Document&,
+                                         const std::string&)
 {
   std::cout << "Info: JSON Schema Validation is not support with this version of software.";
 }
@@ -379,11 +386,11 @@ XclBinUtilities::validate_against_schema( const std::string &,
 #else
 #include <rapidjson/schema.h>
 
-void 
-XclBinUtilities::validate_against_schema(const std::string &nodeName, const rapidjson::Document & doc, const std::string & schema)
+void
+XclBinUtilities::validate_against_schema(const std::string& nodeName, const rapidjson::Document& doc, const std::string& schema)
 {
   rapidjson::Document sd;
-  if(sd.Parse(schema.c_str()).HasParseError()) {
+  if (sd.Parse(schema.c_str()).HasParseError()) {
     XUtil::TRACE(boost::str(boost::format("Schema:\n %s") % schema));
     throw std::runtime_error("Error: The given JSON schema is not valid JSON.");
   }
@@ -400,7 +407,7 @@ XclBinUtilities::validate_against_schema(const std::string &nodeName, const rapi
   // The JSON image is invalid according to the schema
   rapidjson::StringBuffer sb;
   validator.GetInvalidSchemaPointer().StringifyUriFragment(sb);
-    
+
   std::ostringstream buf;
   buf << "Error: JSON schema violation" << std::endl;
   boost::format simpleFormat("  %-22s: %s\n");
@@ -418,40 +425,40 @@ XclBinUtilities::validate_against_schema(const std::string &nodeName, const rapi
 }
 #endif
 
-static void recursive_collect_properties( const std::string& scope, rapidjson::Value::MemberIterator itrObject, XclBinUtilities::KeyTypeCollection& keyTypeCollection);
-static void recursive_collect_array( const std::string& scope, rapidjson::Value::MemberIterator itrObject, XclBinUtilities::KeyTypeCollection& keyTypeCollection);
+static void recursive_collect_properties(const std::string& scope, rapidjson::Value::MemberIterator itrObject, XclBinUtilities::KeyTypeCollection& keyTypeCollection);
+static void recursive_collect_array(const std::string& scope, rapidjson::Value::MemberIterator itrObject, XclBinUtilities::KeyTypeCollection& keyTypeCollection);
 
 
-static 
-void recursive_collect_array( const std::string& scope, 
-                              rapidjson::Value::MemberIterator itrObject, 
-                              XclBinUtilities::KeyTypeCollection& keyTypeCollection)
+static
+void recursive_collect_array(const std::string& scope,
+                             rapidjson::Value::MemberIterator itrObject,
+                             XclBinUtilities::KeyTypeCollection& keyTypeCollection)
 {
   const rapidjson::Value::MemberIterator itemsItr = itrObject->value.FindMember("items");
   if (itemsItr == itrObject->value.MemberEnd())
     return;
 
   const rapidjson::Value::MemberIterator typeItr = itemsItr->value.FindMember("type");
-  if (typeItr == itemsItr->value.MemberEnd()) 
+  if (typeItr == itemsItr->value.MemberEnd())
     return;
 
   // -- array of objects --
   if (std::string("object") == typeItr->value.GetString()) {
     const rapidjson::Value::MemberIterator propertiesItr = itemsItr->value.FindMember("properties");
-    if (propertiesItr == itemsItr->value.MemberEnd()) 
+    if (propertiesItr == itemsItr->value.MemberEnd())
       return;
 
-    for (auto itr = propertiesItr->value.MemberBegin(); itr != propertiesItr->value.MemberEnd(); ++itr) 
-      recursive_collect_properties(scope + "[]" + itr->name.GetString(), itr, keyTypeCollection);
+    for (auto itr = propertiesItr->value.MemberBegin(); itr != propertiesItr->value.MemberEnd(); ++itr)
+      recursive_collect_properties(scope + "[]::" + itr->name.GetString(), itr, keyTypeCollection);
 
-    return; 
+    return;
   }
 }
 
 static
-void recursive_collect_properties( const std::string& scope,
-                                   rapidjson::Value::MemberIterator itrObject,
-                                   XclBinUtilities::KeyTypeCollection& keyTypeCollection)
+void recursive_collect_properties(const std::string& scope,
+                                  rapidjson::Value::MemberIterator itrObject,
+                                  XclBinUtilities::KeyTypeCollection& keyTypeCollection)
 {
   XUtil::TRACE((boost::format("CScope: %s") % scope).str());
 
@@ -466,19 +473,23 @@ void recursive_collect_properties( const std::string& scope,
     if (propertiesItr == itrObject->value.MemberEnd())
       return;
 
-    for (auto itr = propertiesItr->value.MemberBegin(); itr != propertiesItr->value.MemberEnd(); ++itr) 
+    for (auto itr = propertiesItr->value.MemberBegin(); itr != propertiesItr->value.MemberEnd(); ++itr)
       recursive_collect_properties(scope + "::" + itr->name.GetString(), itr, keyTypeCollection);
-      
-    return; 
+
+    return;
   }
 
   // -- array --
-  if (std::string("array") == typeItr->value.GetString()) 
-    return recursive_collect_array(scope, itrObject, keyTypeCollection);
-    
+  if (std::string("array") == typeItr->value.GetString()) {
+    recursive_collect_array(scope, itrObject, keyTypeCollection);
+    return;
+  }
+
   // -- integer --
-  if (std::string("integer") == typeItr->value.GetString()) 
-    return keyTypeCollection.emplace_back(scope, XUtil::DType::integer);
+  if (std::string("integer") == typeItr->value.GetString()) {
+    keyTypeCollection.emplace_back(scope, XUtil::DType::integer);
+    return;
+  }
 
   // -- string --
   if (std::string("string") == typeItr->value.GetString()) {
@@ -487,25 +498,31 @@ void recursive_collect_properties( const std::string& scope,
       return;
 
     //-- hex-encoded_string --
-    if (std::string("hex-encoded") == cborTypeItr->value.GetString()) 
-      return keyTypeCollection.emplace_back(scope, XUtil::DType::hex_byte_string);
-  
+    if (std::string("hex-encoded") == cborTypeItr->value.GetString()) {
+      keyTypeCollection.emplace_back(scope, XUtil::DType::hex_byte_string);
+      return;
+    }
+
     //-- byte file on disk --
-    if (std::string("file-image") == cborTypeItr->value.GetString()) 
-      return keyTypeCollection.emplace_back(scope, XUtil::DType::byte_file);
-  
+    if (std::string("file-image") == cborTypeItr->value.GetString()) {
+      keyTypeCollection.emplace_back(scope, XUtil::DType::byte_file);
+      return;
+    }
+
     //-- enumeration --
-    if (std::string("enum-encoded") == cborTypeItr->value.GetString()) 
-      return keyTypeCollection.emplace_back(scope, XUtil::DType::enumeration);
-  
+    if (std::string("enum-encoded") == cborTypeItr->value.GetString()) {
+      keyTypeCollection.emplace_back(scope, XUtil::DType::enumeration);
+      return;
+    }
+
     return;
   }
 }
 
 
-void 
-XclBinUtilities::collect_key_types(const std::string & jsonSchema, 
-                                   KeyTypeCollection & key_type_collection)
+void
+XclBinUtilities::collect_key_types(const std::string& jsonSchema,
+                                   KeyTypeCollection& key_type_collection)
 {
   // Initialize return values
   key_type_collection.clear();
@@ -526,12 +543,12 @@ XclBinUtilities::collect_key_types(const std::string & jsonSchema,
 
 
   XUtil::TRACE("Found 'properties'");
-  for (auto itr2 = itr->value.MemberBegin(); itr2 !=itr->value.MemberEnd(); ++itr2) 
-    recursive_collect_properties(std::string("#")+itr2->name.GetString(), itr2, key_type_collection);
-  
+  for (auto itr2 = itr->value.MemberBegin(); itr2 != itr->value.MemberEnd(); ++itr2)
+    recursive_collect_properties(std::string("#") + itr2->name.GetString(), itr2, key_type_collection);
+
   if (XUtil::getVerbose()) {
-    for (const auto & entry : key_type_collection) {
-      std::cout << boost::str(boost::format("%s : %s(%d)\n") % entry.first % get_dtype_str(entry.second) % (int) entry.second);
+    for (const auto& entry : key_type_collection) {
+      std::cout << boost::str(boost::format("%s : %s(%d)\n") % entry.first % get_dtype_str(entry.second) % (int)entry.second);
     }
   }
 }

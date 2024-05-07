@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2017 Xilinx, Inc
+ * Copyright (C) 2016-2021 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -19,25 +19,14 @@
 #include "core/common/config.h"
 #include "core/common/config_reader.h"
 #include "core/include/xrt.h"
+#include "core/include/experimental/xrt_message.h"
 #include <string>
 #include <cstdio>
 #include <vector>
 
 namespace xrt_core { namespace message {
 
-//modeled based on syslog severity.
-enum class severity_level : unsigned short
-{
-  emergency = xrtLogMsgLevel::XRT_EMERGENCY,
-  alert     = xrtLogMsgLevel::XRT_ALERT,
-  critical  = xrtLogMsgLevel::XRT_CRITICAL,
-  error     = xrtLogMsgLevel::XRT_ERROR,
-  warning   = xrtLogMsgLevel::XRT_WARNING,
-  notice    = xrtLogMsgLevel::XRT_NOTICE,
-  info      = xrtLogMsgLevel::XRT_INFO,
-  debug     = xrtLogMsgLevel::XRT_DEBUG
-};
-
+using severity_level = xrt::message::level;
 
 XRT_CORE_COMMON_EXPORT
 void
@@ -65,9 +54,9 @@ send(severity_level l, const char* tag, const char* format, Args ... args)
       send(severity_level::error, tag, "Illegal arguments in log format string");
       return;
     }
-    
-    std::vector<char> buf(sz+1);
-    snprintf(buf.data(), sz, format, args ...);
+
+    std::vector<char> buf(sz + 1);
+    snprintf(buf.data(), sz + 1, format, args ...);
     send(l, tag, buf.data());
   }
 }

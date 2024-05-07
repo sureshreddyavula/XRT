@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2020 Xilinx, Inc
+ * Copyright (C) 2020, 2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -16,71 +16,67 @@
 
 #include "SectionAIEMetadata.h"
 
+#include "XclBinUtilities.h"
+#include <boost/functional/factory.hpp>
 #include <boost/property_tree/json_parser.hpp>
 
-#include "XclBinUtilities.h"
 namespace XUtil = XclBinUtilities;
 
 // Static Variables / Classes
-SectionAIEMetadata::_init SectionAIEMetadata::_initializer;
+// ----------------------------------------------------------------------------
+SectionAIEMetadata::init SectionAIEMetadata::initializer;
 
-void 
-SectionAIEMetadata::marshalToJSON( char* _pDataSection, 
-                                   unsigned int _sectionSize, 
-                                   boost::property_tree::ptree& _ptree) const
+SectionAIEMetadata::init::init()
 {
-    XUtil::TRACE("");
-    XUtil::TRACE("Extracting: AIE_METADATA");
+  auto sectionInfo = std::make_unique<SectionInfo>(AIE_METADATA, "AIE_METADATA", boost::factory<SectionAIEMetadata*>());
 
-    std::vector <unsigned char> memBuffer(_sectionSize + 1);  // Extra byte for "null terminate" char
-    memcpy((char *) memBuffer.data(), _pDataSection, _sectionSize);
-    memBuffer[_sectionSize] = '\0';
+  sectionInfo->supportedAddFormats.push_back(FormatType::json);
+  sectionInfo->supportedAddFormats.push_back(FormatType::raw);
 
-    std::stringstream ss((char*) memBuffer.data());
+  sectionInfo->supportedDumpFormats.push_back(FormatType::json);
+  sectionInfo->supportedDumpFormats.push_back(FormatType::html);
 
-    // TODO: Catch the exception (if any) from this call and produce a nice message
-    XUtil::TRACE_BUF("AIE_METADATA", (const char *) memBuffer.data(), _sectionSize+1);
-    try {
-      boost::property_tree::ptree pt;
-      boost::property_tree::read_json(ss, pt);
-      boost::property_tree::ptree &buildMetaData = pt.get_child("aie_metadata");
-      _ptree.add_child("aie_metadata", buildMetaData);
-    } catch (const std::exception & e) {
-      std::string msg("ERROR: Bad JSON format detected while marshaling AIE metadata (");
-      msg += e.what();
-      msg += ").";
-      throw std::runtime_error(msg);
-    }
+  addSectionType(std::move(sectionInfo));
 }
 
-void 
-SectionAIEMetadata::marshalFromJSON( const boost::property_tree::ptree& _ptSection, 
-                                       std::ostringstream& _buf) const
-{
-   XUtil::TRACE("AIE_METADATA");
-   boost::property_tree::ptree ptWritable = _ptSection;
-   boost::property_tree::write_json(_buf, ptWritable, false );
-}
+// ----------------------------------------------------------------------------
 
-bool 
-SectionAIEMetadata::doesSupportAddFormatType(FormatType _eFormatType) const
+void
+SectionAIEMetadata::marshalToJSON(char* _pDataSection,
+                                  unsigned int _sectionSize,
+                                  boost::property_tree::ptree& _ptree) const
 {
-  if ((_eFormatType == FT_JSON) ||
-      (_eFormatType == FT_RAW)) {
-    return true;
+  XUtil::TRACE("");
+  XUtil::TRACE("Extracting: AIE_METADATA");
+
+  std::vector<unsigned char> memBuffer(_sectionSize + 1);  // Extra byte for "null terminate" char
+  memcpy((char*)memBuffer.data(), _pDataSection, _sectionSize);
+  memBuffer[_sectionSize] = '\0';
+
+  std::stringstream ss((char*)memBuffer.data());
+
+  // TODO: Catch the exception (if any) from this call and produce a nice message
+  XUtil::TRACE_BUF("AIE_METADATA", (const char*)memBuffer.data(), _sectionSize + 1);
+  try {
+    boost::property_tree::ptree pt;
+    boost::property_tree::read_json(ss, pt);
+    boost::property_tree::ptree& buildMetaData = pt.get_child("aie_metadata");
+    _ptree.add_child("aie_metadata", buildMetaData);
+  } catch (const std::exception& e) {
+    std::string msg("ERROR: Bad JSON format detected while marshaling AIE metadata (");
+    msg += e.what();
+    msg += ").";
+    throw std::runtime_error(msg);
   }
-  return false;
 }
 
-bool 
-SectionAIEMetadata::doesSupportDumpFormatType(FormatType _eFormatType) const
+void
+SectionAIEMetadata::marshalFromJSON(const boost::property_tree::ptree& _ptSection,
+                                    std::ostringstream& _buf) const
 {
-    if ((_eFormatType == FT_JSON) ||
-        (_eFormatType == FT_HTML)) {
-      return true;
-    }
-    return false;
+  XUtil::TRACE("AIE_METADATA");
+  boost::property_tree::ptree ptWritable = _ptSection;
+  boost::property_tree::write_json(_buf, ptWritable, false);
 }
-
 
 

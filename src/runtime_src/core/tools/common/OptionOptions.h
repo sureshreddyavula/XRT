@@ -1,18 +1,6 @@
-/**
- * Copyright (C) 2020-2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2020-2022 Xilinx, Inc
+// Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
 
 #ifndef __OptionOptions_h_
 #define __OptionOptions_h_
@@ -20,19 +8,33 @@
 // Please keep eternal include file dependencies to a minimum
 #include <vector>
 #include <string>
+#include <boost/format.hpp>
 #include <boost/program_options.hpp>
+
+#include "JSONConfigurable.h"
   
-class OptionOptions {
+class OptionOptions : public JSONConfigurable {
  public:
   typedef std::vector<std::string> SubCmdOptions;
 
   virtual void execute(const SubCmdOptions &_options) const = 0;
 
  public:
+  const boost::shared_ptr<boost::program_options::option_description>&
+  option() const
+  {
+    if (m_selfOption.options().empty())
+      throw std::runtime_error(boost::str(boost::format("%s missing self option") % longName()));
+    return m_selfOption.options()[0];
+  };
   const std::string &longName() const { return m_longName; };
+  const std::string &getConfigName() const { return longName(); };
+  const std::string optionNameString() const { return m_shortName.empty() ? m_longName : m_longName + "," + m_shortName; };
   const std::string &description() const {return m_description; };
+  const std::string &getConfigDescription() const { return description(); };
   const std::string &extendedHelp() const { return m_extendedHelp; };
   bool isHidden() const { return m_isHidden; };
+  bool getConfigHidden() const {return isHidden();};
 
   void setExecutable( const std::string &_executable) {m_executable = _executable; };
   void setCommand( const std::string & _command) {m_command = _command; };
@@ -49,15 +51,20 @@ class OptionOptions {
 
  // Child class Helper methods
  protected:
-  OptionOptions(const std::string & _longName, bool _isHidden, const std::string & _description);
-  void setExtendedHelp(const std::string &_extendedHelp) { m_extendedHelp = _extendedHelp; };
+  OptionOptions(const std::string & longName, bool isHidden, const std::string & description);
+  OptionOptions(const std::string& longName, const std::string& shortName, const std::string& optionDescription, const boost::program_options::value_semantic* optionValue, const std::string& valueDescription, bool isHidden);
+  void setExtendedHelp(const std::string &extendedHelp) { m_extendedHelp = extendedHelp; };
   void printHelp() const;
+  std::vector<std::string> process_arguments( boost::program_options::variables_map& vm,
+                                              const SubCmdOptions& options,
+                                              bool validate_arguments = true) const;
 
  private:
   OptionOptions() = delete;
 
  // Variables
  protected:
+  boost::program_options::options_description m_selfOption;
   boost::program_options::options_description m_optionsDescription;
   boost::program_options::options_description m_optionsHidden;
   boost::program_options::positional_options_description m_positionalOptions;
@@ -66,9 +73,11 @@ class OptionOptions {
   std::string m_executable;
   std::string m_command;
   std::string m_longName;
+  std::string m_shortName;
   bool m_isHidden;
   std::string m_description;
   std::string m_extendedHelp;
+  bool m_defaultOptionValue;
   boost::program_options::options_description m_globalOptions;
 };
   

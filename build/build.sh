@@ -3,6 +3,8 @@
 set -e
 
 OSDIST=`grep '^ID=' /etc/os-release | awk -F= '{print $2}' | tr -d '"'`
+VERSION=`grep '^VERSION_ID=' /etc/os-release | awk -F= '{print $2}' | tr -d '"'`
+MAJOR=${VERSION%.*}
 BUILDDIR=$(readlink -f $(dirname ${BASH_SOURCE[0]}))
 CORE=`grep -c ^processor /proc/cpuinfo`
 CMAKE=cmake
@@ -10,7 +12,7 @@ CMAKE_MAJOR_VERSION=`cmake --version | head -n 1 | awk '{print $3}' |awk -F. '{p
 CPU=`uname -m`
 
 if [[ $CMAKE_MAJOR_VERSION != 3 ]]; then
-    if [[ $OSDIST == "centos" ]] || [[ $OSDIST == "amzn" ]] || [[ $OSDIST == "rhel" ]] || [[ $OSDIST == "fedora" ]]; then
+    if [[ $OSDIST == "centos" ]] || [[ $OSDIST == "amzn" ]] || [[ $OSDIST == "rhel" ]] || [[ $OSDIST == "fedora" ]] || [[ $OSDIST == "mariner" ]] || [[ $OSDIST == "almalinux" ]]; then
         CMAKE=cmake3
         if [[ ! -x "$(command -v $CMAKE)" ]]; then
             echo "$CMAKE is not installed, please run xrtdeps.sh"
@@ -34,19 +36,33 @@ if [[ $CPU == "aarch64" ]] && [[ $OSDIST == "ubuntu" ]]; then
     fi
 fi
 
+# Use GCC 9 on CentOS 8 and RHEL 8 for std::filesystem
+# The dependency is installed by xrtdeps.sh
+if [[ $CPU == "x86_64" ]] && [[ $OSDIST == "centos" || $OSDIST == "rhel" ]] && [[ $MAJOR == 8 ]]; then
+    source /opt/rh/gcc-toolset-9/enable
+fi
+
 usage()
 {
     echo "Usage: build.sh [options]"
     echo
     echo "[-help]                     List this help"
     echo "[clean|-clean]              Remove build directories"
+    echo "[-ci]                       Build is initiated by CI"
     echo "[-dbg]                      Build debug library only (default)"
     echo "[-opt]                      Build optimized library only (default)"
     echo "[-edge]                     Build edge of x64.  Turns off opt and dbg"
+    echo "[-hip]                      Enable hip bindings"
+    echo "[-noalveo]                  Disable bundling of Alveo Linux drivers"
+    echo "[-disable-werror]           Disable compilation with warnings as error"
     echo "[-nocmake]                  Skip CMake call"
+    echo "[-noert]                    Do not treat missing ERT FW as a build error"
+    echo "[-noinit]                   Do not initialize Git submodules"
     echo "[-noctest]                  Skip unit tests"
     echo "[-with-static-boost <boost> Build binaries using static linking of boost from specified boost install"
     echo "[-clangtidy]                Run clang-tidy as part of build"
+    echo "[-pskernel]                 Enable building of POC ps kernel"
+    echo "[-cppstd]                   Cpp standard (default: 17)"
     echo "[-docs]                     Enable documentation generation with sphinx"
     echo "[-j <n>]                    Compile parallel (default: system cores)"
     echo "[-ccache]                   Build using RDI's compile cache"
@@ -54,6 +70,8 @@ usage()
     echo "[-driver]                   Include building driver code"
     echo "[-checkpatch]               Run checkpatch.pl on driver code"
     echo "[-verbose]                  Turn on verbosity when compiling"
+    echo "[-install_prefix <path>]    set CMAKE_INSTALL_PREFIX to path"
+    echo "[-ertbsp <dir>]             Path to directory with pre-downloaded BSP files for building ERT (default: download BSP files during build time)"
     echo "[-ertfw <dir>]              Path to directory with pre-built ert firmware (default: build the firmware)"
     echo ""
     echo "ERT firmware is built if and only if MicroBlaze gcc compiler can be located."
@@ -72,6 +90,7 @@ usage()
 
 clean=0
 ccache=0
+ci=0
 docs=0
 verbose=""
 driver=0
@@ -81,10 +100,16 @@ opt=1
 dbg=1
 edge=0
 nocmake=0
+init_submodule=1
 nobuild=0
 noctest=0
+noert=0
 static_boost=""
+ertbsp=""
 ertfw=""
+werror=1
+alveo=1
+xrt_install_prefix="/opt/xilinx"
 cmake_flags="-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
 
 while [ $# -gt 0 ]; do
@@ -96,9 +121,22 @@ while [ $# -gt 0 ]; do
             clean=1
             shift
             ;;
+        -ci)
+            ci=1
+            shift
+            ;;
+        -noert)
+            noert=1
+            shift
+            ;;
         -dbg)
             dbg=1
             opt=0
+            shift
+            ;;
+        -ertbsp)
+            shift
+            ertbsp=$1
             shift
             ;;
         -ertfw)
@@ -112,6 +150,14 @@ while [ $# -gt 0 ]; do
             opt=0
             dbg=0
             ;;
+        -hip)
+            shift
+            cmake_flags+=" -DXRT_ENABLE_HIP=ON"
+            ;;
+	-noalveo)
+            shift
+	    alveo=0
+            ;;
         -opt)
             dbg=0
             opt=1
@@ -121,8 +167,16 @@ while [ $# -gt 0 ]; do
             nocmake=1
             shift
             ;;
+        -noinit)
+            init_submodule=0
+            shift
+            ;;
         -noctest)
             noctest=1
+            shift
+            ;;
+        -disable-werror|--disable-werror)
+            werror=0
             shift
             ;;
         -j)
@@ -133,6 +187,11 @@ while [ $# -gt 0 ]; do
         -ccache)
             cmake_flags+=" -DRDI_CCACHE=1"
             ccache=1
+            shift
+            ;;
+        -cppstd)
+            shift
+            cmake_flags+=" -DCMAKE_CXX_STANDARD=$1"
             shift
             ;;
         -toolchain)
@@ -158,8 +217,17 @@ while [ $# -gt 0 ]; do
             cmake_flags+=" -DXRT_CLANG_TIDY=ON"
             shift
             ;;
+        -pskernel)
+            cmake_flags+=" -DXRT_PSKERNEL_BUILD=ON"
+            shift
+            ;;
         -verbose)
             verbose="VERBOSE=1"
+            shift
+            ;;
+        -install_prefix)
+            shift
+            xrt_install_prefix=$1
             shift
             ;;
         -with-static-boost)
@@ -177,6 +245,18 @@ done
 debug_dir=${DEBUG_DIR:-Debug}
 release_dir=${REL_DIR:-Release}
 edge_dir=${EDGE_DIR:-Edge}
+
+# By default compile with warnings as errors.
+# Update every time CMake is generating makefiles.
+# Disable with '-disable-werror' option.
+cmake_flags+=" -DXRT_ENABLE_WERROR=$werror"
+
+# set CMAKE_INSTALL_PREFIX
+cmake_flags+=" -DCMAKE_INSTALL_PREFIX=$xrt_install_prefix -DXRT_INSTALL_PREFIX=$xrt_install_prefix"
+
+if [[ $alveo == 1 ]]; then
+    cmake_flags+=" -DXRT_DKMS_ALVEO=ON"
+fi
 
 here=$PWD
 cd $BUILDDIR
@@ -201,6 +281,11 @@ if [[ $ccache == 1 ]]; then
     fi
 fi
 
+if [[ ! -z $ertbsp ]]; then
+    echo "export ERT_BSP_DIR=$ertbsp"
+    export ERT_BSP_DIR=$ertbsp
+fi
+
 if [[ ! -z $ertfw ]]; then
     echo "export XRT_FIRMWARE_DIR=$ertfw"
     export XRT_FIRMWARE_DIR=$ertfw
@@ -220,8 +305,30 @@ if [[ ! -z ${XRT_BOOST_INSTALL:+x} ]]; then
 fi
 
 # we pick microblaze toolchain from Vitis install
-if [[ -z ${XILINX_VITIS:+x} ]]; then
-    export XILINX_VITIS=/proj/xbuilds/2019.2_released/installs/lin64/Vitis/2019.2
+if [[ -z ${XILINX_VITIS:+x} ]] || [[ ! -d ${XILINX_VITIS} ]]; then
+    export XILINX_VITIS=/proj/xbuilds/2023.1_released/installs/lin64/Vitis/2023.1
+    if [[ ! -d ${XILINX_VITIS} ]]; then
+        echo "****************************************************************"
+        echo "* XILINX_VITIS is undefined or not accessible.                 *"
+        echo "* MicroBlaze firmware will not be built.                       *"
+        echo "* To treat as a warning use -noert option.                     *"
+        echo "****************************************************************"
+        # The ERT FW is needed when platform packages are installed and
+        # creates xsabin files. Without FW the XRT build cannot be used
+        # to install platform packages.
+        if [[ $noert == 0 ]]; then
+            exit 1
+        fi
+    fi
+fi
+
+#If git modules config file exist then try to clone them
+GIT_MODULES=$BUILDDIR/../.gitmodules
+if [[ -f "$GIT_MODULES" && $init_submodule == 1 ]]; then
+    cd $BUILDDIR/../
+    echo "Updating Git XRT submodule, use -noinit option to avoid updating"
+    git submodule update --init
+    cd $BUILDDIR
 fi
 
 if [[ $dbg == 1 ]]; then
@@ -249,7 +356,7 @@ if [[ $opt == 1 ]]; then
   cd $release_dir
 
   cmake_flags+=" -DCMAKE_BUILD_TYPE=Release"
-  
+
   if [[ $nocmake == 0 ]]; then
 	echo "$CMAKE $cmake_flags ../../src"
 	time $CMAKE $cmake_flags ../../src
@@ -274,8 +381,8 @@ if [[ $opt == 1 ]]; then
   if [[ $driver == 1 ]]; then
     unset CC
     unset CXX
-    echo "make -C usr/src/xrt-2.12.0/driver/xocl"
-    make -C usr/src/xrt-2.12.0/driver/xocl
+    echo "make -C usr/src/xrt-2.18.0/driver/xocl"
+    make -C usr/src/xrt-2.18.0/driver/xocl
     if [[ $CPU == "aarch64" ]]; then
 	# I know this is dirty as it messes up the source directory with build artifacts but this is the
 	# quickest way to enable native zocl build in Travis CI environment for aarch64
@@ -305,7 +412,7 @@ fi
 
 if [[ $checkpatch == 1 ]]; then
     # check only driver released files
-    DRIVERROOT=`readlink -f $BUILDDIR/$release_dir/usr/src/xrt-2.12.0/driver`
+    DRIVERROOT=`readlink -f $BUILDDIR/$release_dir/usr/src/xrt-2.18.0/driver`
 
     # find corresponding source under src tree so errors can be fixed in place
     XOCLROOT=`readlink -f $BUILDDIR/../src/runtime_src/core/pcie/driver`

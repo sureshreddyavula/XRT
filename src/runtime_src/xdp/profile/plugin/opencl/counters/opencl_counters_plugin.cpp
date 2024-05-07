@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,16 +15,16 @@
  * under the License.
  */
 
-#define XDP_SOURCE
+#define XDP_PLUGIN_SOURCE
 
 #include "core/common/config_reader.h"
 
-#include "xocl/core/platform.h"
 #include "xocl/core/device.h"
+#include "xocl/core/platform.h"
 
 #include "xdp/profile/plugin/opencl/counters/opencl_counters_plugin.h"
-#include "xdp/profile/writer/opencl/opencl_summary_writer.h"
 #include "xdp/profile/plugin/vp_base/info.h"
+#include "xdp/profile/writer/vp_base/vp_writer.h"
 
 #ifdef _WIN32
 /* Disable warning for use of std::getenv */
@@ -32,14 +33,16 @@
 
 namespace xdp {
 
+  bool OpenCLCountersProfilingPlugin::live = false;
+
   OpenCLCountersProfilingPlugin::OpenCLCountersProfilingPlugin() : XDPPlugin()
   {
+    OpenCLCountersProfilingPlugin::live = true ;
+
     db->registerPlugin(this) ;
+    db->registerInfo(info::opencl_counters) ;
 
     // Summary file now handled by generic summary writer in database
-    //writers.push_back(new OpenCLSummaryWriter("opencl_summary.csv")) ;
-    //(db->getStaticInfo()).addOpenedFile("opencl_summary.csv", "PROFILE_SUMMARY") ;
-    db->registerInfo(info::opencl_counters) ;
 
     // If the OpenCL device offload plugin isn't already loaded, this
     //  call will load the HAL device offload plugin and it will take
@@ -62,16 +65,17 @@ namespace xdp {
       db->broadcast(VPDatabase::READ_TRACE, nullptr) ;
       for (auto w : writers)
       {
-	w->write(false) ;
+        w->write(false) ;
       }
       db->unregisterPlugin(this) ;
     }
+    OpenCLCountersProfilingPlugin::live = false;
   }
 
   void OpenCLCountersProfilingPlugin::emulationSetup()
   {
-    XDPPlugin::emulationSetup() 
-;
+    XDPPlugin::emulationSetup() ;
+
     char* internalsSummary = getenv("VITIS_KERNEL_PROFILE_FILENAME") ;
     if (internalsSummary != nullptr) {
       (db->getStaticInfo()).addOpenedFile(internalsSummary, "KERNEL_PROFILE");

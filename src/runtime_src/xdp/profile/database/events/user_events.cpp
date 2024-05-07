@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,7 +15,7 @@
  * under the License.
  */
 
-#define XDP_SOURCE
+#define XDP_CORE_SOURCE
 
 #include "xdp/profile/database/events/user_events.h"
 
@@ -41,7 +42,7 @@ namespace xdp {
   }
 
   UserRange::UserRange(uint64_t s_id, double ts, bool s, 
-		       uint64_t l, uint64_t tt) :
+                       uint64_t l, uint64_t tt) :
     VTFEvent(s_id, ts, USER_RANGE), isStart(s), label(l), tooltip(tt)
   {
   }

@@ -1,6 +1,128 @@
 XRT ChangeLog
 -------------
 
+2.17.0 (2024.2.17.x)
+~~~~~~~~~~~~~~~~~~~~
+
+Changed
+.......
+* Building XRT on Linux requires minimum gcc9 per commit 9cf57c4
+
+2.16.0 (202320.2.16.x)
+~~~~~~~~~~~~~~~~~~~~~~
+Changelog items missing
+
+2.15.0 (202310.2.15.x)
+~~~~~~~~~~~~~~~~~~~~~~
+Added
+.....
+* New ``xrt::run::wait2()`` API was added to throw an exception when command completes abnormally (state different from ERT_CMD_STATE_COMPLETED).
+* New ``xrt::xclbin::get_interface_uuid()`` API.  The interface uuid is available only for xclbins that are built with 2023.1 Vitis.
+
+Removed
+.......
+* 
+
+Changed
+.......
+* This the last release with XCL APIs support.  The APIs were deprecated in 2.14.x and 2.15.x will be last release with support.  
+* xrt::kernel::write_register() is deprecated.  Along with corresponding read_register, a compile warning is issued if used. It is recommended that xrt::ip is used for read and write register functionality.
+
+2.14.0 (202220.2.14.x)
+~~~~~~~~~~~~~~~~~~~~~~
+Added
+.....
+* Support generic AsyncBO transfer for AIE via xrt::bo C++ APIs.
+* Add first class object ``xrt::hw_context`` to support loading of multiple xclbins (PL and PS).  This API is experimental in this release.
+
+Removed
+.......
+* XRT streaming APIs used with QDMA PCIe DMA engine have been removed per deprecation announcement in 2.11.x
+* All XCL APIs are deprecated and will be removed in future release.
+* Remove internal software scheduler known as SWS.  It was no longer functional and all shims now support KDS style scheduling.
+* All xrt++ APIs are deprecated and will be removed in next release.  The xrt++ link library will be removed.  The functionality provided by xrt++ is superseeded by the native XRT C++ APIs.
+
+Changed
+.......
+* Experimental native C++ APIs ``xrt::xclbin`` and ``xrt::ip`` have ABI breaking changes in 2.14.x per PR #6723. Code that uses these APIs must be recompiled.
+
+
+2.13.0 (202210.2.13.x)
+~~~~~~~~~~~~~~~~~~~~~~
+Added
+.....
+
+* Added the xrt.ini profiling flags "device_counter" and "device_trace".
+* ``xrt::run::set_arg`` and ``xrt::mailbox::set_arg`` both supporting setting arguments by name in addition to by index.
+* Fixed latency issue when using xrt::ip::read_register and xrt::ip::write_register per issue #6053.
+* Support M2M insertion for incompatible read-only kernel buffer object arguments.
+* Added experimental ``xrt::queue`` APIs for asynchronous execution of synchronous operations.
+* Added experimental ``xrt::system`` and ``xrt::message`` APIs.
+* Added support on Linux for contructing an xrt::bo object from a buffer exported by another process.  Requires pidfd kernel support.
+* Support building XRT with Visual Studio 2019.
+* Switched from ``boost::any`` to ``std::any`` in public APIs.  Requires compiling host code with -std=c++17.
+
+Removed
+.......
+* Removed deprecated streaming APIs from OpenCL.
+* xrt.ini flags "profile," "timeline_trace," and "xrt_profile" no longer load xdp profiling functionality and no longer issue deprecation warning.
+* Deprecated the xrt.ini profiling flags "opencl_summary," "data_transfer_trace," and "opencl_device_counter".
+* Deprecated old ctypes python bindings "xclbin_bindings.py", "ert_bindings.py", "xrt_bindings.py, and "utils_binding.py".  Python code should be written against imported pyxrt module only, which supports both hardware and emulation in same way as compiled binaries.
+
+2.12.0 (202120.2.12.x)
+~~~~~~~~~~~~~~~~~~~~~~
+
+Added
+.....
+
+**xbutil/xbmgmt**
+
+* Added ``xball`` helper script to execute a common set of utility commands (e.g., ``xbutil`` & ``xbmgmt``) across a filtered set of devices.  More information can be found using ``--help`` or in the XRT documents.
+* Auto-selecting a device if only one device exits.  If the option ``--device`` or ``-d`` is specified and there is only one device installed, it will be automatically selected and used.
+* All failing operations will now return an error code.  Note: An error will also be returned if there are validation failures.
+* Improved error reporting.
+* Legacy commands have been deprecated.
+* Various report output improvements.
+* ``xbutil configure`` *root* level command introduced.  Added ``host_mem`` and ``p2p`` as commands to configure.
+* ``--force`` option support for all operations.
+* ``xbutil validate`` now supports alternative platform validation directories.
+
+**xclbin**
+
+* ``PARTITION_METADATA`` schema updated to support pcie bars.
+* ``ACCEL_DEADLOCK_DETECTOR`` enum for Debug IP Layout.
+
+**XRT native APIs**
+
+* ``xrt::aie`` and ``xrt::graph`` moved from experimental to mature and are now available from ``include/xrt/`` folder.
+* Added C++ support for xrt::aie APIs.
+* Throw an exception if xrt::kernel is constructed with an ``AP_CTRL_NONE`` kernel.  Use ``xrt::ip`` to control custom IPs.
+* HLS mailbox support via experimental API ``include/experimental/xrt_mailbox.h``.  See ``tests/xrt/mailbox`` for an example.
+* HLS kernel reset support using ``xrt::run::abort()``.  If a run is aborted without kernel support for sw reset, the board itself will require a reset.
+* Fixed bug in ``xrt::run::wait`` where specified timeout was ignored.
+* Added new ``xrt::device::get_info`` parameters and guaranteed format of return type with new versions of XRT.
+
+**Profiling**
+
+* Profile summary report generated when any profiling option is enabled, no longer just when OpenCL-level profiling is enabled.  All applicable summary tables and guidance will be generated based on the profiling options enabled in the xrt.ini file.
+* New data transfer summary table for aggregate information on a memory resource when monitors are added to memory resources in the design.
+* New AIE profiling metric sets to count different AIE events including (1) floating point exceptions in AIE, (2) tile execution counts, and (3) stream puts and gets.
+
+**Other changes**
+
+* Added missing ``:`` separator in regex when matching the kernel name specified to ``clCreateKernel`` and ``xrt::kernel``.  Without the separator, matching would fail when a specified kernel name is a substring of another kernel name.  The default regex is now ``"(kernelname):(.*)"``.
+* Fix register read and write in HW emulation to use the CU index ordering as rest of XRT.
+* Fix bugs related to kernel address range size (1) support custom address range size, (2) trap error when writing outside the kernel address range.
+* Support enabled for ``RHEL 8.4`` and ``buntu 20.04.2`` OS.
+* zocl memory manager improvements to support any sptag.
+
+Removed
+.......
+
+* xclExecBufWithWaitList() API is deprecated and will be removed in future release.
+* Support is removed for  ``RHEL/Centos 7.6`` , ``7.7``  & ``Ubuntu 16.04``.
+
+
 2.11.0 (202110.2.11.x)
 ~~~~~~~~~~~~~~~~~~~~~~
 

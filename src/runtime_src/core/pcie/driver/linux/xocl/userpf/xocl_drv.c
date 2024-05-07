@@ -1,32 +1,26 @@
-/*
- * Copyright (C) 2016-2020 Xilinx, Inc. All rights reserved.
+/**
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright (C) 2016-2022 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Authors: Lizhi.Hou@xilinx.com
- *
- * This software is licensed under the terms of the GNU General Public
- * License version 2, as published by the Free Software Foundation, and
- * may be copied, distributed, and modified under those terms.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
  */
 
-#include <linux/pci.h>
-#include <linux/kernel.h>
 #include <linux/aer.h>
-#include <linux/version.h>
-#include <linux/module.h>
-#include <linux/pci.h>
 #include <linux/crc32c.h>
-#include <linux/random.h>
 #include <linux/iommu.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
 #include <linux/pagemap.h>
-#include "../xocl_drv.h"
-#include "xocl_errors.h"
+#include <linux/pci.h>
+#include <linux/random.h>
+#include <linux/version.h>
+
 #include "common.h"
-#include "version.h"
+#include "version.h" /* Generated file. The XRT version the driver works with */
+#include "xocl_errors.h"
+#include "../xocl_drv.h"
+
 
 #ifndef PCI_EXT_CAP_ID_REBAR
 #define PCI_EXT_CAP_ID_REBAR 0x15
@@ -49,7 +43,7 @@
 #define MAX_DYN_SUBDEV		1024
 #define XDEV_DEFAULT_EXPIRE_SECS	1
 
-extern int kds_mode;
+#define MAX_SB_APERTURES		256
 
 static const struct pci_device_id pciidlist[] = {
 	XOCL_USER_XDMA_PCI_IDS,
@@ -161,6 +155,22 @@ void xocl_update_mig_cache(struct xocl_dev *xdev)
 	mutex_unlock(&xdev->dev_lock);
 }
 
+int xocl_register_cus(xdev_handle_t xdev_hdl, int slot_hdl, xuid_t *uuid,
+		      struct ip_layout *ip_layout,
+		      struct ps_kernel_node *ps_kernel)
+{
+	struct xocl_dev *xdev = container_of(XDEV(xdev_hdl), struct xocl_dev, core);
+
+	return xocl_kds_register_cus(xdev, slot_hdl, uuid, ip_layout, ps_kernel);
+}
+
+int xocl_unregister_cus(xdev_handle_t xdev_hdl, int slot_hdl)
+{
+	struct xocl_dev *xdev = container_of(XDEV(xdev_hdl), struct xocl_dev, core);
+
+	return xocl_kds_unregister_cus(xdev, slot_hdl);
+}
+
 static int userpf_intr_config(xdev_handle_t xdev_hdl, u32 intr, bool en)
 {
 	int ret;
@@ -197,6 +207,7 @@ void xocl_reset_notify(struct pci_dev *pdev, bool prepare)
 {
 	struct xocl_dev *xdev = pci_get_drvdata(pdev);
 	int ret;
+	uint32_t slot_id = DEFAULT_PL_SLOT;
 	xuid_t *xclbin_id = NULL;
 
 	xocl_info(&pdev->dev, "PCI reset NOTIFY, prepare %d", prepare);
@@ -205,8 +216,7 @@ void xocl_reset_notify(struct pci_dev *pdev, bool prepare)
 	mutex_unlock(&xdev->core.errors_lock);
 
 	if (prepare) {
-		if (kds_mode)
-			xocl_kds_reset(xdev, xclbin_id);
+		xocl_kds_reset(xdev, xclbin_id);
 
 		/* clean up mem topology */
 		if (xdev->core.drm) {
@@ -230,7 +240,7 @@ void xocl_reset_notify(struct pci_dev *pdev, bool prepare)
 			xocl_warn(&pdev->dev, "Online subdevs failed %d", ret);
 		(void) xocl_peer_listen(xdev, xocl_mailbox_srv, (void *)xdev);
 
-		ret = XOCL_GET_XCLBIN_ID(xdev, xclbin_id);
+		ret = XOCL_GET_XCLBIN_ID(xdev, xclbin_id, slot_id);
 		if (ret) {
 			xocl_warn(&pdev->dev, "Unable to get on device uuid %d", ret);
 			return;
@@ -242,13 +252,16 @@ void xocl_reset_notify(struct pci_dev *pdev, bool prepare)
 			return;
 		}
 
-		if (kds_mode)
-			xocl_kds_reset(xdev, xclbin_id);
-		else {
-			XDEV(xdev)->kds.ini_disable = false;
-			xocl_exec_reset(xdev, xclbin_id);
+		if (XOCL_DSA_IS_VERSAL_ES3(xdev)) {
+			ret = xocl_hwmon_sdm_init(xdev);
+			if (ret) {
+				userpf_err(xdev, "failed to init hwmon_sdm driver, err: %d", ret);
+				return;
+			}
 		}
-		XOCL_PUT_XCLBIN_ID(xdev);
+
+		xocl_kds_reset(xdev, xclbin_id);
+		XOCL_PUT_XCLBIN_ID(xdev, slot_id);
 		if (!xdev->core.drm) {
 			xdev->core.drm = xocl_drm_init(xdev);
 			if (!xdev->core.drm) {
@@ -257,6 +270,8 @@ void xocl_reset_notify(struct pci_dev *pdev, bool prepare)
 			}
 		}
 	}
+
+	xdev->reset_ert_cus = true;
 }
 
 int xocl_program_shell(struct xocl_dev *xdev, bool force)
@@ -284,11 +299,6 @@ int xocl_program_shell(struct xocl_dev *xdev, bool force)
 
 	if (force)
 		xocl_drvinst_kill_proc(xdev->core.drm);
-
-	/* free cma bank*/
-	mutex_lock(&xdev->dev_lock);
-	xocl_cma_bank_free(xdev);
-	mutex_unlock(&xdev->dev_lock);
 
 	/* cleanup drm */
 	if (xdev->core.drm) {
@@ -490,12 +500,12 @@ static int xocl_get_buddy_cb(struct device *dev, void *data)
 	 * 1.non xilinx device
 	 * 2.itself
 	 * 3.other devcies not being droven by same driver. using func id
-	 * may not handle u25 where there is another device on same card 
+	 * may not handle u25 where there is another device on same card
 	 */
 	if (!src_xdev || !dev || to_pci_dev(dev)->vendor != 0x10ee ||
 	   	XOCL_DEV_ID(to_pci_dev(dev)) ==
 		XOCL_DEV_ID(src_xdev->core.pdev) || !dev->driver ||
-		strcmp(dev->driver->name, "xocl")) 
+		strcmp(dev->driver->name, "xocl"))
 		return 0;
 
 	tgt_xdev = dev_get_drvdata(dev);
@@ -516,7 +526,7 @@ static int xocl_get_buddy_cb(struct device *dev, void *data)
  * mutex lock to prevent multile reset from happening simutaniously
  * this is necessary for case where there are multiple FPGAs on same
  * card, and reset one also triggers reset on others.
- * to simplify, just don't allow reset to any multiple FPGAs happen 
+ * to simplify, just don't allow reset to any multiple FPGAs happen
  */
 static DEFINE_MUTEX(xocl_reset_mutex);
 
@@ -566,6 +576,7 @@ static void xocl_work_cb(struct work_struct *work)
 		xocl_reset_notify(xdev->core.pdev, false);
 		xocl_drvinst_set_offline(xdev->core.drm, false);
 		XDEV(xdev)->shutdown = false;
+		(void) xocl_refresh_subdevs(xdev);
 		break;
 	case XOCL_WORK_PROGRAM_SHELL:
 		/* program shell */
@@ -683,12 +694,8 @@ int xocl_reclock(struct xocl_dev *xdev, void *data)
 	/* Re-clock changes PR region, make sure next ERT configure cmd will
 	 * go through
 	 */
-	if (err == 0) {
-		if (kds_mode)
-			(void) xocl_kds_reconfig(xdev);
-		else
-			(void) xocl_exec_reconfig(xdev);
-	}
+	if (err == 0)
+		(void) xocl_kds_reconfig(xdev);
 
 	kfree(req);
 	return err;
@@ -701,20 +708,27 @@ static void xocl_mailbox_srv(void *arg, void *data, size_t len,
 	struct xcl_mailbox_req *req = (struct xcl_mailbox_req *)data;
 	struct xcl_mailbox_peer_state *st = NULL;
 	struct xclErrorLast err_last;
+	/* Variables for firewall request processing */
+	struct xcl_firewall fw_status = { 0 };
 
 	if (err != 0)
 		return;
 
 	userpf_info(xdev, "received request (%d) from peer\n", req->req);
-
 	switch (req->req) {
 	case XCL_MAILBOX_REQ_FIREWALL:
+		/* Update the xocl firewall status */
+		xocl_af_check(xdev, NULL);
+		/* Get the updated xocl firewall status */
+		xocl_af_get_data(xdev, &fw_status);
+		userpf_info(xdev,
+			"AXI Firewall %llu tripped", fw_status.err_detected_level);
 		userpf_info(xdev,
 			"Card is in a BAD state, please issue xbutil reset");
 		err_last.pid = 0;
-		err_last.ts = 0; //TODO timestamp
-		err_last.err_code = XRT_ERROR_CODE_BUILD(XRT_ERROR_NUM_FIRWWALL_TRIP, 
-			XRT_ERROR_DRIVER_XOCL, XRT_ERROR_SEVERITY_CRITICAL, 
+		err_last.ts = fw_status.err_detected_time;
+		err_last.err_code = XRT_ERROR_CODE_BUILD(XRT_ERROR_NUM_FIRWWALL_TRIP,
+			XRT_ERROR_DRIVER_XOCL, XRT_ERROR_SEVERITY_CRITICAL,
 			XRT_ERROR_MODULE_FIREWALL, XRT_ERROR_CLASS_HARDWARE);
 		xocl_insert_error_record(&xdev->core, &err_last);
 		xocl_drvinst_set_offline(xdev->core.drm, true);
@@ -816,9 +830,10 @@ int xocl_refresh_subdevs(struct xocl_dev *xdev)
 	size_t reqlen = sizeof(struct xcl_mailbox_req) + data_len;
 	struct xcl_subdev	*resp = NULL;
 	size_t resp_len = sizeof(*resp) + XOCL_MSG_SUBDEV_DATA_LEN;
-	char *blob = NULL, *tmp;
-	u32 blob_len;
-	uint64_t checksum;
+	char *blob = NULL;
+	char *tmp = NULL;
+	u32 blob_len = 0;
+	uint64_t checksum = 0;
 	size_t offset = 0;
 	bool offline = false;
 	int ret = 0;
@@ -947,6 +962,15 @@ int xocl_refresh_subdevs(struct xocl_dev *xdev)
 		goto failed;
 	}
 
+	if (XOCL_DSA_IS_VERSAL_ES3(xdev)) {
+		//probe & initialize hwmon_sdm driver only on versal
+		ret = xocl_hwmon_sdm_init(xdev);
+		if (ret) {
+			userpf_err(xdev, "failed to init hwmon_sdm driver, err: %d", ret);
+			goto failed;
+		}
+	}
+
 	(void) xocl_peer_listen(xdev, xocl_mailbox_srv, (void *)xdev);
 
 	ret = xocl_init_sysfs(xdev);
@@ -1001,6 +1025,73 @@ int xocl_p2p_init(struct xocl_dev *xdev)
 		xocl_xdev_err(xdev, "create p2p subdev failed. ret %d", ret);
 		return ret;
 	}
+
+	return 0;
+}
+
+static int xocl_hwmon_sdm_init_sysfs(struct xocl_dev *xdev, enum xcl_group_kind kind)
+{
+	struct xcl_mailbox_subdev_peer subdev_peer = {0};
+	size_t resp_len = 4 * 1024;
+	size_t data_len = sizeof(struct xcl_mailbox_subdev_peer);
+	struct xcl_mailbox_req *mb_req = NULL;
+	char *in_buf = NULL;
+	size_t reqlen = sizeof(struct xcl_mailbox_req) + data_len;
+	int ret = 0;
+
+	mb_req = vmalloc(reqlen);
+	if (!mb_req)
+		goto done;
+
+	in_buf = vzalloc(resp_len);
+	if (!in_buf)
+		goto done;
+
+	mb_req->req = XCL_MAILBOX_REQ_SDR_DATA;
+	mb_req->flags = 0x0;
+	subdev_peer.size = resp_len;
+	subdev_peer.kind = kind;
+	subdev_peer.entries = 1;
+
+	memcpy(mb_req->data, &subdev_peer, data_len);
+
+	ret = xocl_peer_request(xdev, mb_req, reqlen, in_buf, &resp_len, NULL, NULL, 0, 0);
+	if (ret) {
+		userpf_err(xdev, "sdr peer request failed, err: %d", ret);
+		goto done;
+	}
+
+	// if the response has any error, mgmt sets the resp_len to size of int (error code).
+	if (resp_len <= sizeof(int))
+		goto done;
+
+	ret = xocl_hwmon_sdm_create_sensors_sysfs(xdev, in_buf, resp_len, kind);
+	if (ret)
+		userpf_err(xdev, "hwmon_sdm sysfs creation failed for xcl_sdr 0x%x, err: %d", kind, ret);
+	else
+		userpf_dbg(xdev, "successfully created hwmon_sdm sensor sysfs node for xcl_sdr 0x%x", kind);
+
+done:
+	vfree(in_buf);
+	vfree(mb_req);
+
+	return ret;
+}
+
+int xocl_hwmon_sdm_init(struct xocl_dev *xdev)
+{
+	struct xocl_subdev_info subdev_info = XOCL_DEVINFO_HWMON_SDM;
+	int ret;
+
+	ret = xocl_subdev_create(xdev, &subdev_info);
+	if (ret && ret != -EEXIST)
+		return ret;
+
+	(void) xocl_hwmon_sdm_init_sysfs(xdev, XCL_SDR_BDINFO);
+	(void) xocl_hwmon_sdm_init_sysfs(xdev, XCL_SDR_TEMP);
+	(void) xocl_hwmon_sdm_init_sysfs(xdev, XCL_SDR_CURRENT);
+	(void) xocl_hwmon_sdm_init_sysfs(xdev, XCL_SDR_POWER);
+	(void) xocl_hwmon_sdm_init_sysfs(xdev, XCL_SDR_VOLTAGE);
 
 	return 0;
 }
@@ -1078,6 +1169,32 @@ static int identify_bar(struct xocl_dev *xdev)
 		identify_bar_legacy(xdev);
 }
 
+static void xocl_cleanup_axlf_obj(struct xocl_dev *xdev)
+{
+	struct xocl_axlf_obj_cache *axlf_obj = NULL;
+	uint32_t slot_id = 0;
+
+	mutex_lock(&xdev->dev_lock);
+	for (slot_id = 0; slot_id < MAX_SLOT_SUPPORT; slot_id++) {
+		axlf_obj = XDEV(xdev)->axlf_obj[slot_id];
+		if (axlf_obj != NULL) {
+			if (axlf_obj->ulp_blob)
+				vfree(axlf_obj->ulp_blob);
+
+			if (axlf_obj->kernels)
+				vfree(axlf_obj->kernels);
+
+			axlf_obj->kernels = NULL;
+			axlf_obj->ksize = 0;
+
+			vfree(axlf_obj);
+			XDEV(xdev)->axlf_obj[slot_id] = NULL;
+		}
+	}
+
+	mutex_unlock(&xdev->dev_lock);
+}
+
 void xocl_userpf_remove(struct pci_dev *pdev)
 {
 	struct xocl_dev		*xdev;
@@ -1097,7 +1214,7 @@ void xocl_userpf_remove(struct pci_dev *pdev)
 	xocl_drvinst_release(xdev, &hdl);
 
 	xocl_queue_destroy(xdev);
-	
+
 	/* Free pinned pages before call xocl_drm_fini */
 	xocl_cma_bank_free(xdev);
 
@@ -1123,9 +1240,11 @@ void xocl_userpf_remove(struct pci_dev *pdev)
 	unmap_bar(xdev);
 
 	xocl_subdev_fini(xdev);
-	if (xdev->ulp_blob)
-		vfree(xdev->ulp_blob);
+	xocl_cleanup_axlf_obj(xdev);
 	mutex_destroy(&xdev->dev_lock);
+
+	if (xdev->core.bars)
+		kfree(xdev->core.bars);
 
 	pci_set_drvdata(pdev, NULL);
 	xocl_drvinst_free(hdl);
@@ -1164,7 +1283,7 @@ static void xocl_cma_mem_free(struct xocl_dev *xdev, uint32_t idx)
 
 	if (cma_mem->regular_page) {
 		dma_unmap_page(&xdev->core.pdev->dev, cma_mem->paddr,
-			cma_mem->size, PCI_DMA_BIDIRECTIONAL);
+			cma_mem->size, DMA_BIDIRECTIONAL);
 		__free_pages(cma_mem->regular_page, get_order(cma_mem->size));
 		cma_mem->regular_page = NULL;
 	} else if (cma_mem->pages) {
@@ -1205,7 +1324,7 @@ static int xocl_cma_mem_alloc_huge_page_by_idx(struct xocl_dev *xdev, uint32_t i
 	struct xocl_cma_memory *cma_mem = &xdev->cma_bank->cma_mem[idx];
 	struct sg_table *sgt = NULL;
 
-	if (!(XOCL_ACCESS_OK(VERIFY_WRITE, user_addr, page_sz))) {
+	if (!(XOCL_ACCESS_OK(VERIFY_WRITE, (uint64_t *)user_addr, page_sz))) {
 		xocl_err(dev, "Invalid huge page user pointer\n");
 		ret = -ENOMEM;
 		goto done;
@@ -1250,7 +1369,7 @@ static int xocl_cma_mem_alloc_huge_page_by_idx(struct xocl_dev *xdev, uint32_t i
 
 	if (sgt->orig_nents != sgt->nents) {
 		ret =-ENOMEM;
-		goto done;		
+		goto done;
 	}
 
 	cma_mem->size = page_sz;
@@ -1275,19 +1394,17 @@ static int xocl_cma_mem_alloc_huge_page(struct xocl_dev *xdev, struct drm_xocl_a
 {
 	int ret = 0;
 	size_t page_sz = cma_info->total_size/cma_info->entry_num;
-	uint32_t i, j, num = xocl_addr_translator_get_entries_num(xdev);
+	uint32_t i, j, num = MAX_SB_APERTURES;
 	uint64_t *user_addr = NULL, *phys_addrs = NULL, cma_mem_size = 0;
 	uint64_t rounddown_num = rounddown_pow_of_two(cma_info->entry_num);
 
 	BUG_ON(!mutex_is_locked(&xdev->dev_lock));
 
-	if (!num)
-		return -ENODEV;
 	/* Limited by hardware, the entry number can only be power of 2
 	 * rounddown_pow_of_two 255=>>128 63=>>32
 	 */
 	if (rounddown_num != cma_info->entry_num) {
-		DRM_ERROR("Request %lld, round down to power of 2 %lld\n", 
+		DRM_ERROR("Request %lld, round down to power of 2 %lld\n",
 				cma_info->entry_num, rounddown_num);
 		return -EINVAL;
 	}
@@ -1302,7 +1419,7 @@ static int xocl_cma_mem_alloc_huge_page(struct xocl_dev *xdev, struct drm_xocl_a
 	ret = copy_from_user(user_addr, cma_info->user_addr, sizeof(uint64_t)*rounddown_num);
 	if (ret) {
 		ret = -EFAULT;
-		goto done;
+		goto fail;
 	}
 
 	for (i = 0; i < rounddown_num-1; ++i) {
@@ -1310,7 +1427,7 @@ static int xocl_cma_mem_alloc_huge_page(struct xocl_dev *xdev, struct drm_xocl_a
 			if (user_addr[i] == user_addr[j]) {
 				ret = -EINVAL;
 				DRM_ERROR("duplicated Huge Page");
-				goto done;
+				goto fail;
 			}
 		}
 	}
@@ -1319,18 +1436,18 @@ static int xocl_cma_mem_alloc_huge_page(struct xocl_dev *xdev, struct drm_xocl_a
 		if (user_addr[i] & (page_sz - 1)) {
 			DRM_ERROR("Invalid Huge Page");
 			ret = -EINVAL;
-			goto done;
+			goto fail;
 		}
 
 		ret = xocl_cma_mem_alloc_huge_page_by_idx(xdev, i, user_addr[i], page_sz);
 		if (ret)
-			goto done;
+			goto fail;
 	}
 
 	phys_addrs = vzalloc(rounddown_num*sizeof(uint64_t));
 	if (!phys_addrs) {
 		ret = -ENOMEM;
-		goto done;		
+		goto fail;
 	}
 
 	for (i = 0; i < rounddown_num; ++i) {
@@ -1355,16 +1472,19 @@ static int xocl_cma_mem_alloc_huge_page(struct xocl_dev *xdev, struct drm_xocl_a
 	}
 
 	if (ret)
-		goto done;
+		goto fail;
 
 	/* Remember how many cma mem we allocate*/
 	xdev->cma_bank->entry_num = rounddown_num;
 	xdev->cma_bank->entry_sz = page_sz;
+	xdev->cma_bank->phys_addrs = phys_addrs;
 
-	ret = xocl_addr_translator_set_page_table(xdev, phys_addrs, page_sz, rounddown_num);
+	goto done;
+
+fail:
+	vfree(phys_addrs);
 done:
 	vfree(user_addr);
-	vfree(phys_addrs);
 	return ret;
 }
 
@@ -1413,7 +1533,7 @@ static int xocl_cma_mem_alloc_by_idx(struct xocl_dev *xdev, uint64_t size, uint3
 	}
 
 	dma_addr = dma_map_page(dev, page, 0, size,
-		PCI_DMA_BIDIRECTIONAL);
+		DMA_BIDIRECTIONAL);
 	if (unlikely(dma_mapping_error(dev, dma_addr))) {
 		DRM_ERROR("Unable to dma map pages");
 		__free_pages(page, order);
@@ -1424,7 +1544,7 @@ static int xocl_cma_mem_alloc_by_idx(struct xocl_dev *xdev, uint64_t size, uint3
 		roundup(PAGE_SIZE, size) >> PAGE_SHIFT);
 
 	if (!cma_mem->pages) {
-		dma_unmap_page(dev, dma_addr, size, PCI_DMA_BIDIRECTIONAL);
+		dma_unmap_page(dev, dma_addr, size, DMA_BIDIRECTIONAL);
 		__free_pages(page, order);
 		return -ENOMEM;
 	}
@@ -1443,6 +1563,7 @@ static void __xocl_cma_bank_free(struct xocl_dev *xdev)
 
 	xocl_cma_mem_free_all(xdev);
 	xocl_addr_translator_clean(xdev);
+	vfree(xdev->cma_bank->phys_addrs);
 	vfree(xdev->cma_bank);
 	xdev->cma_bank = NULL;
 }
@@ -1452,13 +1573,8 @@ static int xocl_cma_mem_alloc(struct xocl_dev *xdev, uint64_t size)
 	int ret = 0;
 	uint64_t page_sz;
 	int64_t i = 0;
-	uint64_t page_num = xocl_addr_translator_get_entries_num(xdev);
+	uint64_t page_num = MAX_SB_APERTURES;
 	uint64_t *phys_addrs = NULL, cma_mem_size = 0;
-
-	if (!page_num) {
-		DRM_ERROR("Doesn't support CMA BANK feature");
-		return -ENODEV;		
-	}
 
 	page_sz = size/page_num;
 
@@ -1467,7 +1583,7 @@ static int xocl_cma_mem_alloc(struct xocl_dev *xdev, uint64_t size)
 		return -EINVAL;
 	}
 
-	if (page_sz > (PAGE_SIZE << (MAX_ORDER-1))) {
+	if (page_sz > (PAGE_SIZE*MAX_ORDER_NR_PAGES)) {
 		DRM_WARN("Unable to allocate with page size 0x%llx", page_sz);
 		return -EINVAL;
 	}
@@ -1476,7 +1592,7 @@ static int xocl_cma_mem_alloc(struct xocl_dev *xdev, uint64_t size)
 		ret = xocl_cma_mem_alloc_by_idx(xdev, page_sz, i);
 		if (ret) {
 			xdev->cma_bank->entry_num = i;
-			goto done;
+			goto fail;
 		}
 	}
 	xdev->cma_bank->entry_num = page_num;
@@ -1484,7 +1600,7 @@ static int xocl_cma_mem_alloc(struct xocl_dev *xdev, uint64_t size)
 	phys_addrs = vzalloc(page_num*sizeof(uint64_t));
 	if (!phys_addrs) {
 		ret = -ENOMEM;
-		goto done;		
+		goto fail;
 	}
 
 	for (i = 0; i < page_num; ++i) {
@@ -1509,14 +1625,15 @@ static int xocl_cma_mem_alloc(struct xocl_dev *xdev, uint64_t size)
 	}
 
 	if (ret)
-		goto done;
+		goto fail;
 
 	xdev->cma_bank->entry_sz = page_sz;
+	xdev->cma_bank->phys_addrs = phys_addrs;
 
-	ret = xocl_addr_translator_set_page_table(xdev, phys_addrs, page_sz, page_num);
-done:	
+	return 0;
+
+fail:
 	vfree(phys_addrs);
-
 	return ret;
 }
 
@@ -1524,22 +1641,18 @@ void xocl_cma_bank_free(struct xocl_dev	*xdev)
 {
 	__xocl_cma_bank_free(xdev);
 	if (xdev->core.drm)
-		xocl_cleanup_mem(xdev->core.drm);
-	xocl_icap_clean_bitstream(xdev);
+		xocl_cleanup_mem_all(xdev->core.drm);
+
+	xocl_icap_clean_bitstream_all(xdev);
 }
 
 int xocl_cma_bank_alloc(struct xocl_dev	*xdev, struct drm_xocl_alloc_cma_info *cma_info)
 {
 	int err = 0;
-	int num = xocl_addr_translator_get_entries_num(xdev);
+	int num = MAX_SB_APERTURES;
 
-	if (!num) {
-		DRM_ERROR("Doesn't support HOST MEM feature");
-		return -ENODEV;
-	}
-
-	xocl_cleanup_mem(xdev->core.drm);
-	xocl_icap_clean_bitstream(xdev);
+	xocl_cleanup_mem_all(xdev->core.drm);
+	xocl_icap_clean_bitstream_all(xdev);
 
 	if (xdev->cma_bank) {
 		uint64_t allocated_size = xdev->cma_bank->entry_num * xdev->cma_bank->entry_sz;
@@ -1566,7 +1679,7 @@ int xocl_cma_bank_alloc(struct xocl_dev	*xdev, struct drm_xocl_alloc_cma_info *c
 		/* Cast all err as E2BIG */
 		err = xocl_cma_mem_alloc(xdev, cma_info->total_size);
 		if (err) {
-			err = -E2BIG;
+			err = -ENOMEM;
 			goto done;
 		}
 	}
@@ -1584,12 +1697,6 @@ int xocl_userpf_probe(struct pci_dev *pdev,
 	struct xocl_dev			*xdev;
 	char				wq_name[15];
 	int				ret, i;
-
-	if (pdev->cfg_size < XOCL_PCI_CFG_SPACE_EXP_SIZE) {
-		xocl_err(&pdev->dev, "ext config space is not accessible, %d",
-			 pdev->cfg_size);
-		return -EINVAL;
-	}
 
 	xdev = xocl_drvinst_alloc(&pdev->dev, sizeof(*xdev));
 	if (!xdev) {
@@ -1680,6 +1787,12 @@ int xocl_userpf_probe(struct pci_dev *pdev,
 		goto failed;
 	}
 
+	/* When XOCL loading/reloading we should make sure ERT
+	 * cleanup all the prior CUs/SCUs if exists. This is because ERT doesn't
+	 * get any notification when XOCL reloaded.
+	 */
+	xdev->reset_ert_cus = true;
+
 	xocl_queue_work(xdev, XOCL_WORK_REFRESH_SUBDEV, 1);
 	/* Waiting for all subdev to be initialized before returning. */
 	flush_delayed_work(&xdev->core.works[XOCL_WORK_REFRESH_SUBDEV].work);
@@ -1707,6 +1820,25 @@ int xocl_userpf_probe(struct pci_dev *pdev,
 	}
 
 	xocl_drvinst_set_offline(xdev, false);
+
+	if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(64))) {
+		/* query for DMA transfer */
+		/* @see Documentation/DMA-mapping.txt */
+		xocl_info(&pdev->dev, "pci_set_dma_mask()\n");
+		/* use 64-bit DMA */
+		xocl_info(&pdev->dev, "Using a 64-bit DMA mask.\n");
+		/* use 32-bit DMA for descriptors */
+		dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+		/* use 64-bit DMA, 32-bit for consistent */
+	} else if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(32))) {
+		xocl_info(&pdev->dev, "Could not set 64-bit DMA mask.\n");
+		dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
+		/* use 32-bit DMA */
+		xocl_info(&pdev->dev, "Using a 32-bit DMA mask.\n");
+	} else {
+		xocl_err(&pdev->dev, "No suitable DMA possible.\n");
+		return -EINVAL;
+	}
 
 	return 0;
 
@@ -1776,8 +1908,6 @@ static int (*xocl_drv_reg_funcs[])(void) __initdata = {
 	xocl_init_iores,
 	xocl_init_xdma,
 	xocl_init_qdma,
-	xocl_init_qdma4,
-	xocl_init_mb_scheduler,
 	xocl_init_mailbox,
 	xocl_init_xmc,
 	xocl_init_xmc_u2,
@@ -1801,6 +1931,7 @@ static int (*xocl_drv_reg_funcs[])(void) __initdata = {
 	/* Initial intc sub-device before CU/ERT sub-devices */
 	xocl_init_intc,
 	xocl_init_cu,
+	xocl_init_scu,
 	xocl_init_addr_translator,
 	xocl_init_p2p,
 	xocl_init_spc,
@@ -1810,6 +1941,8 @@ static int (*xocl_drv_reg_funcs[])(void) __initdata = {
 	xocl_init_m2m,
 	xocl_init_config_gpio,
 	xocl_init_command_queue,
+	xocl_init_hwmon_sdm,
+	xocl_init_ert_ctrl,
 };
 
 static void (*xocl_drv_unreg_funcs[])(void) = {
@@ -1818,8 +1951,6 @@ static void (*xocl_drv_unreg_funcs[])(void) = {
 	xocl_fini_iores,
 	xocl_fini_xdma,
 	xocl_fini_qdma,
-	xocl_fini_qdma4,
-	xocl_fini_mb_scheduler,
 	xocl_fini_mailbox,
 	xocl_fini_xmc,
 	xocl_fini_xmc_u2,
@@ -1841,6 +1972,7 @@ static void (*xocl_drv_unreg_funcs[])(void) = {
 	xocl_fini_accel_deadlock_detector,
 	xocl_fini_mem_hbm,
 	xocl_fini_cu,
+	xocl_fini_scu,
 	xocl_fini_addr_translator,
 	xocl_fini_p2p,
 	xocl_fini_spc,
@@ -1852,13 +1984,20 @@ static void (*xocl_drv_unreg_funcs[])(void) = {
 	xocl_fini_intc,
 	xocl_fini_config_gpio,
 	xocl_fini_command_queue,
+	xocl_fini_hwmon_sdm,
+	xocl_fini_ert_ctrl,
 };
 
 static int __init xocl_init(void)
 {
 	int		ret, i = 0;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
 	xrt_class = class_create(THIS_MODULE, "xrt_user");
+#else
+	xrt_class = class_create("xrt_user");
+#endif
+
 	if (IS_ERR(xrt_class)) {
 		ret = PTR_ERR(xrt_class);
 		goto err_class_create;
@@ -1913,3 +2052,6 @@ MODULE_VERSION(XRT_DRIVER_VERSION);
 MODULE_DESCRIPTION(XOCL_DRIVER_DESC);
 MODULE_AUTHOR("Lizhi Hou <lizhi.hou@xilinx.com>");
 MODULE_LICENSE("GPL v2");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0)  || defined(RHEL_9_0_GE)
+MODULE_IMPORT_NS(DMA_BUF);
+#endif

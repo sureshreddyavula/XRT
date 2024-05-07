@@ -1,5 +1,5 @@
 /**
- *  Copyright (C) 2015-2021, Xilinx Inc
+ *  Copyright (C) 2015-2024, Advanced Micro Devices, Inc. All rights Reserved.
  *
  *  This file is dual licensed.  It may be redistributed and/or modified
  *  under the terms of the Apache 2.0 License OR version 2 of the GNU
@@ -20,59 +20,66 @@
  *  limitations under the License.
  *
  *  GPL license Verbiage:
- *
- *  This program is free software: you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation, either version 3 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
- *
- *  You should have received a copy of the GNU General Public License
- *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *  This program is free software; you can redistribute it and/or modify
+ *  it under the terms of the GNU General Public License as published by the Free Software Foundation;
+ *  either version 2 of the License, or (at your option) any later version.
+ *  This program is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *  See the GNU General Public License for more details.
+ *  You should have received a copy of the GNU General Public License along with this program;
+ *  if not, write to the Free Software Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  */
 
 #ifndef _XCLBIN_H_
 #define _XCLBIN_H_
 
-#ifdef _WIN32
-  #include <cstdint>
-  #include <algorithm>
-  #include "windows/uuid.h"
-#else
-  #if defined(__KERNEL__)
-    #include <linux/types.h>
-    #include <linux/uuid.h>
-    #include <linux/version.h>
-  #elif defined(__cplusplus)
-    #include <cstdlib>
-    #include <cstdint>
-    #include <algorithm>
-    #include <uuid/uuid.h>
-  #else
-    #include <stdlib.h>
-    #include <stdint.h>
-    #include <uuid/uuid.h>
-  #endif
+#if defined(__linux__)
+# if defined(__KERNEL__)
+#  include <linux/types.h>
+#  include <linux/uuid.h>
+#  include <linux/version.h>
+# elif defined(__cplusplus)
+#  include <cstdlib>
+#  include <cstdint>
+#  include <algorithm>
+#  include <uuid/uuid.h>
+# else
+#  include <stdlib.h>
+#  include <stdint.h>
+#  include <uuid/uuid.h>
+# endif
+#elif defined(_WIN32)
+# if defined(_KERNEL_MODE)
+#  include <guiddef.h>
+#  include <stdlib.h>
+# elif defined(__cplusplus)
+#  include <cstdlib>
+#  include <cstdint>
+#  include <algorithm>
+#  include <windows/uuid.h>
+# else
+#  include <stdlib.h>
+#  include <stdint.h>
+#  include <windows/uuid.h>
+# endif
+#endif
 
-  #if !defined(__KERNEL__)
-    typedef uuid_t xuid_t;
-  #else //(__KERNEL__)
-    #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
-      typedef uuid_t xuid_t;
-    #elif defined(RHEL_RELEASE_CODE)
-      #if RHEL_RELEASE_CODE > RHEL_RELEASE_VERSION(7,4)
-        typedef uuid_t xuid_t;
-      #else
-        typedef uuid_le xuid_t;
-      #endif
-    #else
-      typedef uuid_le xuid_t;
-    #endif
-  #endif
+#if defined(__linux__) && defined(__KERNEL__)
+# if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
+typedef uuid_t xuid_t;
+# elif defined(RHEL_RELEASE_CODE)
+#  if RHEL_RELEASE_CODE > RHEL_RELEASE_VERSION(7,4)
+typedef uuid_t xuid_t;
+#  else
+typedef uuid_le xuid_t;
+#  endif
+# else
+typedef uuid_le xuid_t;
+# endif
+#elif defined(__linux__) && !defined(__KERNEL__)
+typedef uuid_t xuid_t;
+#elif defined(_WIN32) && defined(_KERNEL_MODE)
+typedef GUID xuid_t;
 #endif
 
 // ----------------- Custom Assert Macro -------------------------
@@ -96,6 +103,7 @@
     enum { XLCBIN_ASSERT_CONCAT(assert_line_, __LINE__) = 1/(int)(!!(e)) }
 #endif
 
+// *** Helper macro ***
 // Reports a size of structure via an error
 #define SIZE_OF_STRUCT(s) \
    char (*__fail)[sizeof(struct s)] = 1
@@ -172,6 +180,11 @@ extern "C" {
         ASK_GROUP_CONNECTIVITY = 27,
         SMARTNIC               = 28,
         AIE_RESOURCES          = 29,
+        OVERLAY                = 30,
+        VENDER_METADATA        = 31,
+        AIE_PARTITION          = 32,
+        IP_METADATA            = 33,
+	AIE_RESOURCES_BIN      = 34,
     };
 
     enum MEM_TYPE {
@@ -185,7 +198,8 @@ extern "C" {
         MEM_BRAM,
         MEM_URAM,
         MEM_STREAMING_CONNECTION,
-        MEM_HOST
+        MEM_HOST,
+        MEM_PS_KERNEL,
     };
 
     enum IP_TYPE {
@@ -196,6 +210,7 @@ extern "C" {
         IP_MEM_DDR4,
         IP_MEM_HBM,
         IP_MEM_HBM_ECC,
+        IP_PS_KERNEL,
     };
 
     enum ACTION_MASK {
@@ -219,13 +234,7 @@ extern "C" {
         uint8_t m_versionMinor;             /* Minor Version */
         uint16_t m_mode;                    /* XCLBIN_MODE */
         uint16_t m_actionMask;              /* Bit Mask */
-	union {
-	    struct {
-		uint64_t m_platformId;      /* 64 bit platform ID: vendor-device-subvendor-subdev */
-		uint64_t m_featureId;       /* 64 bit feature id */
-	    } rom;
-	    unsigned char rom_uuid[16];     /* feature ROM UUID for which this xclbin was generated */
-	};
+        unsigned char m_interface_uuid[16];     /* Interface uuid of this xclbin */
         unsigned char m_platformVBNV[64];   /* e.g. xilinx:xil-accel-rd-ku115:4ddr-xpr:3.4: null terminated */
 	union {
 	    char m_next_axlf[16];           /* Name of next xclbin file in the daisy chain */
@@ -323,6 +332,18 @@ extern "C" {
         FAST_ADAPTER = 5
     };
 
+    // m_subtype
+    enum PS_SUBTYPE {
+        ST_PS = 0,
+        ST_DPU = 1,
+    };
+
+    // m_functional
+    enum PS_FUNCTIONAL {
+        FC_DPU = 0,
+        FC_PREPOST = 1,
+    };
+
     #define IP_CONTROL_MASK  0xFF00
     #define IP_CONTROL_SHIFT 0x8
 
@@ -335,6 +356,19 @@ extern "C" {
                                  //         m_int_enable   : Bit  - 0x0000_0001;
                                  //         m_interrupt_id : Bits - 0x0000_00FE;
                                  //         m_ip_control   : Bits = 0x0000_FF00;
+                                 // properties is also used for ps kernel (i.e. -add-pskernel)
+       
+            // PS Kernels
+            // m_type: IP_PS_KERNEL
+            struct {
+               uint16_t m_subtype : 2;        // Bits - 0x0003 - PS_SUBTYPE enum values
+               uint16_t : 2;                  // Bits - 0x000C - Future use
+               uint16_t m_functional : 2;     // Bits - 0x0030 - PS_FUNCTIONAL enum values
+               uint16_t : 10;                 // Bits - 0xFFC0 - Future use
+               uint16_t m_kernel_id : 12;     // Bits - 0x0FFF
+               uint16_t : 4;                  // Bits - 0xF000 - Future use
+            } ps_kernel;
+
             struct {             // m_type: IP_MEM_*
                uint16_t m_index;
                uint8_t m_pc_index;
@@ -369,6 +403,7 @@ extern "C" {
         TRACE_S2MM_FULL,
         AXI_NOC,
         ACCEL_DEADLOCK_DETECTOR,
+        HSDP_TRACE,
         DEBUG_IP_TYPE_MAX
     };
 
@@ -464,6 +499,25 @@ extern "C" {
     };
     XCLBIN_STATIC_ASSERT(sizeof(struct soft_kernel) == 80, "soft_kernel structure no longer is 80 bytes in size");
 
+    struct aie_resources_bin {                   /* aie_resources_bin data section  */
+        // Prefix Syntax:
+        //   mpo - member, pointer, offset
+	//     This variable represents a zero terminated string
+	//     that is offseted from the beginning of the section.
+	//
+	//     The pointer to access the string is initialized as follows:
+	//     char * pCharString = (address_of_section) + (mpo value)
+	uint32_t mpo_name;         // Name of the aie_resources_bin section
+	uint32_t m_image_offset;   // Image offset
+	uint32_t m_image_size;     // Image size
+	uint32_t mpo_version;      // Version
+	uint32_t m_start_column;   // Start column
+	uint32_t m_num_columns;    // Number of columns
+	uint8_t padding[36];       // Reserved for future use
+	uint8_t reservedExt[16];   // Reserved for future extended data
+    };
+    XCLBIN_STATIC_ASSERT(sizeof(struct aie_resources_bin) == 76, "aie_resources_bin structure no longer is 76 bytes in size");
+		
     enum FLASH_TYPE
     {
         FLT_UNKNOWN = 0,
@@ -497,9 +551,86 @@ extern "C" {
         CST_LAST
     };
 
+    struct vender_metadata {                   /* vender metadata section  */
+        // Prefix Syntax:
+        //   mpo - member, pointer, offset
+        //     This variable represents a zero terminated string
+        //     that is offseted from the beginning of the section.
+        //
+        //     The pointer to access the string is initialized as follows:
+        //     char * pCharString = (address_of_section) + (mpo value)
+        uint32_t mpo_name;         // Name of the the vender metadata section
+        uint32_t m_image_offset;   // Image offset
+        uint32_t m_image_size;     // Image size
+        uint8_t padding[36];       // Reserved for future use
+    };
+    XCLBIN_STATIC_ASSERT(sizeof(struct vender_metadata) == 48, "vender metadata kernel structure no longer is 48 bytes in size");
+
+
+    struct array_offset {
+        uint32_t size;             // Number of elements in the array
+        uint32_t offset;           // Array offset from the start of the section
+    };
+
+    XCLBIN_STATIC_ASSERT(sizeof(struct array_offset) == 8, "array_offset structure no longer is 8 bytes in size");
+
+    enum CDO_Type {
+        CT_UNKNOWN = 0,
+        CT_PRIMARY = 1,
+        CT_LITE    = 2,
+        CT_PREPOST = 3
+    };
+
+    struct cdo_group {
+        uint32_t mpo_name;                  // Name of the CDO group (Null terminated string)
+        uint8_t cdo_type;                   // CDO group type (CDO_Type)
+        uint8_t padding[3];             
+        uint64_t pdi_id;                    // PDI ID
+        struct array_offset dpu_kernel_ids; // Array of dpu_kernel_ids (uint64_t)
+        struct array_offset pre_cdo_groups; // Array of Pre CDO Group IDs (uint32_t)
+        uint8_t reserved[64];               // Reserved
+    };
+    XCLBIN_STATIC_ASSERT(sizeof(struct cdo_group) == 96, "cdo_group structure no longer is 96 bytes in size");
+    XCLBIN_STATIC_ASSERT(sizeof(struct cdo_group) % sizeof(uint64_t) == 0, "cdo_group structure needs to be 64-bit word aligned");
+
+    // 32KB per tile, 64 rows * 64 columns
+    #define PDI_IMAGE_MAX_SIZE 32*1024*64*64
+    struct aie_pdi {
+        xuid_t uuid;                        // PDI container UUID (16 bytes)
+        struct array_offset pdi_image;      // PDI Image (uint8_t)
+        struct array_offset cdo_groups;     // Array of cdo_groups (cdo_group)
+        uint8_t reserved[64];               // Reserved
+    };
+
+    XCLBIN_STATIC_ASSERT(sizeof(struct aie_pdi) == 96, "aie_pdi structure no longer is 96 bytes in size");
+    XCLBIN_STATIC_ASSERT(sizeof(struct aie_pdi) % sizeof(uint64_t) == 0, "aie_pdi structure needs to be 64-bit word aligned");
+
+    struct aie_partition_info {
+        uint16_t column_width;              // Width of the partition
+        uint8_t padding[6];                 // Byte alignment
+        struct array_offset start_columns;  // Array of start column identifiers (uint16_t)
+        uint8_t reserved[72];               // Reserved
+    };
+    XCLBIN_STATIC_ASSERT(sizeof(struct aie_partition_info) == 88, "partition_info structure no longer is 88 bytes in size");
+    
+    struct aie_partition {
+        uint8_t schema_version;             // Group schema version (default 0)
+        uint8_t padding0[3];                // Byte alignment          
+        uint32_t mpo_name;                  // Name of the aie_partition 
+        uint32_t operations_per_cycle;      // Operations per cycle. Used later to create TOPS (operations_per_cycle * <AIE Clock Frequency>)
+        uint8_t padding[4];
+        uint64_t inference_fingerprint;     // The unique hash value of the inference function
+        uint64_t pre_post_fingerprint;      // The unique hash value of pre post 
+        struct aie_partition_info info;     // Partition information
+        struct array_offset aie_pdi;        // PDI Array (aie_partition_info)
+        uint8_t reserved[54];               // Reserved
+    };
+    XCLBIN_STATIC_ASSERT(sizeof(struct aie_partition) == 184, "aie_partition structure no longer is 184 bytes in size");
+    XCLBIN_STATIC_ASSERT(sizeof(struct aie_partition) % sizeof(uint64_t) == 0, "aie_partition structure needs to be 64-bit word aligned");
+
     /**** END : Xilinx internal section *****/
 
-# ifdef __cplusplus
+# if defined(__cplusplus) && !defined(__KERNEL__) && !defined(_KERNEL_MODE) 
     namespace xclbin {
       inline const axlf_section_header*
       get_axlf_section(const axlf* top, axlf_section_kind kind)

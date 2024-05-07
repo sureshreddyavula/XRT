@@ -72,8 +72,8 @@ static ssize_t xdma_migrate_bo(struct platform_device *pdev,
 	xdma = platform_get_drvdata(pdev);
 	xocl_dbg(&pdev->dev, "TID %d, Channel:%d, Offset: 0x%llx, Dir: %d",
 		pid, channel, paddr, dir);
-	ret = xdma_xfer_submit(xdma->dma_handle, channel, dir,
-		paddr, sgt, false, 10000, NULL);
+	ret = xdma_xfer_fastpath(xdma->dma_handle, channel, dir,
+		paddr, sgt, false, 10000);
 	if (ret >= 0) {
 		xdma->channel_usage[dir][channel] += ret;
 		return ret;
@@ -294,7 +294,11 @@ static irqreturn_t xdma_isr(int irq, void *arg)
 		ret = irq_entry->handler(irq, irq_entry->arg);
 
 	if (!IS_ERR_OR_NULL(irq_entry->event_ctx)) {
+#if KERNEL_VERSION(6, 8, 0) <= LINUX_VERSION_CODE
+		eventfd_signal(irq_entry->event_ctx);
+#else
 		eventfd_signal(irq_entry->event_ctx, 1);
+#endif
 	}
 
 	return ret;
@@ -480,6 +484,11 @@ static int xdma_probe(struct platform_device *pdev)
 		xocl_err(&pdev->dev, "XDMA Device Open failed");
 		ret = -EIO;
 		goto failed;
+	}
+
+	if (XOCL_DSA_IS_VERSAL_ES3(xdev)) {
+		xocl_info(&pdev->dev, "VERSAL ES3, set to 2 channels");
+		xdma->channel = 2;
 	}
 
 	xdma->user_msix_table = devm_kzalloc(&pdev->dev,

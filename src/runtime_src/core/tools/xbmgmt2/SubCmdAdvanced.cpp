@@ -1,29 +1,17 @@
-/**
- * Copyright (C) 2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2021-2022 Xilinx, Inc
+// Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
 
 // ------ I N C L U D E   F I L E S -------------------------------------------
 // Local - Include Files
 #include "SubCmdAdvanced.h"
-#include "OO_Config.h"
-#include "OO_LoadConfig.h"
+#include "OO_Hotplug.h"
 
 #include "common/system.h"
 #include "common/device.h"
 #include "common/xclbin_parser.h"
 
+#include "tools/common/XBUtilitiesCore.h"
 #include "tools/common/XBUtilities.h"
 namespace XBU = XBUtilities;
 
@@ -41,9 +29,10 @@ namespace po = boost::program_options;
 
 // ----- C L A S S   M E T H O D S -------------------------------------------
 
-SubCmdAdvanced::SubCmdAdvanced(bool _isHidden, bool _isDepricated, bool _isPreliminary)
+SubCmdAdvanced::SubCmdAdvanced(bool _isHidden, bool _isDepricated, bool _isPreliminary, const boost::property_tree::ptree& configurations)
     : SubCmd("advanced", 
              "Low level command operations")
+    , m_help(false)
 {
   const std::string longDescription = "Low level command operations.";
   setLongDescription(longDescription);
@@ -51,6 +40,15 @@ SubCmdAdvanced::SubCmdAdvanced(bool _isHidden, bool _isDepricated, bool _isPreli
   setIsHidden(_isHidden);
   setIsDeprecated(_isDepricated);
   setIsPreliminary(_isPreliminary);
+
+  m_commonOptions.add_options()
+    ("device,d", boost::program_options::value<decltype(m_device)>(&m_device), "The Bus:Device.Function (e.g., 0000:d8:00.0) device of interest")
+    ("help", boost::program_options::bool_switch(&m_help), "Help to use this sub-command")
+  ;
+
+  m_commandConfig = configurations;
+
+  addSubOption(std::make_shared<OO_Hotplug>("hotplug"));
 }
 
 
@@ -59,82 +57,25 @@ SubCmdAdvanced::execute(const SubCmdOptions& _options) const
 {
   XBU::verbose("SubCommand: advanced");
 
-  // -- Common top level options ---
-  bool help = false;
-
-  po::options_description commonOptions("Common Options"); 
-  commonOptions.add_options()
-    ("help,h", boost::program_options::bool_switch(&help), "Help to use this sub-command")
-  ;
-
-  po::options_description hiddenOptions("Hidden Options");
-
-  // -- Define the supporting option options ----
-  SubOptionOptions subOptionOptions;
-  subOptionOptions.emplace_back(std::make_shared<OO_Config>("config"));
-  subOptionOptions.emplace_back(std::make_shared<OO_LoadConfig>("load-config"));
-
-  for (auto & subOO : subOptionOptions) {
-    if (subOO->isHidden()) 
-      hiddenOptions.add_options()(subOO->longName().c_str(), subOO->description().c_str());
-    else
-      commonOptions.add_options()(subOO->longName().c_str(), subOO->description().c_str());
-
-    subOO->setExecutable(getExecutableName());
-    subOO->setCommand(getName());
-  }
-
-  po::options_description allOptions("All Options");
-  allOptions.add(commonOptions);
-  allOptions.add(hiddenOptions);
-
   // =========== Process the options ========================================
 
   // 1) Process the common top level options 
-  po::parsed_options parsedCommonTop = 
-    po::command_line_parser(_options).
-    options(allOptions).          
-    allow_unregistered().           // Allow for unregistered options
-    run();                          // Parse the options
-
   po::variables_map vm;
+  // Used for the suboption arguments
+  auto topOptions = process_arguments(vm, _options, false);
 
-  try {
-    po::store(parsedCommonTop, vm);  // Can throw
-    po::notify(vm);                  // Can throw (but really isn't used)
-
-    // Multual DRC
-    for (unsigned int index1 = 0; index1 < subOptionOptions.size(); ++index1) {
-      for (unsigned int index2 = index1 + 1; index2 < subOptionOptions.size(); ++index2) {
-        conflictingOptions(vm, subOptionOptions[index1]->longName(), subOptionOptions[index2]->longName());
-      }
-    }
-  } catch (const std::exception & e) {
-    std::cerr << "ERROR: " << e.what() << std::endl;
-    printHelp(commonOptions, hiddenOptions, subOptionOptions);
-    return;
-  }
-
-  // Find the subOption;
-  std::shared_ptr<OptionOptions> optionOption;
-  for (auto subOO : subOptionOptions) {
-    if (vm.count(subOO->longName().c_str()) != 0) {
-      optionOption = subOO;
-      break;
-    }
-  }
+  // DRC check between suboptions
+  auto optionOption = checkForSubOption(vm);
 
   // No suboption print help
   if (!optionOption) {
-    printHelp(commonOptions, hiddenOptions, subOptionOptions);
+    printHelp(false, "", XBU::get_device_class(m_device, true));
     return;
   }
 
   // 2) Process the top level options
-  std::vector<std::string> topOptions = po::collect_unrecognized(parsedCommonTop.options, po::include_positional);
-  if (help) {
+  if (m_help)
     topOptions.push_back("--help");
-  }
 
   optionOption->setGlobalOptions(getGlobalOptions());
 

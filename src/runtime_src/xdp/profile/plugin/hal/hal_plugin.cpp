@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,13 +15,12 @@
  * under the License.
  */
 
-#define XDP_SOURCE
+#define XDP_PLUGIN_SOURCE
 
 #include <cstring>
 
 #include "xdp/profile/plugin/hal/hal_plugin.h"
 #include "xdp/profile/writer/hal/hal_host_trace_writer.h"
-#include "xdp/profile/writer/hal/hal_summary_writer.h"
 
 #include "xdp/profile/plugin/vp_base/utility.h"
 #include "xdp/profile/plugin/vp_base/info.h"
@@ -28,15 +28,16 @@
 
 #include "xdp/profile/database/database.h"
 
-#include "core/common/xrt_profiling.h"
 #include "core/common/message.h"
-
-#define MAX_PATH_SZ 512
 
 namespace xdp {
 
+  bool HALPlugin::live = false;
+
   HALPlugin::HALPlugin() : XDPPlugin()
   {
+    HALPlugin::live = true;
+
     db->registerPlugin(this) ;
     db->registerInfo(info::hal) ;
 
@@ -54,10 +55,6 @@ namespace xdp {
                                               toolVersion) ;
     writers.push_back(writer) ;
     (db->getStaticInfo()).addOpenedFile(writer->getcurrentFileName(), "VP_TRACE");
-#ifdef HAL_SUMMARY
-    writers.push_back(new HALSummaryWriter("hal_summary.csv"));
-#endif
-
   }
 
   HALPlugin::~HALPlugin()
@@ -74,6 +71,7 @@ namespace xdp {
       db->unregisterPlugin(this) ;
     }
 
+    HALPlugin::live = false;
     // If the database is dead, then we must have already forced a 
     //  write at the database destructor so we can just move on
   }
@@ -81,10 +79,6 @@ namespace xdp {
   void HALPlugin::writeAll(bool openNewFiles)
   {
     for (auto w : writers)
-    {
       w->write(openNewFiles) ;
-    }
   }
 }
-
-

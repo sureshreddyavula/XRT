@@ -1,17 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (C) 2019-2021 Xilinx, Inc. All rights reserved.
+# Copyright (C) 2019-2022 Xilinx, Inc. All rights reserved.
+# Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
 #
 # Collect files outside of this directory
 file(GLOB XBMGMT_V2_BASE_FILES
   "xbmgmt.cpp"
   "../common/XBMain.cpp"
+  "../common/XBUtilitiesCore.cpp"
   "../common/XBUtilities.cpp"
+  "../common/JSONConfigurable.cpp"
   "../common/SubCmd.cpp"
+  "../common/SubCmdConfigureInternal.cpp"
+  "../common/SubCmdExamineInternal.cpp"
+  "../common/XBHelpMenusCore.cpp"
   "../common/XBHelpMenus.cpp"
   "../common/OptionOptions.cpp"
   "../common/ProgressBar.cpp"
+  "../common/BusyBar.cpp"
   "../common/Process.cpp"
-  "../common/Report*.cpp"
+  "../common/reports/*.cpp"
+  "../common/reports/aie/*.cpp"
+  "../common/Report.cpp"
+  "../common/PsKernelUtilities.cpp"
+  "../common/Table2D.cpp"
 )
 
 # Collect local directory files
@@ -21,7 +32,15 @@ file(GLOB XBMGMT_V2_SUBCMD_FILES
   "SubCmdExamine.cpp"
   "SubCmdAdvanced.cpp"
   "SubCmdDump.cpp"
-  "OO_*.cpp"
+  "SubCmdConfigure.cpp"
+  "OO_Hotplug.cpp"
+  "OO_UpdateBase.cpp"
+  "OO_FactoryReset.cpp"
+  "OO_UpdateShell.cpp"
+  "OO_ChangeBoot.cpp"
+  "OO_UpdateXclbin.cpp"
+  "OO_Input.cpp"
+  "OO_Retention.cpp"
   "Report*.cpp"
   "flash/*.cpp"
 )
@@ -43,6 +62,8 @@ add_executable(${XBMGMT2_NAME} ${XBMGMT_V2_SRCS})
 # Determine what functionality should be added
 if (${XRT_NATIVE_BUILD} STREQUAL "yes")
   target_compile_definitions(${XBMGMT2_NAME} PRIVATE ENABLE_NATIVE_SUBCMDS_AND_REPORTS)
+else()
+  target_compile_definitions(${XBUTIL2_NAME} PRIVATE ENABLE_DEFAULT_ONE_DEVICE_OPTION)
 endif()
 
 # Static build is a Linux / Ubuntu option only
@@ -54,10 +75,8 @@ if (XRT_STATIC_BUILD)
   # The -static link option will pick the static libraries. 
   target_link_libraries(${XBMGMT2_NAME}_static
     PRIVATE
-    xrt_core_static
     xrt_coreutil_static
     boost_system
-    boost_filesystem
     boost_program_options
     -Wl,--whole-archive rt pthread -Wl,--no-whole-archive
     uuid
@@ -69,7 +88,6 @@ endif()
 
 target_link_libraries(${XBMGMT2_NAME}
   PRIVATE
-  xrt_core
   xrt_coreutil
   ${Boost_FILESYSTEM_LIBRARY}
   ${Boost_SYSTEM_LIBRARY}

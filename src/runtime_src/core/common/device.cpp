@@ -1,119 +1,37 @@
-/**
- * Copyright (C) 2019-2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2022 Xilinx, Inc.  All rights reserved.
+// Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
 #define XCL_DRIVER_DLL_EXPORT  // in same dll as exported xrt apis
-#define XRT_CORE_COMMON_SOURCE // in same dll as core_common
+#define XRT_CORE_COMMON_SOURCE // in same dll as coreutil
+#define XRT_API_SOURCE         // in same dll as coreutil
 #include "device.h"
-#include "error.h"
-#include "utils.h"
-#include "debug.h"
-#include "query_requests.h"
 #include "config_reader.h"
+#include "debug.h"
+#include "error.h"
+#include "query_requests.h"
+#include "utils.h"
 #include "xclbin_parser.h"
 #include "xclbin_swemu.h"
-#include "core/common/api/xclbin_int.h"
+
+#include "core/include/ert.h"
 #include "core/include/xrt.h"
 #include "core/include/xclbin.h"
-#include "core/include/ert.h"
+#include "core/include/xrt/xrt_uuid.h"
+#include "core/include/experimental/xrt_xclbin.h"
+
+#include "core/common/api/hw_queue.h"
+#include "core/common/api/xclbin_int.h"
+
 #include <boost/format.hpp>
-#include <string>
-#include <iostream>
-#include <fstream>
 #include <functional>
+#include <exception>
+#include <string>
+#include <utility>
+#include <vector>
 
 #ifdef _WIN32
 #pragma warning ( disable : 4996 )
 #endif
-
-namespace {
-
-// Encode / compress memory connections, a mapping from mem_topology
-// memory index to encoded index.  The compressed indices facilitate
-// small sized std::bitset for representing kernel argument
-// connectivity.
-//
-// The complicated part of this routine is to partition the set of all
-// memory banks into groups of banks with same base address and size
-// such that all banks within a group can share the same encoded index.
-static std::vector<size_t>
-compute_memidx_encoding(const ::mem_topology* mem_topology)
-{
-  if ( mem_topology == nullptr )
-    return {};
-
-  // The resulting encoding midx -> eidx
-  std::vector<size_t> enc(mem_topology->m_count, std::numeric_limits<size_t>::max());
-
-  struct membank
-  {
-    const mem_data* mdata;
-    int32_t midx;
-    membank(const mem_data* md, int32_t mi) : mdata(md), midx(mi) {}
-  };
-
-  // Collect all memory banks of interest
-  std::vector<membank> membanks;
-  for (int32_t midx = 0; midx < mem_topology->m_count; ++midx) {
-    const auto& mem = mem_topology->m_mem_data[midx];
-
-    if (!mem.m_used)
-      continue;
-    
-    // skip types that are of no interest for global connection
-    if (mem.m_type == MEM_STREAMING || mem.m_type == MEM_STREAMING_CONNECTION)
-      continue;
-
-    membanks.emplace_back(&mem, midx);
-  }
-
-  // Sort collected memory banks on addr decreasing order, the size
-  // use stable sort for predicatability (see #3795)
-  std::stable_sort(membanks.begin(), membanks.end(),
-                   [](const auto& mb1, const auto& mb2) {
-                     return (mb1.mdata->m_base_address > mb2.mdata->m_base_address)
-                       || ((mb1.mdata->m_base_address == mb2.mdata->m_base_address)
-                           && (mb1.mdata->m_size > mb2.mdata->m_size));
-                   });
-
-  // Process each memory bank and assign encoded index based on
-  // address/size partitioning, such that memory banks with same
-  // base address and same size share same encoded index
-  size_t eidx = 0;  // encoded index
-  auto itr = membanks.begin();
-  while (itr != membanks.end()) {
-    const auto& mb = *(itr);
-    auto addr = mb.mdata->m_base_address;
-    auto size = mb.mdata->m_size;
-
-    // first element not part of the sorted (decreasing) range
-    auto upper = std::find_if(itr, membanks.end(),
-                              [addr, size] (const auto& mb) {
-                                return ((mb.mdata->m_base_address != addr) || (mb.mdata->m_size != size));
-                              });
-
-    // process the range assigning same encoded index to all banks in group
-    for (; itr != upper; ++itr)
-      enc[(*itr).midx] = eidx;
-
-    ++eidx; // increment for next iteration
-  }
-
-  return enc;
-}
-
-}
 
 namespace xrt_core {
 
@@ -129,12 +47,14 @@ device::
 {
   // virtual must be declared and defined
   XRT_DEBUGF("xrt_core::device::~device(0x%x) idx(%d)\n", this, m_device_id);
+  hw_queue::finish(this);
 }
 
 bool
 device::
 is_nodma() const
 {
+  std::lock_guard lk(m_mutex);
   if (m_nodma != boost::none)
     return *m_nodma;
 
@@ -153,6 +73,8 @@ uuid
 device::
 get_xclbin_uuid() const
 {
+  // This function assumes only one xclbin loaded into the
+  // default slot 0.
   try {
     auto uuid_str =  device_query<query::xclbin_uuid>(this);
     return uuid(uuid_str);
@@ -165,7 +87,37 @@ get_xclbin_uuid() const
   return m_xclbin ? m_xclbin.get_uuid() : uuid{};
 }
 
-// Unforunately there are two independent entry points into loading an
+// Registering an xclbin has one entry point (this one) only.
+// Shim level registering is not exposed to end-user application.
+// Naming of "record" as in record_xclbin is to compensate for
+// virtual register_xclbin which is defined by shim.
+void
+device::
+record_xclbin(const xrt::xclbin& xclbin)
+{
+  try {
+    register_xclbin(xclbin); // shim level registration
+  }
+  catch (const not_supported_error&) {
+    // Shim does not support register xclbin, meaning it
+    // doesn't support multi-xclbin, so just take the
+    // load_xclbin flow.
+    load_xclbin(xclbin);
+    return;
+  }
+
+  std::lock_guard lk(m_mutex);
+  m_xclbins.insert(xclbin);
+
+  // For single xclbin case, where shim doesn't implement
+  // kds_cu_info, we need the current xclbin stored here
+  // as a temporary 'global'.  This variable is used when
+  // update_cu_info() is called and query:kds_cu_info is not
+  // implemented
+  m_xclbin = xclbin;
+}
+
+// Unfortunately there are two independent entry points to load an
 // xclbin.  One is this function via xrt::device::load_xclbin(), the
 // other is xclLoadXclBin(). The two entrypoints converge in
 // register_axlf() upon successful xclbin loading. It is possible for
@@ -213,6 +165,94 @@ load_xclbin(const uuid& xclbin_id)
 #endif
 }
 
+xrt::xclbin
+device::
+get_xclbin(const uuid& xclbin_id) const
+{
+  // Allow access to xclbin in process of loading via device::load_xclbin
+  if (xclbin_id && xclbin_id == m_xclbin.get_uuid())
+    return m_xclbin;
+  if (xclbin_id) {
+    std::lock_guard lk(m_mutex);
+    return m_xclbins.get(xclbin_id);
+  }
+
+  // Single xclbin case
+  return m_xclbin;
+}
+
+// Update cached xclbin data based on data queried from driver. This
+// function can be called by multiple threads. One entry point is
+// via register_axlf, another is through open_context.  For the latter,
+// opening a CU context on the device can update the xclbin cached data,
+// when/if driver determines that the requested xclbin cannot be
+// shared and must be loaded into a new slot.
+void
+device::
+update_xclbin_info()
+{
+  // Update cached slot xclbin uuid mapping
+  std::lock_guard lk(m_mutex);
+  try {
+    // [slot, xclbin_uuid]+
+    auto xclbin_slot_info = xrt_core::device_query<xrt_core::query::xclbin_slots>(this);
+    m_xclbins.reset(xrt_core::query::xclbin_slots::to_map(xclbin_slot_info));
+  }
+  catch (const query::no_such_key&) {
+    // device does not support multiple xclbins, assume slot 0
+    // for current xclbin
+    m_xclbins.reset(std::map<slot_id, xrt::uuid>{{0, get_xclbin_uuid()}});
+  }
+}
+
+void
+device::
+update_cu_info()
+{
+  // Compute CU sort order, kernel driver zocl and xocl now assign and
+  // control the sort order, which is accessible via a query request.
+  // For emulation old xclbin_parser::get_cus is used.
+  std::lock_guard lk(m_mutex);
+  m_cus.clear();
+  m_cu2idx.clear();
+  m_scu2idx.clear();
+  try {
+    // Regular CUs
+    auto cudata = xrt_core::device_query<xrt_core::query::kds_cu_info>(this);
+
+    // TODO: m_cus is legacy, need to fix for multiple slots
+    std::sort(cudata.begin(), cudata.end(), [](const auto& d1, const auto& d2) { return d1.index < d2.index; });
+    std::transform(cudata.begin(), cudata.end(), std::back_inserter(m_cus), [](const auto& d) { return d.base_addr; });
+
+    for (const auto& d : cudata) {
+      auto& cu2idx = m_cu2idx[d.slot_index];
+      cu2idx.emplace(std::move(d.name), cuidx_type{d.index});
+    }
+
+    // Soft kernels, not an error if query doesn't exist (edge)
+    try {
+      auto scudata = xrt_core::device_query<xrt_core::query::kds_scu_info>(this);
+      for (const auto& d : scudata) {
+        auto& cu2idx = m_scu2idx[d.slot_index];
+        cu2idx.emplace(std::move(d.name), cuidx_type{d.index});
+      }
+    }
+    catch (const query::no_such_key&) {
+    }
+  }
+  catch (const query::no_such_key&) {
+    // This code path only works for single xclbin case.
+    // It assumes that m_xclbin is the single xclbin and that
+    // there is only one default slot with number 0.
+    auto ip_layout = get_axlf_section<const ::ip_layout*>(IP_LAYOUT);
+    auto& cu2idx = m_cu2idx[0u]; // default slot 0
+    if (ip_layout != nullptr) {
+      m_cus = xclbin::get_cus(ip_layout);
+      cu2idx = xclbin::get_cu_indices(ip_layout);
+    }
+  }
+}
+
 // This function is called after an axlf has been succesfully loaded
 // by the shim layer API xclLoadXclBin().  Since xclLoadXclBin() can
 // be called explicitly by end-user code, the callback is necessary in
@@ -221,38 +261,39 @@ void
 device::
 register_axlf(const axlf* top)
 {
-  if (!m_xclbin || m_xclbin.get_uuid() != uuid(top->m_header.uuid))
-      m_xclbin = xrt::xclbin{top};
+  xrt::uuid xid{top->m_header.uuid};
 
-  // Compute memidx encoding / compression. The compressed indices facilitate
-  // small sized std::bitset for representing kernel argument connectivity
-  m_memidx_encoding = compute_memidx_encoding(get_axlf_section<const ::mem_topology*>(ASK_GROUP_TOPOLOGY));
+  // Update xclbin caching from [slot, xclbin_uuid]+ data
+  update_xclbin_info();
 
-  // Compute CU sort order, kernel driver zocl and xocl now assign and
-  // control the sort order, which is accessible via a query request.
-  // For emulation old xclbin_parser::get_cus is used.
-  m_cus.clear();
-  try {
-    auto cudata = xrt_core::device_query<xrt_core::query::kds_cu_stat>(this);
-    std::sort(cudata.begin(), cudata.end(), [](const auto& d1, const auto& d2) { return d1.index < d2.index; });
-    std::transform(cudata.begin(), cudata.end(), std::back_inserter(m_cus), [](const auto& d) { return d.base_addr; });
-  }
-  catch (const query::no_such_key&) {
-    m_cus = xclbin::get_cus(get_axlf_section<const ::ip_layout*>(IP_LAYOUT));
-  }
+  // Update cu caching from [slot, uuid, cuidx]+ data
+  update_cu_info();
+
+  // Do not recreate the xclbin if m_xclbin is set, which implies the
+  // xclbin is loaded via xrt::device::load_xclbin where the user
+  // application constructed the xclbin.  For all pratical purposes
+  // m_xclbin is a temporary 'global' variable to work-around dual
+  // entry points for xclbin loading.  However, for backwards
+  // compatibility m_xclbin represents the last loaded xclbin and
+  // will continue to work for single xclbin use-cases.
+  if (!m_xclbin || m_xclbin.get_uuid() != xid)
+    m_xclbin = xrt::xclbin{top};
+
+  // Record the xclbin
+  std::lock_guard lk(m_mutex);
+  m_xclbins.insert(m_xclbin);
 }
 
 std::pair<const char*, size_t>
 device::
 get_axlf_section(axlf_section_kind section, const uuid& xclbin_id) const
 {
-  if (xclbin_id && xclbin_id != m_xclbin.get_uuid())
-    throw error(EINVAL, "xclbin id mismatch");
+  auto xclbin = get_xclbin(xclbin_id);
 
-  if (!m_xclbin)
+  if (!xclbin)
     return {nullptr, 0};
 
-  return xrt_core::xclbin_int::get_axlf_section(m_xclbin, section);
+  return xrt_core::xclbin_int::get_axlf_section(xclbin, section);
 }
 
 std::pair<const char*, size_t>
@@ -265,13 +306,26 @@ get_axlf_section_or_error(axlf_section_kind section, const uuid& xclbin_id) cons
   throw error(EINVAL, "no such xclbin section");
 }
 
-const std::vector<size_t>&
+std::vector<std::pair<const char*, size_t>>
 device::
-get_memidx_encoding(const uuid& xclbin_id) const
+get_axlf_sections(axlf_section_kind section, const uuid& xclbin_id) const
 {
-  if (xclbin_id && xclbin_id != m_xclbin.get_uuid())
-    throw error(EINVAL, "xclbin id mismatch");
-  return m_memidx_encoding;
+  auto xclbin = get_xclbin(xclbin_id);
+
+  if (!xclbin)
+    return std::vector<std::pair<const char*, size_t>>();
+
+  return xrt_core::xclbin_int::get_axlf_sections(xclbin, section);
+}
+
+std::vector<std::pair<const char*, size_t>>
+device::
+get_axlf_sections_or_error(axlf_section_kind section, const uuid& xclbin_id) const
+{
+  auto ret = get_axlf_sections(section, xclbin_id);
+  if (!ret.empty())
+    return ret;
+  throw error(EINVAL, "no such xclbin section");
 }
 
 device::memory_type
@@ -293,12 +347,51 @@ get_memory_type(size_t memidx) const
 
 const std::vector<uint64_t>&
 device::
-get_cus(const uuid& xclbin_id) const
+get_cus() const
 {
-  if (xclbin_id && xclbin_id != m_xclbin.get_uuid())
-    throw error(EINVAL, "xclbin id mismatch");
+  // This function returns a reference to internal data
+  // that is modified when an xclbin is loaded.  Normally
+  // not an issue since only single xclbin is supported
+  // when using this API.
+  if (m_cu2idx.size() > 1)
+    throw error(std::errc::not_supported, "multiple xclbins not supported");
 
   return m_cus;
+}
+
+cuidx_type
+device::
+get_cuidx(slot_id slot, const std::string& cuname) const
+{
+  std::lock_guard lk(m_mutex);
+  auto slot_itr = m_cu2idx.find(slot);
+  if (slot_itr == m_cu2idx.end()) {
+    // CU doesn't exists in cu mapping. Now check for scu mapping 
+    slot_itr = m_scu2idx.find(slot);
+    if (slot_itr == m_scu2idx.end())
+      throw error(EINVAL, "No such compute unit '" + cuname + "'");
+  }
+
+  const auto& cu2idx = (*slot_itr).second;
+  auto cu_itr = cu2idx.find(cuname);
+  if (cu_itr == cu2idx.end())
+    throw error(EINVAL, "No such compute unit '" + cuname + "'");
+  return (*cu_itr).second;
+}
+
+cuidx_type
+device::
+get_cuidx(slot_id slot, const std::string& cuname)
+{
+  // Leverage const member function
+  const auto cdev = static_cast<const device*>(this);
+  try {
+    return cdev->get_cuidx(slot, cuname);
+  }
+  catch (const xrt_core::error&) {
+    update_cu_info();
+    return cdev->get_cuidx(slot, cuname);
+  }
 }
 
 std::pair<size_t, size_t>
@@ -341,9 +434,9 @@ get_ert_slots(const char* xml_data, size_t xml_size) const
 
 std::pair<size_t, size_t>
 device::
-get_ert_slots() const
+get_ert_slots(const uuid& xclbin_id) const
 {
-  auto xml =  get_axlf_section(EMBEDDED_METADATA);
+  auto xml =  get_axlf_section(EMBEDDED_METADATA, xclbin_id);
   if (!xml.first)
     throw error(EINVAL, "No xml metadata in xclbin");
   return get_ert_slots(xml.first, xml.second);

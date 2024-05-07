@@ -15,13 +15,14 @@
 
 #include "ert.h"
 #include "kds_command.h"
-#include "xgq_cmd.h"
+#include "xgq_cmd_common.h"
 
 struct xrt_ert_command;
 
 struct ert_cmd_ops {
 	void (*complete)(struct xrt_ert_command *ecmd, void *core);
 	void (*notify)(void *core);
+	void (*free_payload)(void *payload);
 };
 
 struct xrt_ert_command {
@@ -30,13 +31,16 @@ struct xrt_ert_command {
 
 	uint32_t			handle;
 
+	void 				*client;
 	struct ert_cmd_ops		cb;
 	uint32_t			*payload;
 	// payload size in words
 	uint32_t			payload_size;
 	uint32_t			cu_idx;
-	struct xrt_com_queue_entry	complete_entry;
-	uint32_t			return_size;
+	struct xgq_com_queue_entry	complete_entry;
+	uint32_t			response_size;
+
+	uint32_t			response[0];
 };
 
 struct ert_queue {
@@ -51,11 +55,13 @@ struct xrt_ert_queue_funcs {
 
 	int (*submit)(struct xrt_ert_command *ecmd, void *queue_handle);
 
-	irqreturn_t (*irq_handle)(int irq, void *queue_handle);
-
-	int  (*queue_config)(uint32_t slot_size, void *ert_handle, void *queue_handle);
+	int  (*queue_config)(uint32_t slot_size, bool polling, void *ert_handle, void *queue_handle);
 
 	uint32_t (*max_slot_num)(void *queue_handle);
+
+	void (*abort)(void *client, void *queue_handle);
+
+	void (*intc_config)(bool enable, void *queue_handle);
 
 };
 

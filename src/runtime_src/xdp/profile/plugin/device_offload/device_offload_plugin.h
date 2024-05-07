@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
+ * Copyright (C) 2022-2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -28,7 +29,7 @@
 namespace xdp {
 
   // Forward declarations
-  class TraceLoggerCreatingDeviceEvents ;
+  class DeviceTraceLogger ;
 
   // This plugin should be completely agnostic of what the host code profiling
   //  plugin is.  So, this should work with HAL profiling, OpenCL profiling, 
@@ -45,39 +46,37 @@ namespace xdp {
   private:
     // These are the continuous offload configuration parameters as read
     //  from xrt.ini.
+    bool device_trace;
     bool continuous_trace ;
     unsigned int trace_buffer_offload_interval_ms ;
     bool m_enable_circular_buffer = false;
 
   protected:
-    // This is used to determine if each plugin instance
-    //  has access to the device
-    bool active ;
-
     // Each device offload plugin is responsible for offloading
     //  information from all devices.  This holds all the objects
     //  responsible for offloading data from all devices.
     typedef std::tuple<DeviceTraceOffload*, 
-                       TraceLoggerCreatingDeviceEvents*,
+                       DeviceTraceLogger*,
                        DeviceIntf*> DeviceData ;
 
     std::map<uint64_t, DeviceData> offloaders;
 
-    XDP_EXPORT void addDevice(const std::string& sysfsPath) ;
-    XDP_EXPORT void configureDataflow(uint64_t deviceId, DeviceIntf* devInterface) ;
-    XDP_EXPORT void configureFa(uint64_t deviceId, DeviceIntf* devInterface) ;
-    XDP_EXPORT void configureCtx(uint64_t deviceId, DeviceIntf* devInterface) ;
-    XDP_EXPORT void addOffloader(uint64_t deviceId, DeviceIntf* devInterface) ;
-    XDP_EXPORT void configureTraceIP(DeviceIntf* devInterface) ;
-    XDP_EXPORT void startContinuousThreads(uint64_t deviceId) ;
+    void addDevice(const std::string& sysfsPath) ;
+    void configureDataflow(uint64_t deviceId, DeviceIntf* devInterface) ;
+    void configureFa(uint64_t deviceId, DeviceIntf* devInterface) ;
+    void configureCtx(uint64_t deviceId, DeviceIntf* devInterface) ;
+    void addOffloader(uint64_t deviceId, DeviceIntf* devInterface) ;
+    void configureTraceIP(DeviceIntf* devInterface) ;
+    void startContinuousThreads(uint64_t deviceId) ;
 
-    XDP_EXPORT void readCounters() ;
-    XDP_EXPORT virtual void readTrace() = 0 ;
-    XDP_EXPORT void checkTraceBufferFullness(DeviceTraceOffload* offloader, uint64_t deviceId) ;
+    void readCounters() ;
+    virtual void readTrace() = 0 ;
+    void checkTraceBufferFullness(DeviceTraceOffload* offloader, uint64_t deviceId) ;
+    bool flushTraceOffloader(DeviceTraceOffload* offloader);
 
   public:
-    XDP_EXPORT DeviceOffloadPlugin() ;
-    XDP_EXPORT ~DeviceOffloadPlugin() ;
+    DeviceOffloadPlugin() ;
+    virtual ~DeviceOffloadPlugin() = default ;
 
     virtual void writeAll(bool openNewFiles) ;
 

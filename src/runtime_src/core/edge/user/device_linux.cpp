@@ -1,31 +1,20 @@
-/**
- * Copyright (C) 2020-2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2020-2022 Xilinx, Inc
+// Copyright (C) 2023 Advanced Micro Devices, Inc. All rights reserved.
 #include "device_linux.h"
 #include "xrt.h"
 #include "zynq_dev.h"
 #include "aie_sys_parser.h"
 
+#include "core/common/debug_ip.h"
 #include "core/common/query_requests.h"
+#include "core/common/xrt_profiling.h"
 
 #include <map>
 #include <memory>
 #include <string>
 
+#include <fcntl.h>
 #include <unistd.h>
 
 #include <boost/format.hpp>
@@ -46,12 +35,28 @@ extern "C" {
 #endif
 #endif
 
+
 namespace {
 
 namespace query = xrt_core::query;
 using key_type = query::key_type;
 xclDeviceHandle handle;
 xclDeviceInfo2 deviceInfo;
+
+struct drm_fd
+{
+  int fd;
+  drm_fd(const std::string& file_path, int flags)
+  {
+    fd = open(file_path.c_str(),flags);
+  }
+  ~drm_fd()
+  {
+    if(fd > 0) {
+      close(fd);
+    }
+  }
+};
 
 static std::map<query::key_type, std::unique_ptr<query::request>> query_tbl;
 
@@ -61,7 +66,7 @@ get_edgedev(const xrt_core::device* device)
   return zynq_device::get_dev();
 }
 
-struct bdf 
+struct bdf
 {
   using result_type = query::pcie_bdf::result_type;
 
@@ -73,7 +78,7 @@ struct bdf
 
 };
 
-struct board_name 
+struct board_name
 {
   using result_type = query::board_name::result_type;
 
@@ -90,17 +95,6 @@ struct board_name
   }
 };
 
-struct is_ready 
-{
-  using result_type = query::is_ready::result_type;
-
-  static result_type
-  get(const xrt_core::device* device, key_type)
-  {
-    return true;
-  }
-};
-
 static xclDeviceInfo2
 init_device_info(const xrt_core::device* device)
 {
@@ -111,7 +105,7 @@ init_device_info(const xrt_core::device* device)
 
 struct dev_info
 {
-  static boost::any
+  static std::any
   get(const xrt_core::device* device,key_type key)
   {
     auto edev = get_edgedev(device);
@@ -144,93 +138,117 @@ struct dev_info
     }
     case key_type::rom_time_since_epoch:
       return static_cast<uint64_t>(deviceInfo.mTimeStamp);
+    case key_type::device_class:
+            return xrt_core::query::device_class::type::alveo;
     default:
       throw query::no_such_key(key);
     }
   }
 };
 
-struct aie_metadata
-{
-  // Function to read aie_metadata sysfs, and parse max rows and max
-  // columns from it.
-  static void
-  read_aie_metadata(const xrt_core::device* device, uint32_t &row, uint32_t &col)
-  {
-    std::string err;
-    std::string value;
-    static std::string AIE_TAG = "aie_metadata";
-    constexpr uint32_t major = 1;
-    constexpr uint32_t minor = 0;
-    constexpr uint32_t patch = 0;
-    
-    auto dev = get_edgedev(device);
-
-    dev->sysfs_get(AIE_TAG, err, value);
-    if (!err.empty())
-      throw xrt_core::query::sysfs_error(err);
-
-    std::stringstream ss(value);
-    boost::property_tree::ptree pt; 
-    boost::property_tree::read_json(ss, pt);
-
-    if(pt.get<uint32_t>("schema_version.major") != major ||
-       pt.get<uint32_t>("schema_version.minor") != minor ||
-       pt.get<uint32_t>("schema_version.patch") != patch )
-      throw xrt_core::error(-EINVAL, boost::str(boost::format("Aie Metadata major:minor:patch [%d:%d:%d] version are not matching")
-                                                             % pt.get<uint32_t>("schema_version.major")
-                                                             % pt.get<uint32_t>("schema_version.minor")
-                                                             % pt.get<uint32_t>("schema_version.patch")));
-    col = pt.get<uint32_t>("aie_metadata.driver_config.num_columns");
-    row = pt.get<uint32_t>("aie_metadata.driver_config.num_rows");
-  }
+struct aie_metadata_info{
+  uint32_t num_cols;
+  uint32_t num_rows;
+  uint32_t shim_row;
+  uint32_t core_row;
+  uint32_t mem_row;
+  uint32_t num_mem_row;
+  uint8_t hw_gen;
 };
 
-struct aie_core_info : aie_metadata
+// Function to get aie max rows and cols by parsing aie_metadata sysfs node
+static aie_metadata_info
+get_aie_metadata_info(const xrt_core::device* device)
 {
-  using result_type = query::aie_core_info::result_type;
+  std::string err;
+  std::string value;
+  static const std::string AIE_TAG = "aie_metadata";
+  constexpr uint32_t major = 1;
+  constexpr uint32_t minor = 0;
+  constexpr uint32_t patch = 0;
+  aie_metadata_info aie_meta;
+
+  auto dev = get_edgedev(device);
+
+  dev->sysfs_get(AIE_TAG, err, value);
+  if (!err.empty())
+    throw xrt_core::query::sysfs_error(err);
+
+  std::stringstream ss(value);
+  boost::property_tree::ptree pt;
+  boost::property_tree::read_json(ss, pt);
+
+  if (pt.get<uint32_t>("schema_version.major") != major ||
+      pt.get<uint32_t>("schema_version.minor") != minor ||
+      pt.get<uint32_t>("schema_version.patch") != patch )
+    throw xrt_core::error(-EINVAL, boost::str(boost::format("Aie Metadata major:minor:patch [%d:%d:%d] version are not matching")
+        % pt.get<uint32_t>("schema_version.major")
+        % pt.get<uint32_t>("schema_version.minor")
+        % pt.get<uint32_t>("schema_version.patch")));
+
+  aie_meta.num_cols = pt.get<uint32_t>("aie_metadata.driver_config.num_columns");
+  aie_meta.num_rows = pt.get<uint32_t>("aie_metadata.driver_config.num_rows");
+  aie_meta.shim_row = pt.get<uint32_t>("aie_metadata.driver_config.shim_row");
+  aie_meta.core_row = pt.get<uint32_t>("aie_metadata.driver_config.aie_tile_row_start");
+  if (!pt.get_optional<uint32_t>("aie_metadata.driver_config.mem_tile_row_start") || 
+      !pt.get_optional<uint32_t>("aie_metadata.driver_config.mem_tile_num_rows")) {
+       aie_meta.mem_row = pt.get<uint32_t>("aie_metadata.driver_config.reserved_row_start");
+       aie_meta.num_mem_row = pt.get<uint32_t>("aie_metadata.driver_config.reserved_num_rows");
+  }
+  else {
+       aie_meta.mem_row = pt.get<uint32_t>("aie_metadata.driver_config.mem_tile_row_start");
+       aie_meta.num_mem_row = pt.get<uint32_t>("aie_metadata.driver_config.mem_tile_num_rows");
+  }
+  aie_meta.hw_gen = pt.get<uint8_t>("aie_metadata.driver_config.hw_gen");
+  return aie_meta;
+}
+
+struct aie_core_info_sysfs
+{
+  using result_type = query::aie_core_info_sysfs::result_type;
   static result_type
-  get(const xrt_core::device* device,key_type key)
+  get(const xrt_core::device* device, key_type key)
   {
     boost::property_tree::ptree ptarray;
-    uint32_t max_col = 0, max_row = 0;
+    aie_metadata_info aie_meta = get_aie_metadata_info(device);
+    const std::string aiepart = std::to_string(aie_meta.shim_row) + "_" + std::to_string(aie_meta.num_cols);
 
-    read_aie_metadata(device, max_row, max_col);
-
-    /* Loop each all aie core tiles and collect core, dma, events, errors, locks status. */ 
-    for(int i=0;i<max_col;i++)
-      for(int j=0; j<(max_row-1);j++)
-        ptarray.push_back(std::make_pair(std::to_string(i)+"_"+std::to_string(j),
-                          aie_sys_parser::get_parser()->aie_sys_read(i,(j+1)))); 
+    /* Loop each all aie core tiles and collect core, dma, events, errors, locks status. */
+    for (int i = 0; i < aie_meta.num_cols; ++i)
+      for (int j = 0; j < (aie_meta.num_rows-1); ++j)
+        ptarray.push_back(std::make_pair(std::to_string(i) + "_" + std::to_string(j),
+                          aie_sys_parser::get_parser(aiepart)->aie_sys_read(i,(j + aie_meta.core_row))));
 
     boost::property_tree::ptree pt;
     pt.add_child("aie_core",ptarray);
+    pt.put("hw_gen",std::to_string(aie_meta.hw_gen));
     std::ostringstream oss;
     boost::property_tree::write_json(oss, pt);
-
     std::string inifile_text = oss.str();
     return inifile_text;
   }
 };
 
-struct aie_shim_info : aie_metadata
+struct aie_shim_info_sysfs
 {
-  using result_type = query::aie_shim_info::result_type;
+  using result_type = query::aie_shim_info_sysfs::result_type;
+
   static result_type
-  get(const xrt_core::device* device,key_type key)
+  get(const xrt_core::device* device, key_type key)
   {
     boost::property_tree::ptree ptarray;
-    uint32_t max_col = 0, max_row = 0;
-
-    read_aie_metadata(device, max_row, max_col);
+    aie_metadata_info aie_meta = get_aie_metadata_info(device);
+    const std::string aiepart = std::to_string(aie_meta.shim_row) + "_" + std::to_string(aie_meta.num_cols);
 
     /* Loop all shim tiles and collect all dma, events, errors, locks status */
-    for(int i=0;i<max_col;i++) {
-      ptarray.push_back(std::make_pair("", aie_sys_parser::get_parser()->aie_sys_read(i,0))); 
+    for (int i=0; i < aie_meta.num_cols; ++i) {
+      ptarray.push_back(std::make_pair(std::to_string(i) + "_" + std::to_string(aie_meta.shim_row),
+			aie_sys_parser::get_parser(aiepart)->aie_sys_read(i, aie_meta.shim_row)));
     }
 
     boost::property_tree::ptree pt;
     pt.add_child("aie_shim",ptarray);
+    pt.put("hw_gen",std::to_string(aie_meta.hw_gen));
     std::ostringstream oss;
     boost::property_tree::write_json(oss, pt);
     std::string inifile_text = oss.str();
@@ -238,10 +256,37 @@ struct aie_shim_info : aie_metadata
   }
 };
 
-struct kds_cu_stat
+struct aie_mem_info_sysfs
 {
-  using result_type = query::kds_cu_stat::result_type;
-  using data_type = query::kds_cu_stat::data_type;
+  using result_type = query::aie_mem_info_sysfs::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key)
+  {
+    boost::property_tree::ptree ptarray;
+    aie_metadata_info aie_meta = get_aie_metadata_info(device);
+    const std::string aiepart = std::to_string(aie_meta.shim_row) + "_" + std::to_string(aie_meta.num_cols);
+
+    /* Loop all mem tiles and collect all dma, events, errors, locks status */
+    for (int i = 0; i < aie_meta.num_cols; ++i)
+      for (int j = 0; j < (aie_meta.num_mem_row-1); ++j)
+	ptarray.push_back(std::make_pair(std::to_string(i) + "_" + std::to_string(j),
+			  aie_sys_parser::get_parser(aiepart)->aie_sys_read(i,(j + aie_meta.mem_row))));
+
+    boost::property_tree::ptree pt;
+    pt.add_child("aie_mem",ptarray);
+    pt.put("hw_gen",std::to_string(aie_meta.hw_gen));
+    std::ostringstream oss;
+    boost::property_tree::write_json(oss, pt);
+    std::string inifile_text = oss.str();
+    return inifile_text;
+  }
+};
+
+struct kds_cu_info
+{
+  using result_type = query::kds_cu_info::result_type;
+  using data_type = query::kds_cu_info::data_type;
 
   static result_type
   get(const xrt_core::device* device, key_type)
@@ -261,19 +306,20 @@ struct kds_cu_stat
 
     result_type cuStats;
     // stats e.g.
-    // 0,vadd:vadd_1,0x1400000,0x4,0
-    // 1,vadd:vadd_2,0x1500000,0x4,0
-    // 2,mult:mult_1,0x1800000,0x4,0
+    // 0,0,vadd:vadd_1,0x1400000,0x4,0
+    // 0,1,vadd:vadd_2,0x1500000,0x4,0
+    // 0.2,mult:mult_1,0x1800000,0x4,0
     for (auto& line : stats) {
       boost::char_separator<char> sep(",");
       tokenizer tokens(line, sep);
 
-      if (std::distance(tokens.begin(), tokens.end()) != 5)
+      if (std::distance(tokens.begin(), tokens.end()) != 6)
         throw xrt_core::query::sysfs_error("CU statistic sysfs node corrupted");
 
-      data_type data;
+      data_type data = { 0 };
       constexpr int radix = 16;
       tokenizer::iterator tok_it = tokens.begin();
+      data.slot_index = std::stoi(std::string(*tok_it++));
       data.index     = std::stoi(std::string(*tok_it++));
       data.name      = std::string(*tok_it++);
       data.base_addr = std::stoull(std::string(*tok_it++), nullptr, radix);
@@ -287,52 +333,124 @@ struct kds_cu_stat
   }
 };
 
-struct kds_cu_info
+
+struct xclbin_uuid
 {
-  using result_type = query::kds_cu_info::result_type;
+
+  using result_type = query::xclbin_uuid::result_type;
 
   static result_type
-  get(const xrt_core::device* device, key_type key)
+  get(const xrt_core::device* device, key_type)
   {
-    auto edev = get_edgedev(device);
-
-    std::vector<std::string> stats;
+    using tokenizer = boost::tokenizer< boost::char_separator<char> >;
+    std::vector<std::string> xclbin_info;
     std::string errmsg;
-    edev->sysfs_get("kds_custat", errmsg, stats);
+    auto edev = get_edgedev(device);
+    edev->sysfs_get("xclbinid", errmsg, xclbin_info);
     if (!errmsg.empty())
       throw xrt_core::query::sysfs_error(errmsg);
 
-    result_type cuStats;
-    for (auto& line : stats) {
-        uint32_t base_address = 0;
-        uint32_t usages = 0;
-        uint32_t status = 0;
-        sscanf(line.c_str(), "CU[@0x%x] : %d status : %d", &base_address, &usages, &status);
-        cuStats.push_back(std::make_tuple(base_address, usages, status));
+    // xclbin_uuid e.g.
+    // <slot_id> <uuid_slot_0>
+    //	   0	 <uuid_slot_0>
+    //	   1	 <uuid_slot_1>
+    for (auto& line : xclbin_info) {
+      boost::char_separator<char> sep(" ");
+      tokenizer tokens(line, sep);
+
+      if (std::distance(tokens.begin(), tokens.end()) != 2)
+        throw xrt_core::query::sysfs_error("xclbinid sysfs node corrupted");
+
+      tokenizer::iterator tok_it = tokens.begin();
+      unsigned int slot_index = std::stoi(std::string(*tok_it++));
+      //return the first slot uuid always for backward compatibility
+      return std::string(*tok_it);
     }
 
-    return cuStats;
+    return "";
   }
 };
+
+struct xclbin_slots
+{
+  using result_type = query::xclbin_slots::result_type;
+  using slot_info = query::xclbin_slots::slot_info;
+  using slot_id = query::xclbin_slots::slot_id;
+
+  static result_type
+  get(const xrt_core::device* device, key_type)
+  {
+    using tokenizer = boost::tokenizer< boost::char_separator<char> >;
+    std::vector<std::string> xclbin_info;
+    std::string errmsg;
+    auto edev = get_edgedev(device);
+    edev->sysfs_get("xclbinid", errmsg, xclbin_info);
+    if (!errmsg.empty())
+      throw xrt_core::query::sysfs_error(errmsg);
+
+    result_type xclbin_data;
+    // xclbin_uuid e.g.
+    // 0 <uuid_slot_0>
+    // 1 <uuid_slot_1>
+    for (auto& line : xclbin_info) {
+      boost::char_separator<char> sep(" ");
+      tokenizer tokens(line, sep);
+
+      if (std::distance(tokens.begin(), tokens.end()) != 2)
+        throw xrt_core::query::sysfs_error("xclbinid sysfs node corrupted");
+
+      slot_info data {};
+      tokenizer::iterator tok_it = tokens.begin();
+      data.slot = std::stoi(std::string(*tok_it++));
+      data.uuid = std::string(*tok_it++);
+
+      xclbin_data.push_back(std::move(data));
+    }
+
+    return xclbin_data;
+  }
+};
+
+struct instance
+{
+  using result_type = query::instance::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type)
+  {
+    std::string errmsg;
+    auto edev = get_edgedev(device);
+
+    std::string drv_exists;
+    //check whether driver directory exists or not
+    edev->sysfs_get("driver", errmsg, drv_exists);
+    if (!errmsg.empty())
+      throw xrt_core::query::sysfs_error(errmsg);
+
+    //edge always has only one device. Return 0 if driver node is present
+    return 0;
+  }
+};
+
 
 struct aie_reg_read
 {
   using result_type = query::aie_reg_read::result_type;
 
   static result_type
-  get(const xrt_core::device* device, key_type key, const boost::any& r, const boost::any& c, const boost::any& reg)
+  get(const xrt_core::device* device, key_type key, const std::any& r, const std::any& c, const std::any& reg)
   {
     auto dev = get_edgedev(device);
     uint32_t val = 0;
     // Get the row value and add one since the rows actually start at 1 not zero.
-    const auto row = boost::any_cast<query::aie_reg_read::row_type>(r) + 1;
-    const auto col = boost::any_cast<query::aie_reg_read::col_type>(c);
-    const auto v = boost::any_cast<query::aie_reg_read::reg_type>(reg);
- 
+    const auto row = std::any_cast<query::aie_reg_read::row_type>(r) + 1;
+    const auto col = std::any_cast<query::aie_reg_read::col_type>(c);
+    const auto v = std::any_cast<query::aie_reg_read::reg_type>(reg);
+
 #ifdef XRT_ENABLE_AIE
 #ifndef __AIESIM__
-  const static std::string AIE_TAG = "aie_metadata";
-  const static std::string ZOCL_DEVICE = "/dev/dri/renderD128";
+  const static std::string aie_tag = "aie_metadata";
+  const std::string zocl_device = "/dev/dri/" + get_render_devname();
   const uint32_t major = 1;
   const uint32_t minor = 0;
   const uint32_t patch = 0;
@@ -341,7 +459,7 @@ struct aie_reg_read
   std::string value;
 
   // Reading the aie_metadata sysfs.
-  dev->sysfs_get(AIE_TAG, err, value);
+  dev->sysfs_get(aie_tag, err, value);
   if (!err.empty())
     throw xrt_core::query::sysfs_error
       (err + ", The loading xclbin acceleration image doesn't use the Artificial "
@@ -359,11 +477,22 @@ struct aie_reg_read
                                                              % pt.get<uint32_t>("schema_version.minor")
                                                              % pt.get<uint32_t>("schema_version.patch")));
 
-  int mKernelFD = open(ZOCL_DEVICE.c_str(), O_RDWR);
+  int mKernelFD = open(zocl_device.c_str(), O_RDWR);
   if (!mKernelFD)
-    throw xrt_core::error(-EINVAL, boost::str(boost::format("Cannot open %s") % ZOCL_DEVICE));
+    throw xrt_core::error(-EINVAL, boost::str(boost::format("Cannot open %s") % zocl_device));
 
   XAie_DevInst* devInst;         // AIE Device Instance
+
+  uint8_t mem_row_start, mem_num_rows;
+  if (!pt.get_optional<uint8_t>("aie_metadata.driver_config.mem_tile_row_start") ||
+      !pt.get_optional<uint8_t>("aie_metadata.driver_config.mem_tile_num_rows")) {
+       mem_row_start = pt.get<uint8_t>("aie_metadata.driver_config.reserved_row_start");
+       mem_num_rows = pt.get<uint8_t>("aie_metadata.driver_config.reserved_num_rows");
+  }
+  else {
+       mem_row_start = pt.get<uint8_t>("aie_metadata.driver_config.mem_tile_row_start");
+       mem_num_rows = pt.get<uint8_t>("aie_metadata.driver_config.mem_tile_num_rows");
+  }
 
   XAie_SetupConfig(ConfigPtr,
     pt.get<uint8_t>("aie_metadata.driver_config.hw_gen"),
@@ -373,8 +502,8 @@ struct aie_reg_read
     pt.get<uint8_t>("aie_metadata.driver_config.num_columns"),
     pt.get<uint8_t>("aie_metadata.driver_config.num_rows"),
     pt.get<uint8_t>("aie_metadata.driver_config.shim_row"),
-    pt.get<uint8_t>("aie_metadata.driver_config.reserved_row_start"),
-    pt.get<uint8_t>("aie_metadata.driver_config.reserved_num_rows"),
+    mem_row_start,
+    mem_num_rows,
     pt.get<uint8_t>("aie_metadata.driver_config.aie_tile_row_start"),
     pt.get<uint8_t>("aie_metadata.driver_config.aie_tile_num_rows"));
 
@@ -417,6 +546,292 @@ struct aie_reg_read
 #endif
 #endif
     return val;
+  }
+};
+
+static std::unique_ptr<drm_fd>
+aie_get_drmfd(const xrt_core::device* device, const std::string& dev_path)
+{
+  const static std::string aie_tag = "aie_metadata";
+  std::string err;
+  std::string value;
+
+  auto dev = get_edgedev(device);
+  // Reading the aie_metadata sysfs.
+  dev->sysfs_get(aie_tag, err, value);
+  if (!err.empty())
+    throw xrt_core::query::sysfs_error
+    (err + ", The loading xclbin acceleration image doesn't use the Artificial "
+     + "Intelligent Engines (AIE). No action will be performed.");
+
+  return std::make_unique<drm_fd>(dev_path, O_RDWR);
+}
+
+struct aie_get_freq
+{
+  using result_type = query::aie_get_freq::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& partition_id)
+  {
+    result_type freq = 0;
+#if defined(XRT_ENABLE_AIE)
+    const std::string zocl_device = "/dev/dri/" + get_render_devname();
+    auto fd_obj = aie_get_drmfd(device, zocl_device);
+    if (fd_obj->fd < 0)
+      throw xrt_core::error(-EINVAL, boost::str(boost::format("Cannot open %s") % zocl_device));
+
+    struct drm_zocl_aie_freq_scale aie_arg;
+    aie_arg.partition_id = std::any_cast<uint32_t>(partition_id);
+    aie_arg.freq = 0;
+    aie_arg.dir = 0;
+
+    if (ioctl(fd_obj->fd, DRM_IOCTL_ZOCL_AIE_FREQSCALE, &aie_arg))
+      throw xrt_core::error(-errno, boost::str(boost::format("Reading clock frequency from AIE partition(%d) failed") % aie_arg.partition_id));
+
+    freq = aie_arg.freq;
+#else
+    throw xrt_core::error(-EINVAL, "AIE is not enabled for this device");
+#endif
+    return freq;
+  }
+};
+
+struct aie_set_freq
+{
+  using result_type = query::aie_set_freq::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& partition_id, const std::any& freq)
+  {
+#if defined(XRT_ENABLE_AIE)
+    const std::string zocl_device = "/dev/dri/" + get_render_devname();
+    auto fd_obj = aie_get_drmfd(device, zocl_device);
+    if (fd_obj->fd < 0)
+      throw xrt_core::error(-EINVAL, boost::str(boost::format("Cannot open %s") % zocl_device));
+
+    struct drm_zocl_aie_freq_scale aie_arg;
+    aie_arg.partition_id = std::any_cast<uint32_t>(partition_id);
+    aie_arg.freq = std::any_cast<uint64_t>(freq);
+    aie_arg.dir = 1;
+
+    if (ioctl(fd_obj->fd, DRM_IOCTL_ZOCL_AIE_FREQSCALE, &aie_arg))
+      throw xrt_core::error(-errno, boost::str(boost::format("Setting clock frequency for AIE partition (%d) failed") % aie_arg.partition_id));
+
+#else
+    throw xrt_core::error(-EINVAL, "AIE is not enabled for this device");
+#endif
+    return true;
+  }
+};
+
+struct aim_counter
+{
+  using result_type = query::aim_counter::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& dbg_ip_dt)
+  {
+    const auto dbg_ip_data = std::any_cast<query::aim_counter::debug_ip_data_type>(dbg_ip_dt);
+
+    return xrt_core::debug_ip::get_aim_counter_result(device, dbg_ip_data);
+  }
+};
+
+struct am_counter
+{
+  using result_type = query::am_counter::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& dbg_ip_dt)
+  {
+    const auto dbg_ip_data = std::any_cast<query::am_counter::debug_ip_data_type>(dbg_ip_dt);
+
+    return xrt_core::debug_ip::get_am_counter_result(device, dbg_ip_data);
+  }
+};
+
+struct asm_counter
+{
+  using result_type = query::asm_counter::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& dbg_ip_dt)
+  {
+    const auto dbg_ip_data = std::any_cast<query::asm_counter::debug_ip_data_type>(dbg_ip_dt);
+
+    return xrt_core::debug_ip::get_asm_counter_result(device, dbg_ip_data);
+  }
+};
+
+struct lapc_status
+{
+  using result_type = query::lapc_status::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& dbg_ip_dt)
+  {
+    const auto dbg_ip_data = std::any_cast<query::lapc_status::debug_ip_data_type>(dbg_ip_dt);
+
+    return xrt_core::debug_ip::get_lapc_status(device, dbg_ip_data);
+  }
+};
+
+struct spc_status
+{
+  using result_type = query::spc_status::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& dbg_ip_dt)
+  {
+    const auto dbg_ip_data = std::any_cast<query::spc_status::debug_ip_data_type>(dbg_ip_dt);
+
+    return xrt_core::debug_ip::get_spc_status(device, dbg_ip_data);
+  }
+};
+
+struct accel_deadlock_status
+{
+  using result_type = query::accel_deadlock_status::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& dbg_ip_dt)
+  {
+    const auto dbg_ip_data = std::any_cast<query::accel_deadlock_status::debug_ip_data_type>(dbg_ip_dt);
+
+    return xrt_core::debug_ip::get_accel_deadlock_status(device, dbg_ip_data);
+  }
+};
+
+struct dtbo_path
+{
+  using result_type = query::dtbo_path::result_type;
+  using slot_id_type = query::dtbo_path::slot_id_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& slot_id)
+  {
+    std::vector<std::string> dtbo_path_vec;
+    std::string errmsg;
+    auto edev = get_edgedev(device);
+    edev->sysfs_get("dtbo_path", errmsg, dtbo_path_vec);
+    if (!errmsg.empty() || dtbo_path_vec.empty()) {
+      // sysfs node is not accessible when bitstream is not loaded
+      return {};
+    }
+
+    // sysfs node data eg:
+    // <slot_id> <dtbo_path>
+    //     0     <path 0>
+    //     1     <path 1>
+    using tokenizer = boost::tokenizer< boost::char_separator<char> >;
+    for(auto &line : dtbo_path_vec) {
+      boost::char_separator<char> sep(" ");
+      tokenizer tokens(line, sep);
+
+      if (std::distance(tokens.begin(), tokens.end()) != 2)
+        throw xrt_core::query::sysfs_error("xclbinid sysfs node corrupted");
+
+      tokenizer::iterator tok_it = tokens.begin();
+
+      uint32_t slotId = static_cast<slot_id_type>(std::stoi(std::string(*tok_it++)));
+      if(slotId == std::any_cast<slot_id_type>(slot_id))
+        return std::string(*tok_it);
+    }
+    //if we reach here no matching slot is found
+    throw xrt_core::query::sysfs_error("no matching slot is found");
+  }
+};
+
+struct debug_ip_layout_path
+{
+  using result_type = xrt_core::query::debug_ip_layout_path::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& param)
+  {
+    uint32_t size = std::any_cast<uint32_t>(param);
+    std::string path;
+    path.resize(size);
+
+    // Get Debug Ip layout path
+    xclGetDebugIPlayoutPath(device->get_user_handle(), const_cast<char*>(path.data()), size);
+    return path;
+  }
+};
+
+struct device_clock_freq_mhz {
+  using result_type = xrt_core::query::device_clock_freq_mhz::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key)
+  {
+    return xclGetDeviceClockFreqMHz(device->get_user_handle());
+  }
+};
+
+struct trace_buffer_info
+{
+  using result_type = xrt_core::query::trace_buffer_info::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& param)
+  {
+    uint32_t input_samples = std::any_cast<uint32_t>(param);
+    result_type buf_info;
+
+    // Get trace buf size and trace samples
+    xclGetTraceBufferInfo(device->get_user_handle(), input_samples, buf_info.samples, buf_info.buf_size);
+    return buf_info;
+  }
+};
+
+struct host_max_bandwidth_mbps
+{
+  using result_type = xrt_core::query::host_max_bandwidth_mbps::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& param)
+  {
+    bool read = std::any_cast<bool>(param);
+
+    // Get read/write host max bandwidth in MBps
+    return read ? xclGetHostReadMaxBandwidthMBps(device->get_user_handle())
+                : xclGetHostWriteMaxBandwidthMBps(device->get_user_handle());
+  }
+};
+
+struct kernel_max_bandwidth_mbps
+{
+  using result_type = xrt_core::query::kernel_max_bandwidth_mbps::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& param)
+  {
+    bool read = std::any_cast<bool>(param);
+
+    // Get read/write host max bandwidth in MBps
+    return read ? xclGetKernelReadMaxBandwidthMBps(device->get_user_handle())
+                : xclGetKernelWriteMaxBandwidthMBps(device->get_user_handle());
+  }
+};
+
+struct read_trace_data
+{
+  using result_type = xrt_core::query::read_trace_data::result_type;
+
+  static result_type
+  get(const xrt_core::device* device, key_type key, const std::any& param)
+  {
+    auto args = std::any_cast<xrt_core::query::read_trace_data::args>(param);
+
+    result_type trace_buf;
+    trace_buf.resize(args.buf_size);
+
+    // read trace data
+    xclReadTraceData(device->get_user_handle(), trace_buf.data(),
+                     args.buf_size, args.samples, args.ip_base_addr, args.words_per_sample);
+    return trace_buf;
   }
 };
 
@@ -481,7 +896,7 @@ struct sysfs_get : QueryRequestType
     : entry(e)
   {}
 
-  boost::any
+  std::any
   get(const xrt_core::device* device) const
   {
     return sysfs_fcn<typename QueryRequestType::result_type>
@@ -492,7 +907,7 @@ struct sysfs_get : QueryRequestType
 template <typename QueryRequestType, typename Getter>
 struct function0_get : QueryRequestType
 {
-  boost::any
+  std::any
   get(const xrt_core::device* device) const
   {
     auto k = QueryRequestType::key;
@@ -501,13 +916,35 @@ struct function0_get : QueryRequestType
 };
 
 template <typename QueryRequestType, typename Getter>
+struct function2_get : QueryRequestType
+{
+  std::any
+  get(const xrt_core::device* device, const std::any& arg1, const std::any& arg2) const
+  {
+    auto k = QueryRequestType::key;
+    return Getter::get(device, k, arg1, arg2);
+  }
+};
+
+template <typename QueryRequestType, typename Getter>
 struct function3_get : QueryRequestType
 {
-  boost::any
-  get(const xrt_core::device* device, const boost::any& arg1, const boost::any& arg2, const boost::any& arg3) const
+  std::any
+  get(const xrt_core::device* device, const std::any& arg1, const std::any& arg2, const std::any& arg3) const
   {
     auto k = QueryRequestType::key;
     return Getter::get(device, k, arg1, arg2, arg3);
+  }
+};
+
+template <typename QueryRequestType, typename Getter>
+struct function4_get : virtual QueryRequestType
+{
+  std::any
+  get(const xrt_core::device* device, const std::any& arg1) const
+  {
+    auto k = QueryRequestType::key;
+    return Getter::get(device, k, arg1);
   }
 };
 
@@ -529,10 +966,26 @@ emplace_func0_request()
 
 template <typename QueryRequestType, typename Getter>
 static void
+emplace_func2_request()
+{
+  auto k = QueryRequestType::key;
+  query_tbl.emplace(k, std::make_unique<function2_get<QueryRequestType, Getter>>());
+}
+
+template <typename QueryRequestType, typename Getter>
+static void
 emplace_func3_request()
 {
   auto k = QueryRequestType::key;
   query_tbl.emplace(k, std::make_unique<function3_get<QueryRequestType, Getter>>());
+}
+
+template <typename QueryRequestType, typename Getter>
+static void
+emplace_func4_request()
+{
+  auto k = QueryRequestType::key;
+  query_tbl.emplace(k, std::make_unique<function4_get<QueryRequestType, Getter>>());
 }
 
 static void
@@ -547,26 +1000,48 @@ initialize_query_table()
   emplace_func0_request<query::rom_time_since_epoch,    dev_info>();
 
   emplace_func0_request<query::clock_freqs_mhz,         dev_info>();
-  emplace_func0_request<query::aie_core_info,		aie_core_info>();
-  emplace_func0_request<query::aie_shim_info,		aie_shim_info>();
-  emplace_func0_request<query::kds_cu_info,             kds_cu_info>();
+  emplace_func0_request<query::device_class,            dev_info>();
+  emplace_func0_request<query::aie_core_info_sysfs,     aie_core_info_sysfs>();
+  emplace_func0_request<query::aie_shim_info_sysfs,     aie_shim_info_sysfs>();
+  emplace_func0_request<query::aie_mem_info_sysfs,      aie_mem_info_sysfs>();
   emplace_func3_request<query::aie_reg_read,            aie_reg_read>();
+  emplace_func4_request<query::aie_get_freq,            aie_get_freq>();
+  emplace_func2_request<query::aie_set_freq,            aie_set_freq>();
 
-  emplace_sysfs_get<query::xclbin_uuid>               ("xclbinid");
   emplace_sysfs_get<query::mem_topology_raw>          ("mem_topology");
+  emplace_sysfs_get<query::group_topology>            ("mem_topology");
   emplace_sysfs_get<query::ip_layout_raw>             ("ip_layout");
+  emplace_sysfs_get<query::debug_ip_layout_raw>       ("debug_ip_layout");
   emplace_sysfs_get<query::aie_metadata>              ("aie_metadata");
   emplace_sysfs_get<query::graph_status>              ("graph_status");
   emplace_sysfs_get<query::memstat>                   ("memstat");
   emplace_sysfs_get<query::memstat_raw>               ("memstat_raw");
   emplace_sysfs_get<query::error>                     ("errors");
   emplace_sysfs_get<query::xclbin_full>               ("xclbin_full");
+  emplace_sysfs_get<query::host_mem_addr>             ("host_mem_addr");
+  emplace_sysfs_get<query::host_mem_size>             ("host_mem_size");
   emplace_func0_request<query::pcie_bdf,                bdf>();
   emplace_func0_request<query::board_name,              board_name>();
-  emplace_func0_request<query::is_ready,                is_ready>();
+  emplace_func0_request<query::xclbin_uuid ,            xclbin_uuid>();
 
-  emplace_sysfs_get<query::kds_mode>                    ("kds_mode");
-  emplace_func0_request<query::kds_cu_stat,             kds_cu_stat>();
+  emplace_func0_request<query::kds_cu_info,             kds_cu_info>();
+  emplace_func0_request<query::instance,                instance>();
+  emplace_func0_request<query::xclbin_slots,            xclbin_slots>();
+
+  emplace_func4_request<query::aim_counter,             aim_counter>();
+  emplace_func4_request<query::am_counter,              am_counter>();
+  emplace_func4_request<query::asm_counter,             asm_counter>();
+  emplace_func4_request<query::lapc_status,             lapc_status>();
+  emplace_func4_request<query::spc_status,              spc_status>();
+  emplace_func4_request<query::accel_deadlock_status,   accel_deadlock_status>();
+  emplace_func4_request<query::dtbo_path,               dtbo_path>();
+
+  emplace_func4_request<query::debug_ip_layout_path,    debug_ip_layout_path>();
+  emplace_func0_request<query::device_clock_freq_mhz,   device_clock_freq_mhz>();
+  emplace_func4_request<query::trace_buffer_info,       trace_buffer_info>();
+  emplace_func4_request<query::read_trace_data,         read_trace_data>();
+  emplace_func4_request<query::host_max_bandwidth_mbps, host_max_bandwidth_mbps>();
+  emplace_func4_request<query::kernel_max_bandwidth_mbps, kernel_max_bandwidth_mbps>();
 }
 
 struct X { X() { initialize_query_table(); } };
@@ -636,6 +1111,50 @@ reset(query::reset_type key) const
   }
 }
 
+
+////////////////////////////////////////////////////////////////
+// Custom ishim implementation
+// Redefined from xrt_core::ishim for functions that are not
+// universally implemented by all shims
+////////////////////////////////////////////////////////////////
+void
+device_linux::
+set_cu_read_range(cuidx_type cuidx, uint32_t start, uint32_t size)
+{
+  if (auto ret = xclIPSetReadRange(get_device_handle(), cuidx.index, start, size))
+    throw xrt_core::error(ret, "failed to set cu read range");
+}
+
+std::unique_ptr<buffer_handle>
+device_linux::
+import_bo(pid_t pid, shared_handle::export_handle ehdl)
+{
+  if (pid == 0 || getpid() == pid)
+    return xrt::shim_int::import_bo(get_device_handle(), ehdl);
+
+  throw xrt_core::error(std::errc::not_supported, __func__);
+}
+
+void
+device_linux::
+get_device_info(xclDeviceInfo2 *info)
+{
+  if (auto ret = xclGetDeviceInfo2(get_device_handle(), info))
+    throw system_error(ret, "failed to get device info");
+}
+
+std::string
+device_linux::
+get_sysfs_path(const std::string& subdev, const std::string& entry)
+{
+  constexpr size_t max_path = 256;
+  std::string path_buf(max_path, '\0');
+
+  if (auto ret = xclGetSysfsPath(get_device_handle(), subdev.c_str(), entry.c_str(), path_buf.data(), max_path))
+    throw system_error(ret, "failed to get device info");
+
+  return path_buf;
+}
 
 ////////////////////////////////////////////////////////////////
 // Custom IP interrupt handling

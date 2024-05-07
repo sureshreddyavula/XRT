@@ -1,9 +1,9 @@
-import subprocess
-import os
-import argparse
 from argparse import RawDescriptionHelpFormatter
+import argparse
 import filecmp
 import json
+import os
+import subprocess
 
 # Start of our unit test
 # -- main() -------------------------------------------------------------------
@@ -36,7 +36,7 @@ def main():
   step = "1) Read in a soft kernel and its metadata"
 
   inputJSON = os.path.join(args.resource_dir, "softkernel.rtd")
-  inputKernel = os.path.join(args.resource_dir, "softkernel.so")
+  inputKernel = os.path.join(args.resource_dir, "dummySoftKernel.txt")
   softKernelName = "my_kernel"
 
   cmd = [xclbinutil, "--add-section", "SOFT_KERNEL[" + softKernelName + "]-OBJ:RAW:" + inputKernel, "--add-section", "SOFT_KERNEL[" + softKernelName + "]-METADATA:JSON:" + inputJSON]
@@ -47,7 +47,7 @@ def main():
   step = "2) Read in a soft kernel and its metadata where the symbol name is 1 character too long"
 
   inputJSON = os.path.join(args.resource_dir, "softkernel_longname.rtd")
-  inputKernel = os.path.join(args.resource_dir, "softkernel.so")
+  inputKernel = os.path.join(args.resource_dir, "dummySoftKernel.txt")
   softKernelName = "my_kernel"
 
   cmd = [xclbinutil, "--add-section", "SOFT_KERNEL[" + softKernelName + "]-OBJ:RAW:" + inputKernel, "--add-section", "SOFT_KERNEL[" + softKernelName + "]-METADATA:JSON:" + inputJSON]
@@ -66,7 +66,7 @@ def main():
   step = "3) Read in a soft kernel and its metadata where the instances are greater then 128"
   
   inputJSON = os.path.join(args.resource_dir, "softkernel_129instances.rtd")
-  inputKernel = os.path.join(args.resource_dir, "softkernel.so")
+  inputKernel = os.path.join(args.resource_dir, "dummySoftKernel.txt")
   softKernelName = "my_kernel"
   
   cmd = [xclbinutil, "--add-section", "SOFT_KERNEL[" + softKernelName + "]-OBJ:RAW:" + inputKernel, "--add-section", "SOFT_KERNEL[" + softKernelName + "]-METADATA:JSON:" + inputJSON]

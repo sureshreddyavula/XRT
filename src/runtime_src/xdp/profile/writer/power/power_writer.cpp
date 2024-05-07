@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2020 Xilinx, Inc
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -22,8 +23,8 @@
 namespace xdp {
 
   PowerProfilingWriter::PowerProfilingWriter(const char* filename,
-					     const char* d,
-					     uint64_t index) :
+                                             const char* d,
+                                             uint64_t index) :
     VPWriter(filename), deviceName(d), deviceIndex(index)
   {
   }
@@ -35,47 +36,45 @@ namespace xdp {
   bool PowerProfilingWriter::write(bool openNewFile)
   {
     // Write header
-    fout << "Target device: " << deviceName << std::endl ;
+    fout << "Target device: " << deviceName << "\n";
     fout << "timestamp"    << ","
-	 << "12v_aux_curr" << ","
-	 << "12v_aux_vol"  << ","
-	 << "12v_pex_curr" << ","
-	 << "12v_pex_vol"  << ","
-	 << "vccint_curr"  << ","
-	 << "vccint_vol"   << ","
-	 << "3v3_pex_curr" << ","
-	 << "3v3_pex_vol"  << ","
-	 << "cage_temp0"   << ","
-	 << "cage_temp1"   << ","
-	 << "cage_temp2"   << ","
-	 << "cage_temp3"   << ","
-	 << "dimm_temp0"   << ","
-	 << "dimm_temp1"   << ","
-	 << "dimm_temp2"   << ","
-	 << "dimm_temp3"   << ","
-	 << "fan_temp"     << ","
-	 << "fpga_temp"    << ","
-	 << "hbm_temp"     << ","
-	 << "se98_temp0"   << ","
-	 << "se98_temp1"   << ","
-	 << "se98_temp2"   << ","
-	 << "vccint_temp"  << ","
-	 << "fan_rpm"
-	 << std::endl;
+         << "12v_aux_curr" << ","
+         << "12v_aux_vol"  << ","
+         << "12v_pex_curr" << ","
+         << "12v_pex_vol"  << ","
+         << "vccint_curr"  << ","
+         << "vccint_vol"   << ","
+         << "3v3_pex_curr" << ","
+         << "3v3_pex_vol"  << ","
+         << "cage_temp0"   << ","
+         << "cage_temp1"   << ","
+         << "cage_temp2"   << ","
+         << "cage_temp3"   << ","
+         << "dimm_temp0"   << ","
+         << "dimm_temp1"   << ","
+         << "dimm_temp2"   << ","
+         << "dimm_temp3"   << ","
+         << "fan_temp"     << ","
+         << "fpga_temp"    << ","
+         << "hbm_temp"     << ","
+         << "se98_temp0"   << ","
+         << "se98_temp1"   << ","
+         << "se98_temp2"   << ","
+         << "vccint_temp"  << ","
+         << "fan_rpm\n";
 
     // Write all of the data elements
-    std::vector<VPDynamicDatabase::CounterSample> samples = 
-      (db->getDynamicInfo()).getPowerSamples(deviceIndex) ;
+    std::vector<counters::Sample> samples =
+      (db->getDynamicInfo()).getPowerSamples(deviceIndex);
 
-    for (auto sample : samples)
-    {
-      fout << sample.first << "," ; // Timestamp
-      for (auto value : sample.second)
-      {
-	fout << value << "," ;
-      }
-      fout << std::endl ;
+    for (auto& sample : samples) {
+      fout << sample.timestamp << ",";
+      for (auto& value : sample.values)
+        fout << value << ",";
+      fout << "\n";
     }
+
+    fout.flush();
     return true;
   }
 

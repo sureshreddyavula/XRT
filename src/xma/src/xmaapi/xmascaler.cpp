@@ -22,6 +22,7 @@
 #include "app/xma_utils.hpp"
 #include "lib/xma_utils.hpp"
 #include "xmaplugin.h"
+#include "core/common/device.h"
 #include <bitset>
 
 #define XMA_SCALER_MOD "xmascaler"
@@ -231,7 +232,7 @@ xma_scaler_session_create(XmaScalerProperties *sc_props)
         }
     }
 
-    void* dev_handle = hwcfg->devices[hwcfg_dev_index].handle;
+    auto dev_handle = hwcfg->devices[hwcfg_dev_index].xrt_device;
     XmaHwKernel* kernel_info = &hwcfg->devices[hwcfg_dev_index].kernels[cu_index];
     sc_session->base.hw_session.dev_index = hwcfg->devices[hwcfg_dev_index].dev_index;
 
@@ -240,18 +241,6 @@ xma_scaler_session_create(XmaScalerProperties *sc_props)
         sc_session->base.hw_session.bank_index, XMA_SCALER_MOD) != XMA_SUCCESS) {
         free(sc_session);
         return nullptr;
-    }
-
-    if (kernel_info->kernel_channels) {
-        if (sc_session->base.channel_id > (int32_t)kernel_info->max_channel_id) {
-            xma_logmsg(XMA_ERROR_LOG, XMA_SCALER_MOD,
-                "Selected dataflow CU with channels has ini setting with max channel_id of %d. Cannot create session with higher channel_id of %d\n", kernel_info->max_channel_id, sc_session->base.channel_id);
-            
-            //Release singleton lock
-            //g_xma_singleton->locked = false;
-            free(sc_session);
-            return nullptr;
-        }
     }
 
     // Call the plugins initialization function with this session data
@@ -273,15 +262,10 @@ xma_scaler_session_create(XmaScalerProperties *sc_props)
         return nullptr;
     }
 
-    XmaHwDevice& dev_tmp1 = hwcfg->devices[hwcfg_dev_index];
     // Allocate the private data
     sc_session->base.plugin_data =
         calloc(sc_session->scaler_plugin->plugin_data_size, sizeof(uint8_t));
 
-    /*
-    xma_logmsg(XMA_DEBUG_LOG, XMA_SCALER_MOD,
-                "XMA session signature is: 0x%04llx", sc_session->base.session_signature);
-    */
     XmaHwSessionPrivate *priv1 = new XmaHwSessionPrivate();
     priv1->dev_handle = dev_handle;
     priv1->kernel_info = kernel_info;
@@ -295,6 +279,7 @@ xma_scaler_session_create(XmaScalerProperties *sc_props)
     priv1->num_execbo_allocated = num_execbo;
 
     if (xma_core::create_session_execbo(priv1, num_execbo, XMA_SCALER_MOD) != XMA_SUCCESS) {
+        kernel_info->context_opened = false;
         free(sc_session->base.plugin_data);
         free(sc_session);
         delete priv1;
@@ -305,15 +290,6 @@ xma_scaler_session_create(XmaScalerProperties *sc_props)
     std::unique_lock<std::mutex> guard1(g_xma_singleton->m_mutex);
     //Singleton lock acquired
 
-    if (!kernel_info->soft_kernel && !kernel_info->in_use && !kernel_info->context_opened) {
-        if (xclOpenContext(dev_handle, dev_tmp1.uuid, kernel_info->cu_index_ert, true) != 0) {
-            xma_logmsg(XMA_ERROR_LOG, XMA_SCALER_MOD, "Failed to open context to CU %s for this session\n", kernel_info->name);
-            free(sc_session->base.plugin_data);
-            free(sc_session);
-            delete priv1;
-            return nullptr;
-        }
-    }
     sc_session->base.session_id = g_xma_singleton->num_of_sessions + 1;
     xma_logmsg(XMA_INFO_LOG, XMA_SCALER_MOD,
                 "XMA session channel_id: %d; session_id: %d", sc_session->base.channel_id, sc_session->base.session_id);

@@ -1,30 +1,19 @@
-/**
- * Copyright (C) 2020-2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2020-2022 Xilinx, Inc
+// Copyright (C) 2023 Advanced Micro Devices, Inc. All rights reserved.
 
 #ifndef __Report_h_
 #define __Report_h_
 
 // Please keep eternal include file dependencies to a minimum
 #include "core/common/device.h"
+#include "JSONConfigurable.h"
 #include <boost/property_tree/ptree.hpp>
 #include <iostream>
 #include <string>
 #include <vector>
 
-class Report {
+class Report : public JSONConfigurable {
  public:
   // Supported JSON schemas.
   // 
@@ -54,10 +43,17 @@ class Report {
   // Supporting APIs
  public:
   const std::string & getReportName() const { return m_reportName; };
+  const std::string & getConfigName() const { return getReportName(); };
   const std::string & getShortDescription() const { return m_shortDescription; };
+  const std::string &getConfigDescription() const { return getShortDescription(); };
   bool isDeviceRequired() const { return m_isDeviceRequired; };
+  bool isHidden() const { return m_isHidden; };
+  bool getConfigHidden() const {return isHidden();};
 
   void getFormattedReport(const xrt_core::device *_pDevice, SchemaVersion _schemaVersion, const std::vector<std::string> & _elementFilter, std::ostream & consoleStream, boost::property_tree::ptree & pt) const;
+
+ // Needs a virtual destructor
+  virtual ~Report() {};
 
  // Child methods that need to be implemented
  protected:
@@ -68,6 +64,7 @@ class Report {
  // Child class Helper methods
  protected:
   Report(const std::string & _reportName, const std::string & _shortDescription, bool _deviceRequired);
+  Report(const std::string & _reportName, const std::string & _shortDescription, bool _deviceRequired, bool _isHidden);
 
  private:
   Report() = delete;
@@ -77,6 +74,8 @@ class Report {
    std::string m_reportName;
    std::string m_shortDescription;
    bool m_isDeviceRequired;
+
+   bool m_isHidden;
 };
 
 

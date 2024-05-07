@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2016-2021 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,7 +15,7 @@
  * under the License.
  */
 
-#define XDP_SOURCE
+#define XDP_PLUGIN_SOURCE
 
 #include "xdp/profile/plugin/native/native_plugin.h"
 #include "xdp/profile/writer/native/native_writer.h"
@@ -22,8 +23,12 @@
 
 namespace xdp {
 
+  bool NativeProfilingPlugin::live = false;
+
   NativeProfilingPlugin::NativeProfilingPlugin() : XDPPlugin()
   {
+    NativeProfilingPlugin::live = true ;
+
     db->registerPlugin(this) ;
     db->registerInfo(info::native) ;
 
@@ -36,13 +41,18 @@ namespace xdp {
   NativeProfilingPlugin::~NativeProfilingPlugin()
   {
     if (VPDatabase::alive()) {
+      // Applications using the Native API may be running hardware emulation,
+      //  so be sure to account for any emulation specific information
+      emulationSetup() ;
+
       // We were destroyed before the database, so write the writers
       //  and unregister ourselves from the database
       for (auto w : writers) {
-	w->write(false) ;
+        w->write(false) ;
       }
       db->unregisterPlugin(this) ;
     }
+    NativeProfilingPlugin::live = false;
   }
 
 } // end namespace xdp

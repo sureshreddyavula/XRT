@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2022-2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -18,7 +19,7 @@
 #include <thread>
 #include <iostream>
 
-#define XDP_SOURCE
+#define XDP_CORE_SOURCE
 
 #include "xdp/profile/database/statistics_database.h"
 
@@ -150,7 +151,7 @@ namespace xdp {
   VPStatisticsDatabase::getComputeUnitExecutionStats(const std::string& cuName)
   {
     std::vector<std::pair<std::string, TimeStatistics>> calls;
-    for (auto element : computeUnitExecutionStats) {
+    for (const auto& element : computeUnitExecutionStats) {
       if (0 == cuName.compare(std::get<0>(element.first))) {
         calls.push_back(std::make_pair(std::get<2>(element.first), element.second));
       }
@@ -208,36 +209,56 @@ namespace xdp {
   void VPStatisticsDatabase::logFunctionCallStart(const std::string& name,
                                                   double timestamp)
   {
-    std::lock_guard<std::mutex> lock(dbLock) ;
+    std::lock_guard<std::mutex> lock(dbLock);
 
-    auto threadId = std::this_thread::get_id() ;
-    auto key      = std::make_pair(name, threadId) ;
-    auto value    = std::make_pair(timestamp, (double)0.0) ;
+    // Each function that we are tracking will have two distinct entry
+    // points that we need to keep track of, the starting point
+    // and the ending point.  In this function, we log the starting point
+    // of a function call.  Since the calls could be coming in simultaneously
+    // from different threads, we also use the thread id to create
+    // a unique identifier.
 
-    if (callCount.find(key) == callCount.end())
-    {
-      std::vector<std::pair<double, double>> newVector ;
-      newVector.push_back(value) ;
-      callCount[key] = newVector ;
+    auto threadId = std::this_thread::get_id();
+    auto key      = std::make_pair(name, threadId);
+    auto value    = std::make_pair(timestamp, (double)0.0);
+
+    // Since a single thread can call a function multiple times, we store
+    // the starts in a vector.  If the thread makes a recursive call, we'll
+    // have multiple elements where the start value is set but the end value
+    // needs to be filled in.
+    if (callCount.find(key) == callCount.end()) {
+      std::vector<std::pair<double, double>> newVector;
+      newVector.push_back(value);
+      callCount[key] = newVector;
     }
     else
-    {
-      callCount[key].push_back(value) ;
-    }
+      callCount[key].push_back(value);
 
     // OpenCL specific information 
-    if (name == "clEnqueueMigrateMemObjects") addMigrateMemCall() ;
+    if (name == "clEnqueueMigrateMemObjects")
+      addMigrateMemCall();
   }
 
   void VPStatisticsDatabase::logFunctionCallEnd(const std::string& name,
-                                                 double timestamp)
+                                                double timestamp)
   {
-    std::lock_guard<std::mutex> lock(dbLock) ;
+    std::lock_guard<std::mutex> lock(dbLock);
 
-    auto threadId = std::this_thread::get_id() ;
-    auto key      = std::make_pair(name, threadId) ;
-    
-    callCount[key].back().second = timestamp ;
+    auto threadId = std::this_thread::get_id();
+    auto key      = std::make_pair(name, threadId);
+
+    // Since some calls might be recursive, we must go backwards to find
+    // the first call that has a start time set but no end time.  Since we've
+    // incorporated the thread id as part of our key, we will match recursive
+    // calls correctly
+    for (auto iter = callCount[key].rbegin();
+         iter != callCount[key].rend();
+         ++iter) {
+      if ((*iter).second == 0) {
+        (*iter).second = timestamp;
+        break;
+      }
+    }
   }
 
   void VPStatisticsDatabase::logMemoryTransfer(uint64_t deviceId,
@@ -407,11 +428,11 @@ namespace xdp {
   }
 
   void VPStatisticsDatabase::updateCounters(uint64_t /*deviceId*/,
-                                             xclCounterResults& /*counters*/)
+                                            xdp::CounterResults& /*counters*/)
   {
   }
 
-  void VPStatisticsDatabase::updateCounters(xclCounterResults& /*counters*/)
+  void VPStatisticsDatabase::updateCounters(xdp::CounterResults& /*counters*/)
   {
   }
 
@@ -427,7 +448,7 @@ namespace xdp {
     //  the number of calls
     std::map<std::string, uint64_t> counts ;
 
-    for (auto c : callCount)
+    for (const auto& c : callCount)
     {
       if (counts.find(c.first.first) == counts.end())
       {
@@ -439,7 +460,7 @@ namespace xdp {
       }
     }
 
-    for (auto i : counts)
+    for (const auto& i : counts)
     {
       fout << i.first << "," << i.second << std::endl ;
     }
@@ -448,7 +469,7 @@ namespace xdp {
   void VPStatisticsDatabase::dumpHALMemory(std::ofstream& fout)
   {
     unsigned int i = 0 ; 
-    for (auto m : memoryStats)
+    for (const auto& m : memoryStats)
     {
       fout << "Device " << i << std::endl ;
 

@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2021 Xilinx, Inc
+ * Copyright (C) 2021, 2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -16,7 +16,20 @@
 
 #include "SectionAIEResources.h"
 
+#include <boost/functional/factory.hpp>
+
 // Static Variables / Classes
-SectionAIEResources::_init SectionAIEResources::_initializer;
+SectionAIEResources::init SectionAIEResources::initializer;
+
+SectionAIEResources::init::init()
+{
+  auto sectionInfo = std::make_unique<SectionInfo>(AIE_RESOURCES, "AIE_RESOURCES", boost::factory<SectionAIEResources*>());
+
+  sectionInfo->supportedAddFormats.push_back(FormatType::raw);
+
+  sectionInfo->supportedDumpFormats.push_back(FormatType::raw);
+
+  addSectionType(std::move(sectionInfo));
+}
 
 

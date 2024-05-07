@@ -3,7 +3,8 @@
  * A GEM style (optionally CMA backed) device manager for ZynQ based
  * OpenCL accelerators.
  *
- * Copyright (C) 2016-2021 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2016-2022 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Authors:
  *    Sonal Santan <sonal.santan@xilinx.com>
@@ -21,8 +22,12 @@
 #include <drm/drm_drv.h>
 #include <drm/drm_gem.h>
 #include <drm/drm_mm.h>
-#include <drm/drm_gem_cma_helper.h>
 #include <linux/version.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+#include <drm/drm_gem_dma_helper.h>
+#else
+#include <drm/drm_gem_cma_helper.h>
+#endif
 #include <linux/poll.h>
 #include "zocl_util.h"
 #include "zocl_ioctl.h"
@@ -30,13 +35,24 @@
 #include "zocl_bo.h"
 #include "zocl_dma.h"
 #include "zocl_ospi_versal.h"
-#include "zocl_watchdog.h"
 #include "xrt_cu.h"
 
 #if defined(CONFIG_ARM64)
 #define ZOCL_PLATFORM_ARM64   1
 #else
 #define ZOCL_PLATFORM_ARM64   0
+#endif
+
+#ifndef XRT_DRIVER_VERSION
+#define XRT_DRIVER_VERSION ""
+#endif
+
+#ifndef XRT_HASH
+#define XRT_HASH ""
+#endif
+
+#ifndef XRT_HASH_DATE
+#define XRT_HASH_DATE ""
 #endif
 
 /* Ensure compatibility with newer kernels and backported Red Hat kernels. */
@@ -103,8 +119,6 @@
 	#define ZOCL_ACCESS_OK(TYPE, ADDR, SIZE) access_ok(TYPE, ADDR, SIZE)
 #endif
 
-struct sched_client_ctx;
-
 struct drm_zocl_exec_metadata {
 	enum drm_zocl_execbuf_state state;
 	unsigned int                index;
@@ -116,7 +130,11 @@ struct zocl_drv_private {
 
 struct drm_zocl_bo {
 	union {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+		struct drm_gem_dma_object       cma_base;
+#else
 		struct drm_gem_cma_object       cma_base;
+#endif
 		struct {
 			struct drm_gem_object         gem_base;
 			struct page                 **pages;
@@ -127,7 +145,7 @@ struct drm_zocl_bo {
 	};
 	struct drm_mm_node            *mm_node;
 	struct drm_zocl_exec_metadata  metadata;
-	unsigned int                   bank;
+	unsigned int                   mem_index;
 	uint32_t                       flags;
 	unsigned int                   user_flags;
 };
@@ -167,20 +185,20 @@ zocl_bo_execbuf(const struct drm_zocl_bo *bo)
 }
 
 static inline struct kernel_info *
-zocl_query_kernel(struct drm_zocl_dev *zdev, const char *name)
+zocl_query_kernel(struct drm_zocl_slot *slot, const char *name)
 {
 	struct kernel_info *kernel;
 	int off = 0;
 
-	while (off < zdev->ksize) {
-		kernel = (struct kernel_info *)(zdev->kernels + off);
+	while (off < slot->ksize) {
+		kernel = (struct kernel_info *)(slot->kernels + off);
 		if (!strcmp(kernel->name, name))
 			break;
 		off += sizeof(struct kernel_info);
 		off += sizeof(struct argument_info) * kernel->anums;
 	}
 
-	if (off < zdev->ksize)
+	if (off < slot->ksize)
 		return kernel;
 
 	return NULL;
@@ -193,9 +211,29 @@ zocl_kds_add_cu(struct drm_zocl_dev *zdev, struct xrt_cu *xcu)
 }
 
 static inline int
+zocl_kds_add_scu(struct drm_zocl_dev *zdev, struct xrt_cu *xcu)
+{
+	BUG_ON(!zdev);
+	return kds_add_scu(&zdev->kds, xcu);
+}
+
+static inline int
 zocl_kds_del_cu(struct drm_zocl_dev *zdev, struct xrt_cu *xcu)
 {
 	return kds_del_cu(&zdev->kds, xcu);
+}
+
+static inline int
+zocl_kds_del_scu(struct drm_zocl_dev *zdev, struct xrt_cu *xcu)
+{
+	return kds_del_scu(&zdev->kds, xcu);
+}
+
+
+static inline int
+zocl_kds_set_cu_read_range(struct drm_zocl_dev *zdev, u32 cu_idx, u32 start, u32 size)
+{
+	return kds_set_cu_read_range(&zdev->kds, cu_idx, start, size);
 }
 
 int zocl_copy_bo_async(struct drm_device *dev, struct drm_file *fipl,
@@ -216,30 +254,23 @@ int zocl_iommu_unmap_bo(struct drm_device *dev, struct drm_zocl_bo *bo);
 
 int zocl_init_sysfs(struct device *dev);
 void zocl_fini_sysfs(struct device *dev);
-void zocl_free_sections(struct drm_zocl_dev *zdev);
+void zocl_free_sections(struct drm_zocl_dev *dev, struct drm_zocl_slot *slot);
 void zocl_free_bo(struct drm_gem_object *obj);
 void zocl_drm_free_bo(struct drm_zocl_bo *bo);
 struct drm_zocl_bo *zocl_drm_create_bo(struct drm_device *dev,
 		uint64_t unaligned_size, unsigned user_flags);
 void zocl_update_mem_stat(struct drm_zocl_dev *zdev, u64 size,
 		int count, uint32_t bank);
-void zocl_init_mem(struct drm_zocl_dev *zdev, struct mem_topology *mtopo);
+void zocl_init_mem(struct drm_zocl_dev *zdev, struct drm_zocl_slot *slot);
 void zocl_clear_mem(struct drm_zocl_dev *zdev);
-int zocl_create_aie(struct drm_zocl_dev *zdev, struct axlf *axlf,
-		void *aie_res);
+void zocl_clear_mem_slot(struct drm_zocl_dev *zdev, u32 slot_idx);
+int zocl_cleanup_aie(struct drm_zocl_dev *zdev);
+int zocl_create_aie(struct drm_zocl_dev *zdev, struct axlf *axlf, char __user *xclbin,
+		void *aie_res, uint8_t hw_gen);
 void zocl_destroy_aie(struct drm_zocl_dev *zdev);
 int zocl_aie_request_part_fd(struct drm_zocl_dev *zdev, void *data);
 int zocl_aie_reset(struct drm_zocl_dev *zdev);
-int zocl_aie_graph_alloc_context(struct drm_zocl_dev *dev, u32 gid,
-		u32 ctx_code, struct sched_client_ctx *client);
-int zocl_aie_graph_free_context(struct drm_zocl_dev *dev, u32 gid,
-		struct sched_client_ctx *client);
-void zocl_aie_graph_free_context_all(struct drm_zocl_dev *zdev,
-		struct sched_client_ctx *client);
-int zocl_aie_alloc_context(struct drm_zocl_dev *zdev, u32 ctx_code,
-		struct sched_client_ctx *client);
-int zocl_aie_free_context(struct drm_zocl_dev *zdev,
-		struct sched_client_ctx *client);
+int zocl_aie_freqscale(struct drm_zocl_dev *zdev, void *data);
 int zocl_aie_kds_add_graph_context(struct drm_zocl_dev *zdev, u32 gid,
 	        u32 ctx_code, struct kds_client *client);
 int zocl_aie_kds_del_graph_context(struct drm_zocl_dev *zdev, u32 gid,
@@ -249,6 +280,8 @@ int zocl_aie_kds_add_context(struct drm_zocl_dev *zdev, u32 ctx_code,
 	struct kds_client *client);
 int zocl_aie_kds_del_context(struct drm_zocl_dev *zdev,
 	struct kds_client *client);
+int zocl_add_context_kernel(struct drm_zocl_dev *zdev, void *client_hdl, u32 cu_idx, u32 flags, u32 cu_domain);
+int zocl_del_context_kernel(struct drm_zocl_dev *zdev, void *client_hdl, u32 cu_idx, u32 cu_domain);
 
 int zocl_inject_error(struct drm_zocl_dev *zdev, void *data,
 		struct drm_file *filp);
@@ -259,8 +292,8 @@ int zocl_insert_error_record(struct drm_zocl_dev *zdev, xrtErrorCode err_code);
 /* zocl_kds.c */
 int zocl_init_sched(struct drm_zocl_dev *zdev);
 void zocl_fini_sched(struct drm_zocl_dev *zdev);
-int zocl_create_client(struct drm_zocl_dev *zdev, void **priv);
-void zocl_destroy_client(struct drm_zocl_dev *zdev, void **priv);
+int zocl_create_client(struct device *dev, void **client_hdl);
+void zocl_destroy_client(void *client_hdl);
 uint zocl_poll_client(struct file *filp, poll_table *wait);
 int zocl_command_ioctl(struct drm_zocl_dev *zdev, void *data,
 		       struct drm_file *filp);
@@ -268,14 +301,31 @@ int zocl_context_ioctl(struct drm_zocl_dev *zdev, void *data,
 		       struct drm_file *filp);
 struct platform_device *zocl_find_pdev(char *name);
 
+static inline struct drm_zocl_dev *
+zocl_get_zdev(void)
+{
+	struct platform_device *pdev = zocl_find_pdev("zyxclmm_drm");
+	if(!pdev)
+		return NULL;
+	return platform_get_drvdata(pdev);
+}
 int get_apt_index_by_addr(struct drm_zocl_dev *zdev, phys_addr_t addr);
 int get_apt_index_by_cu_idx(struct drm_zocl_dev *zdev, int cu_idx);
 void update_cu_idx_in_apt(struct drm_zocl_dev *zdev, int apt_idx, int cu_idx);
 
-int subdev_create_cu(struct drm_zocl_dev *zdev, struct xrt_cu_info *info);
+int zocl_kds_reset(struct drm_zocl_dev *zdev);
+
+int subdev_create_cu(struct device *dev, struct xrt_cu_info *info, struct platform_device **pdevp);
 void subdev_destroy_cu(struct drm_zocl_dev *zdev);
+int subdev_create_scu(struct device *dev, struct xrt_cu_info *info, struct platform_device **pdevp);
+void subdev_destroy_scu(struct drm_zocl_dev *zdev);
 /* Sub device driver */
+extern struct platform_driver zocl_cu_xgq_driver;
+extern struct platform_driver zocl_csr_intc_driver;
+extern struct platform_driver zocl_irq_intc_driver;
+extern struct platform_driver zocl_rpu_channel_driver;
 extern struct platform_driver cu_driver;
+extern struct platform_driver scu_driver;
 struct zocl_cu_ops {
 	int (*submit)(struct platform_device *pdev, struct kds_command *xcmd);
 };
@@ -287,10 +337,16 @@ zocl_cu_submit_xcmd(struct drm_zocl_dev *zdev, int i, struct kds_command *xcmd)
 	struct zocl_drv_private *priv;
 	struct zocl_cu_ops *ops;
 
-	pdev = zdev->cu_pldev[i];
+	pdev = zdev->cu_subdev.cu_pldev[i];
 	priv = (void *)platform_get_device_id(pdev)->driver_data;
 	ops = (struct zocl_cu_ops *)priv->ops;
 	return ops->submit(pdev, xcmd);
 }
 
+extern u32 zocl_cu_get_status(struct platform_device *pdev);
+extern u32 zocl_scu_get_status(struct platform_device *pdev);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0)
+extern const struct drm_gem_object_funcs zocl_gem_object_funcs;
+extern const struct drm_gem_object_funcs zocl_cma_default_funcs;
+#endif
 #endif

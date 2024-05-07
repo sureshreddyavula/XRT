@@ -1,28 +1,26 @@
 /**
- *  Copyright (C) 2017 Xilinx, Inc. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright (C) 2017-2022 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
  *
  *  Utility Functions for sysmon, axi firewall and other peripherals.
  *  Author: Umang Parekh
- *
- *  This program is free software; you can redistribute it and/or modify
- *  it under the terms of the GNU General Public License as published by
- *  the Free Software Foundation; either version 2 of the License, or
- *  (at your option) any later version.
- *
- *  This program is distributed in the hope that it will be useful,
- *  but WITHOUT ANY WARRANTY; without even the implied warranty of
- *  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *  GNU General Public License for more details.
  */
+#include "mgmt-core.h"
 
 #include <linux/firmware.h>
-#include "mgmt-core.h"
 #include <linux/module.h>
+
+#include "xclfeatures.h"
 #include "../xocl_drv.h"
+#include "../xocl_xclbin.h"
 
 #define XCLMGMT_RESET_MAX_RETRY		10
 
 static void xclmgmt_reset_pci(struct xclmgmt_dev *lro);
+static int xclmgmt_reload_fdt_blob(struct xclmgmt_dev *lro);
+static int xclmgmt_reload_fdt_blob_vmr(struct xclmgmt_dev *lro);
+
 /**
  * @returns: NULL if AER apability is not found walking up to the root port
  *         : pci_dev ptr to the port which is AER capable.
@@ -240,12 +238,12 @@ static int xclmgmt_get_buddy_cb(struct device *dev, void *data)
 	 * 1.non xilinx device
 	 * 2.itself
 	 * 3.other devcies not being droven by same driver. using func id
-	 * may not handle u25 where there is another device on same card 
+	 * may not handle u25 where there is another device on same card
 	 */
 	if (!src_xdev || !dev || to_pci_dev(dev)->vendor != 0x10ee ||
 	   	XOCL_DEV_ID(to_pci_dev(dev)) ==
 		XOCL_DEV_ID(src_xdev->core.pdev) || !dev->driver ||
-		strcmp(dev->driver->name, "xclmgmt")) 
+		strcmp(dev->driver->name, "xclmgmt"))
 		return 0;
 
 	tgt_xdev = dev_get_drvdata(dev);
@@ -289,7 +287,7 @@ long xclmgmt_hot_reset(struct xclmgmt_dev *lro, bool force)
 		mgmt_err(lro, "Unable to identify device root port for card %d",
 		       lro->instance);
 		err = -ENODEV;
-		goto done;
+		goto failed;
 	}
 
 	ep_name = pdev->bus->name;
@@ -297,14 +295,32 @@ long xclmgmt_hot_reset(struct xclmgmt_dev *lro, bool force)
 		lro->instance, ep_name,
 		PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
 
+	xocl_thread_stop(lro);
+
+	if (XOCL_DSA_EEMI_API_SRST(lro)) {
+		xocl_subdev_destroy_by_level(lro, XOCL_SUBDEV_LEVEL_URP);
+		err = xocl_vmr_eemi_pmc_srst(lro);
+		if (err) {
+			mgmt_err(lro, "EMMI PMC SRST Failed. err: %ld", err);
+			goto failed;
+		}
+		return 0;
+	}
+	else {
+		err = xocl_enable_vmr_boot(lro);
+		if (err) {
+			mgmt_err(lro, "enable reset failed");
+			err = -ENODEV;
+			goto failed;
+		}
+	}
+
 	if (!force && xrt_reset_syncup) {
 		mgmt_info(lro, "wait for master off for all functions");
 		err = xocl_wait_master_off(lro);
 		if (err)
-			goto done;
+			goto failed;
 	}
-
-	xocl_thread_stop(lro);
 
 	/*
 	 * lock pci config space access from userspace,
@@ -312,6 +328,8 @@ long xclmgmt_hot_reset(struct xclmgmt_dev *lro, bool force)
 	 */
 	if (!XOCL_DSA_PCI_RESET_OFF(lro)) {
 		xocl_subdev_destroy_by_level(lro, XOCL_SUBDEV_LEVEL_URP);
+		(void) xocl_subdev_offline_by_id(lro, XOCL_SUBDEV_HWMON_SDM);
+		(void) xocl_subdev_offline_by_id(lro, XOCL_SUBDEV_XGQ_VMR);
 		(void) xocl_subdev_offline_by_id(lro, XOCL_SUBDEV_UARTLITE);
 		(void) xocl_subdev_offline_by_id(lro, XOCL_SUBDEV_FLASH);
 		(void) xocl_subdev_offline_by_id(lro, XOCL_SUBDEV_ICAP);
@@ -337,6 +355,8 @@ long xclmgmt_hot_reset(struct xclmgmt_dev *lro, bool force)
 		(void) xocl_subdev_online_by_id(lro, XOCL_SUBDEV_ICAP);
 		(void) xocl_subdev_online_by_id(lro, XOCL_SUBDEV_FLASH);
 		(void) xocl_subdev_online_by_id(lro, XOCL_SUBDEV_UARTLITE);
+		(void) xocl_subdev_online_by_id(lro, XOCL_SUBDEV_XGQ_VMR);
+		(void) xocl_subdev_online_by_id(lro, XOCL_SUBDEV_HWMON_SDM);
 	} else {
 		mgmt_warn(lro, "PCI Hot reset is not supported on this board.");
 	}
@@ -361,6 +381,8 @@ long xclmgmt_hot_reset(struct xclmgmt_dev *lro, bool force)
 		return -EIO;
 	}
 
+	(void) xocl_hwmon_sdm_get_sensors_list(lro, true);
+
 	/* Workaround for some DSAs. Flush axilite busses */
 	if (dev_info->flags & XOCL_DSAFLAG_AXILITE_FLUSH)
 		platform_axilite_flush(lro);
@@ -370,12 +392,27 @@ long xclmgmt_hot_reset(struct xclmgmt_dev *lro, bool force)
 
 	xocl_clear_pci_errors(lro);
 	store_pcie_link_info(lro);
+
+	/*
+	 * Update the userspace fdt with the current values in the mgmt driver
+	 *
+	 * For vmr supported versal devices, we enabled A/B boot, thus we should
+	 * reload fdt from the right boot image instead of using unchanged fdt
+	 * for other ALEVO devices.
+	 */
+	mutex_lock(&lro->busy_mutex);
+	(void) xclmgmt_reload_fdt_blob_vmr(lro);
+	(void) xclmgmt_update_userpf_blob(lro);
+	mutex_unlock(&lro->busy_mutex);
+
 	if (xrt_reset_syncup)
 		xocl_set_master_on(lro);
 	else if (!force)
 		xclmgmt_connect_notify(lro, true);
 
-done:
+	return 0;
+
+failed:
 	return err;
 }
 
@@ -535,6 +572,7 @@ done:
 static void xclmgmt_reset_pci(struct xclmgmt_dev *lro)
 {
 	struct pci_dev *pdev = lro->pci_dev;
+	u16 slot_ctrl_orig = 0, slot_ctrl;
 	struct pci_bus *bus;
 	u8 pci_bctl;
 	u16 pci_cmd, devctl;
@@ -549,6 +587,12 @@ static void xclmgmt_reset_pci(struct xclmgmt_dev *lro)
 	/* Reset secondary bus. */
 	bus = pdev->bus;
 
+	pcie_capability_read_word(bus->self, PCI_EXP_SLTCTL, &slot_ctrl);
+	if (slot_ctrl != (u16) ~0) {
+		slot_ctrl_orig = slot_ctrl;
+		slot_ctrl &= ~(PCI_EXP_SLTCTL_HPIE);
+		pcie_capability_write_word(bus->self, PCI_EXP_SLTCTL, slot_ctrl);
+	}
 	/*
 	 * When flipping the SBR bit, device can fall off the bus. This is usually
 	 * no problem at all so long as drivers are working properly after SBR.
@@ -569,6 +613,9 @@ static void xclmgmt_reset_pci(struct xclmgmt_dev *lro)
 	pci_bctl |= PCI_BRIDGE_CTL_BUS_RESET;
 	pci_write_config_byte(bus->self, PCI_BRIDGE_CONTROL, pci_bctl);
 
+	if (!slot_ctrl_orig)
+		pcie_capability_write_word(bus->self, PCI_EXP_SLTCTL, slot_ctrl_orig);
+
 	msleep(100);
 	pci_bctl &= ~PCI_BRIDGE_CTL_BUS_RESET;
 	pci_write_config_byte(bus->self, PCI_BRIDGE_CONTROL, pci_bctl);
@@ -577,24 +624,25 @@ static void xclmgmt_reset_pci(struct xclmgmt_dev *lro)
 	pcie_capability_write_word(bus->self, PCI_EXP_DEVCTL, devctl);
 	pci_write_config_word(bus->self, PCI_COMMAND, pci_cmd);
 
-	pci_enable_device(pdev);
+	if (pci_enable_device(pdev))
+		mgmt_err(lro, "failed to enable pci device");
 
 	xocl_wait_pci_status(pdev, 0, 0, 0);
 
 	xocl_pci_restore_config_all(lro);
 
 	xclmgmt_config_pci(lro);
-
-	xocl_pmc_enable_reset(lro);
 }
 
 int xclmgmt_update_userpf_blob(struct xclmgmt_dev *lro)
 {
-	int len, userpf_idx;
-	int ret;
-	struct FeatureRomHeader	rom_header;
-	int offset;
-	const int *version;
+	int len = 0;
+	int userpf_idx = 0;
+	int ret = 0;
+	struct FeatureRomHeader rom_header = {};
+	struct VmrStatus vmr_header = {};
+	int offset = 0;
+	const int *version = NULL;
 
 	if (!lro->core.fdt_blob)
 		return 0;
@@ -640,6 +688,25 @@ int xclmgmt_update_userpf_blob(struct xclmgmt_dev *lro)
 		goto failed;
 	}
 
+	/* Only works on versal platforms */
+	ret = xocl_vmr_status(lro, &vmr_header);
+	if (ret != -ENODEV) {
+		if (ret) {
+			mgmt_err(lro, "Get vmr header failed %d", ret);
+			goto failed;
+		}
+
+		if (!vmr_header.boot_on_default)
+			mgmt_info(lro, "VMR not using default image");
+
+		ret = xocl_fdt_add_pair(lro, lro->userpf_blob, "vmr_status", &vmr_header,
+		sizeof(vmr_header));
+		if (ret) {
+			mgmt_err(lro, "Add vmr status failed %d", ret);
+			goto failed;
+		}
+	}
+
 	/* Get ERT firmware major version from mgmtpf blob */
 	offset = xocl_fdt_path_offset(lro, lro->core.fdt_blob,
 					"/" NODE_ENDPOINTS "/" NODE_ERT_FW_MEM
@@ -679,6 +746,12 @@ int xclmgmt_program_shell(struct xclmgmt_dev *lro)
 	int ret;
 	char *blob = NULL;
 	int len;
+
+	if (!lro->ready) {
+		mgmt_warn(lro, "not ready yet");
+		ret = -EINVAL;
+		goto failed;
+	}
 
 	if (!lro->core.fdt_blob && xocl_get_timestamp(lro) == 0)
 		xclmgmt_load_fdt(lro);
@@ -748,7 +821,9 @@ int xclmgmt_program_shell(struct xclmgmt_dev *lro)
 
 	xocl_thread_start(lro);
 
+	mutex_lock(&lro->busy_mutex);
 	xclmgmt_update_userpf_blob(lro);
+	mutex_unlock(&lro->busy_mutex);
 	xocl_drvinst_set_offline(lro, false);
 
 failed:
@@ -757,15 +832,107 @@ failed:
 
 }
 
+static int xclmgmt_refresh_fdt_blob(struct xclmgmt_dev *lro, const char *fw_buf)
+{
+	const struct axlf_section_header	*dtc_header = NULL;
+	struct axlf				*bin_axlf = NULL;
+	int					ret = 0;
+
+	bin_axlf = (struct axlf *)fw_buf;
+
+	dtc_header = xocl_axlf_section_header(lro, bin_axlf, PARTITION_METADATA);
+	if (!dtc_header) {
+		mgmt_err(lro, "Firmware does not contain PARTITION_METADATA");
+		return -ENOENT;
+	}
+
+	ret = xocl_fdt_blob_input(lro,
+			(char *)fw_buf + dtc_header->m_sectionOffset,
+			dtc_header->m_sectionSize, XOCL_SUBDEV_LEVEL_BLD,
+			bin_axlf->m_header.m_platformVBNV);
+	if (ret)
+		mgmt_err(lro, "Invalid PARTITION_METADATA");
+
+	return ret;
+}
+
+/*
+ * load firmware, the fdt blob in the partition metadata, and
+ * refresh cached fdt_blob
+ */
+static int xclmgmt_reload_fdt_blob(struct xclmgmt_dev *lro)
+{
+	char	*fw_buf = NULL;
+	size_t	fw_size = 0;
+	int	ret = 0;
+
+	BUG_ON(!mutex_is_locked(&lro->busy_mutex));
+
+	ret = xocl_rom_load_firmware(lro, &fw_buf, &fw_size);
+	if (ret) {
+		mgmt_err(lro, "ROM firmware load failure %d", ret);
+		return ret;
+	}
+
+	ret = xclmgmt_refresh_fdt_blob(lro, fw_buf);
+
+	vfree(fw_buf);
+	return ret;
+}
+
+/*
+ * load firmware from vmr devices
+ *   - then clean up existing fdt_blob if this is a hot reset request
+ *   - after fdt_blob is refreshed, the blp_blob should be updated.
+ */
+static int xclmgmt_reload_fdt_blob_vmr(struct xclmgmt_dev *lro)
+{
+	char	*fw_buf = NULL;
+	size_t	fw_size = 0;
+	int	ret = 0;
+
+	BUG_ON(!mutex_is_locked(&lro->busy_mutex));
+
+	ret = xocl_vmr_load_firmware(lro, &fw_buf, &fw_size);
+	if (ret)
+		return ret;
+
+	/* clean up existing fdt_blob */
+	if (lro->core.fdt_blob) {
+		vfree(lro->core.fdt_blob);
+		lro->core.fdt_blob = NULL;
+	}
+
+	/* clean up blp_blob */
+	if (lro->core.blp_blob) {
+		vfree(lro->core.blp_blob);
+		lro->core.blp_blob = NULL;
+	}
+
+	ret = xclmgmt_refresh_fdt_blob(lro, fw_buf);
+	if (ret)
+		goto out;
+
+	lro->core.blp_blob = vmalloc(fdt_totalsize(lro->core.fdt_blob));
+	if (!lro->core.blp_blob) {
+		ret = -ENOMEM;
+		mgmt_err(lro, "Failed to allocate blp data region");
+		goto out;
+	}
+
+	memcpy(lro->core.blp_blob, lro->core.fdt_blob,
+		fdt_totalsize(lro->core.fdt_blob));
+
+out:
+	vfree(fw_buf);
+	return ret;
+}
+
+
 int xclmgmt_load_fdt(struct xclmgmt_dev *lro)
 {
 	struct xocl_board_private *dev_info = &lro->core.priv;
-	const struct axlf_section_header	*dtc_header;
-	struct axlf				*bin_axlf;
-	int					ret;
-	char					*fw_buf = NULL;
-	size_t					fw_size = 0;
-
+	int ret = 0;
 
 	if (xocl_subdev_is_vsec_recovery(lro)) {
 		mgmt_info(lro, "Skip load_fdt for vsec Golden image");
@@ -774,29 +941,14 @@ int xclmgmt_load_fdt(struct xclmgmt_dev *lro)
 	}
 
 	mutex_lock(&lro->busy_mutex);
-	ret = xocl_rom_load_firmware(lro, &fw_buf, &fw_size);
+
+	ret = xclmgmt_reload_fdt_blob(lro);
 	if (ret)
 		goto failed;
-	bin_axlf = (struct axlf *)fw_buf;
-
-	dtc_header = xocl_axlf_section_header(lro, bin_axlf, PARTITION_METADATA);
-	if (!dtc_header) {
-		ret = -ENOENT;
-		mgmt_err(lro, "firmware does not contain PARTITION_METADATA");
-		goto failed;
-	}
-
-	ret = xocl_fdt_blob_input(lro,
-			(char *)fw_buf + dtc_header->m_sectionOffset,
-			dtc_header->m_sectionSize, XOCL_SUBDEV_LEVEL_BLD,
-			bin_axlf->m_header.m_platformVBNV);
-	if (ret) {
-		mgmt_err(lro, "Invalid PARTITION_METADATA");
-		goto failed;
-	}
 
 	if (lro->core.priv.flags & XOCL_DSAFLAG_MFG) {
 		/* Minimum set up for golden image. */
+		mgmt_info(lro, "Factory image detected. Performing minimum setup");
 		(void) xocl_subdev_create_by_id(lro, XOCL_SUBDEV_FLASH);
 		(void) xocl_subdev_create_by_id(lro, XOCL_SUBDEV_MB);
 		goto failed;
@@ -805,6 +957,7 @@ int xclmgmt_load_fdt(struct xclmgmt_dev *lro)
 	lro->core.blp_blob = vmalloc(fdt_totalsize(lro->core.fdt_blob));
 	if (!lro->core.blp_blob) {
 		ret = -ENOMEM;
+		mgmt_err(lro, "Failed to allocate blp data region");
 		goto failed;
 	}
 	memcpy(lro->core.blp_blob, lro->core.fdt_blob,
@@ -813,15 +966,19 @@ int xclmgmt_load_fdt(struct xclmgmt_dev *lro)
 	xclmgmt_connect_notify(lro, false);
 	xocl_subdev_destroy_all(lro);
 	ret = xocl_subdev_create_all(lro);
-	if (ret)
+	if (ret) {
+		mgmt_err(lro, "Failed to create sub devices");
 		goto failed;
+	}
 
 	/* VERSAL doesn't have icap to download, will need to refactor the code */
 	if (!(dev_info->flags & XOCL_DSAFLAG_VERSAL))
 		ret = xocl_icap_download_boot_firmware(lro);
 
-	if (ret)
+	if (ret) {
+		mgmt_err(lro, "Firmware ICAP download failed");
 		goto failed;
+	}
 
 	xclmgmt_update_userpf_blob(lro);
 
@@ -833,7 +990,6 @@ int xclmgmt_load_fdt(struct xclmgmt_dev *lro)
 	lro->ready = true;
 
 failed:
-	vfree(fw_buf);
 	mutex_unlock(&lro->busy_mutex);
 
 	return ret;
@@ -854,4 +1010,75 @@ void xclmgmt_ert_reset(struct xclmgmt_dev *lro)
 void xclmgmt_softkernel_reset(struct xclmgmt_dev *lro)
 {
 	xocl_ps_sk_reset(lro);
+}
+
+static const void* xclmgmt_get_interface_uuid(struct xclmgmt_dev *lro) {
+	int node = -1;
+	const void *uuid;
+
+	if (!lro->core.fdt_blob)
+		return NULL;
+
+	/*
+	 * don't need blp uuid. do we have multiple interface uuid?
+	 */
+	node = xocl_fdt_get_next_prop_by_name(lro, lro->core.fdt_blob,
+		-1, PROP_INTERFACE_UUID, &uuid, NULL);
+	if (!uuid || node < 0)
+		return NULL;
+
+	return uuid;
+}
+/*
+ * the xclbins are at
+ * /lib/firmware/xilnx/xclbins/, with format
+ *  uuidA_uuidB.xclbin, where,
+ *  uuidA is the uuid of xclbin (type uuid_t)
+ *  uuidB is the interface uuid of xclbin (type char*)
+ *  both of the uuids are exactly the same to the output of
+ *  xclbinutil --info --input path_to_xclbin |grep -i uuid
+ *  eg
+ *  6250ec80-3f38-4be0-ac90-68bfd3c140a8_937ed70867cf3350bc06304053f4293c.xclbin
+ */
+int xclmgmt_xclbin_fetch_and_download(struct xclmgmt_dev *lro,
+        const struct axlf *xclbin, uint32_t slot_id)
+{
+	const char *interface_uuid;
+	char fw_name[256];
+	const char* xclbin_location = "xilinx/xclbins";
+	char *fw_buf = NULL;
+	int err;
+
+	interface_uuid = xclmgmt_get_interface_uuid(lro);
+	if (!interface_uuid)
+		return -EINVAL;
+	memset(fw_name, 0, sizeof (fw_name));
+
+	snprintf(fw_name, sizeof(fw_name), "%s/"
+		"%02x%02x%02x%02x-"
+		"%02x%02x-"
+		"%02x%02x-"
+		"%02x%02x-"
+		"%02x%02x%02x%02x%02x%02x"
+		"_%s.xclbin",
+		xclbin_location,
+		xclbin->m_header.uuid.b[0], xclbin->m_header.uuid.b[1],
+		xclbin->m_header.uuid.b[2], xclbin->m_header.uuid.b[3],
+		xclbin->m_header.uuid.b[4], xclbin->m_header.uuid.b[5],
+		xclbin->m_header.uuid.b[6], xclbin->m_header.uuid.b[7],
+		xclbin->m_header.uuid.b[8], xclbin->m_header.uuid.b[9],
+		xclbin->m_header.uuid.b[10],xclbin->m_header.uuid.b[11],
+		xclbin->m_header.uuid.b[12],xclbin->m_header.uuid.b[13],
+		xclbin->m_header.uuid.b[14],xclbin->m_header.uuid.b[15],
+	       	interface_uuid);
+
+	mgmt_info(lro, "try loading fw: %s", fw_name);
+	err = xocl_request_firmware(&lro->core.pdev->dev, fw_name, &fw_buf, NULL);
+	if (err)
+		goto done;
+
+	err = xocl_xclbin_download(lro, fw_buf, slot_id);
+done:
+	vfree(fw_buf);
+	return err;
 }

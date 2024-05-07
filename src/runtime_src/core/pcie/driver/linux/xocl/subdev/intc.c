@@ -13,7 +13,6 @@
  * GNU General Public License for more details.
  */
 
-#include <linux/workqueue.h>
 #include "../xocl_drv.h"
 /* To get register address of CSR */
 #include "ert.h"
@@ -41,11 +40,9 @@
  * To determin the interrupt source, read ISR and check which bit is set.
  */
 
-extern int kds_mode;
-
 #define INTR_NUM  4
 #define INTR_SRCS 32
-#define MAX_TRY 2
+#define MAX_TRY 3
 
 /* ERT Interrupt Status Register offsets */
 static u32 eisr[4] = {
@@ -108,7 +105,6 @@ struct intr_metadata {
 	u32			 blanking;
 	u32			 ienabled;
 	u32			 disabled_state;
-	struct work_struct	 work;
 };
 
 /* The details for intc sub-device.
@@ -123,11 +119,6 @@ struct xocl_intc {
 	/* CU to host interrupt */
 	struct intr_metadata	 cu[INTR_NUM];
 };
-
-static inline struct intr_metadata *work_to_data(struct work_struct *work)
-{
-	return container_of(work, struct intr_metadata, work);
-}
 
 static ssize_t
 intc_stat_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -242,29 +233,18 @@ static inline u32 intc_get_isr(struct intr_metadata *data)
 	return pending;
 }
 
-static void intc_polling(struct work_struct *work)
+static void intc_polling(struct intr_metadata *data, int max_try)
 {
-	struct intr_metadata *data = work_to_data(work);
 	u32 pending;
-	u32 max_try = MAX_TRY;
 
 	do {
-		pending = (data->type == ERT_CSR_TYPE)?
-			   ioread32(data->isr) :
-			   ioread32(reg_addr(data->isr, isr));
+		pending = intc_get_isr(data);
 		handle_pending(data, pending);
 		if (data->type == AXI_INTC_TYPE)
 			iowrite32(pending, reg_addr(data->isr, iar));
 
-		/* If no interrupt, still polling max_try times */
-		if (pending == 0)
-			max_try--;
-		else
-			max_try = MAX_TRY;
+		max_try--;
 	} while (max_try > 0);
-
-	/* xocl_user_interrupt_config() is thread safe */
-	xocl_user_interrupt_config(data->xdev, data->intr, true);
 }
 
 /**
@@ -281,7 +261,14 @@ irqreturn_t intc_isr(int irq, void *arg)
 	if (data->blanking) {
 		/* xocl_user_interrupt_config() is thread safe */
 		xocl_user_interrupt_config(data->xdev, irq, false);
-		schedule_work(&data->work);
+		intc_polling(data, MAX_TRY);
+		xocl_user_interrupt_config(data->xdev, irq, true);
+
+		pending = intc_get_isr(data);
+		handle_pending(data, pending);
+		if (data->type == AXI_INTC_TYPE)
+			iowrite32(pending, reg_addr(data->isr, iar));
+
 		return IRQ_HANDLED;
 	}
 
@@ -431,6 +418,15 @@ static void csr_write32(struct platform_device *pdev, u32 val, u32 off)
 	iowrite32(val, intc->csr_base + off);
 }
 
+static void __iomem *get_csr_base(struct platform_device *pdev)
+{
+	struct xocl_intc *intc = platform_get_drvdata(pdev);
+
+	if (!intc->csr_base)
+		return NULL;
+	return intc->csr_base;
+}
+
 static int sel_ert_intr(struct platform_device *pdev, int mode)
 {
 	xdev_handle_t xdev = xocl_get_xdev(pdev);
@@ -516,7 +512,6 @@ get_legacy_res(struct platform_device *pdev, struct xocl_intc *intc)
 		/* disable interrupt */
 		xocl_user_interrupt_config(xdev, data->intr, false);
 		data->xdev = xdev;
-		INIT_WORK(&data->work, intc_polling);
 		data->type = ERT_CSR_TYPE;
 		data->blanking = 1;
 	}
@@ -565,7 +560,6 @@ get_ssv3_res(struct platform_device *pdev, struct xocl_intc *intc)
 	for (i = 0; i < INTR_NUM; i++) {
 		data = &intc->ert[i];
 		data->xdev = xdev;
-		INIT_WORK(&data->work, intc_polling);
 		data->type = ERT_CSR_TYPE;
 		data->intr = intc_get_csr_irq(pdev, i);
 		if (data->intr < 0) {
@@ -579,7 +573,6 @@ get_ssv3_res(struct platform_device *pdev, struct xocl_intc *intc)
 	for (i = 0; i < INTR_NUM; i++) {
 		data = &intc->cu[i];
 		data->xdev = xdev;
-		INIT_WORK(&data->work, intc_polling);
 		data->type = AXI_INTC_TYPE;
 		data->isr = xocl_devm_ioremap_res_byname(pdev, res_cu_intc[i]);
 		if (!data->isr) {
@@ -634,9 +627,6 @@ static int intc_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, intc);
 	intc->pdev = pdev;
 
-	if (!kds_mode)
-		goto out;
-
 	/* Use ERT to host interrupt by default */
 	intc->mode = ERT_INTR;
 
@@ -654,7 +644,6 @@ static int intc_probe(struct platform_device *pdev)
 	if (sysfs_create_group(&pdev->dev.kobj, &intc_attrgroup))
 		INTC_ERR(intc, "Not able to create INTC sysfs group");
 
-out:
 	return 0;
 
 err:
@@ -670,9 +659,6 @@ static int intc_remove(struct platform_device *pdev)
 	void *hdl;
 	int i;
 
-	if (!kds_mode)
-		goto out;
-
 	for (i = 0; i < INTR_NUM; i++) {
 		/* disable interrupt */
 		xocl_user_interrupt_config(xdev, intc->ert[i].intr, false);
@@ -680,7 +666,6 @@ static int intc_remove(struct platform_device *pdev)
 	}
 
 	(void) sysfs_remove_group(&pdev->dev.kobj, &intc_attrgroup);
-out:
 	xocl_drvinst_release(intc, &hdl);
 	platform_set_drvdata(pdev, NULL);
 	xocl_drvinst_free(hdl);
@@ -691,6 +676,7 @@ static struct xocl_intc_funcs intc_ops = {
 	.request_intr	= request_intr,
 	.config_intr	= config_intr,
 	.sel_ert_intr	= sel_ert_intr,
+	.get_csr_base	= get_csr_base,
 	/* Below two ops only used in ERT sub-device polling mode(for debug) */
 	.csr_read32	= csr_read32,
 	.csr_write32	= csr_write32,

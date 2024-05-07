@@ -11,17 +11,16 @@ XRT Native APIs
 From 2020.2 release XRT provides a new XRT API set in C, C++, and Python flavor. 
 
 To use the native XRT APIs, the host application must link with the **xrt_coreutil** library. 
-Compiling host code with XRT native C++ API requires C++ standard with -std=c++14 or newer. 
-On GCC version older than 4.9.0, please use -std=c++1y instead because -std=c++14 is introduced to GCC from 4.9.0.
+Compiling host code with XRT native C++ API requires C++ standard with -std=c++17 (or newer). 
 
 Example g++ command
 
 .. code-block:: shell
 
-    g++ -g -std=c++14 -I$XILINX_XRT/include -L$XILINX_XRT/lib -o host.exe host.cpp -lxrt_coreutil -pthread
+    g++ -g -std=c++17 -I$XILINX_XRT/include -L$XILINX_XRT/lib -o host.exe host.cpp -lxrt_coreutil -pthread
 
 
-The XRT native API supports both the C and C++ flavor of APIs. For general host code development, C++-based APIs are recommended, hence this document only describes the C++-based API interfaces. The full Doxygen generated C and C++ API documentation can be found in `<./xrt_native.main.rst>`_.
+The XRT native API supports both the C and C++ flavor of APIs. For general host code development, C++-based APIs are recommended, hence this document only describes the C++-based API interfaces. The full Doxygen generated C and C++ API documentation can be found in :doc:`xrt_native.main`.
 
 
 The C++ Class objects used for the APIs are 
@@ -224,6 +223,21 @@ Note the C++ ``xrt::bo::sync``, ``xrt::bo::write``, ``xrt::bo::read`` etc has ov
 
 Also note that if the buffer is created through the user-pointer, the ``xrt::bo::write`` or ``xrt::bo::read`` is not required before or after the ``xrt::bo::sync`` call. 
 
+For the device only buffers (created with ``xrt::bo::flags::device_only`` flag) the ``xrt::bo::sync()`` operation is not required, only ``xrt::bo::write()`` (or ``xrt::bo::read()``) is sufficient for DMA operation. As for the device only buffer there is no host backing storage, the ``xrt::bo::write()`` (or ``xrt::bo::read()``) directly performs DMA operation to (or from) the device memory.
+
+Below is the example for creation of device only buffers.
+
+.. code:: c++
+      :number-lines: 18
+
+           xrt::bo::flags device_flags = xrt::bo::flags::device_only;
+           auto device_only_buffer = xrt::bo(device, size_in_bytes, device_flags, bank_grp_arg0);
+
+Here is how ``xrt::bo::read()`` and ``xrt::bo::write()`` API's to read/write directly from/to device only buffer there is no host backing storage.
+
+- ``xrt::bo::write(const void* src, size_t size, size_t seek)``: Copies data from src to device buffer directly.
+- ``xrt::bo::read(void* dst, size_t size, size_t skip)``: Copies data from device buffer to dst.
+
 II. Data transfer between host and device by Buffer map API
 ***********************************************************
 
@@ -247,7 +261,7 @@ Code example of transferring data from the host to the device by this approach
 III. Data transfer between the buffers by copy API
 **************************************************
 
-XRT provides ``xrt::bo::copy()`` API for deep copy between the two buffer objects if the platform supports a deep-copy (for detail refer M2M feature described in :ref:`m2m.rst`). If deep copy is not supported by the platform the data transfer happens by shallow copy (the data transfer happens via host). 
+XRT provides ``xrt::bo::copy()`` API for deep copy between the two buffer objects if the platform supports a deep-copy (for detail refer M2M feature described in :doc:`m2m`). If deep copy is not supported by the platform the data transfer happens by shallow copy (the data transfer happens via host). 
 
 .. code:: c++
       :number-lines: 25
@@ -265,13 +279,13 @@ This section describes a few other specific use-cases using buffers.
 DMA-BUF API
 ***********
 
-XRT provides Buffer export and import APIs primarily used for sharing buffer across devices (P2P application) and processes. 
+XRT provides Buffer export and import APIs primarily used for sharing buffer across devices (P2P application) and processes. The buffer handle obtained from ``xrt::bo::export_buffer()`` is essentially a file descriptor, hence sending across the processes requires a suitable IPC mechanism (example, UDS or Unix Domain Socket) to translate the file descriptor of one process into another process.
 
 - ``xrt::bo::export_buffer()``: Export the buffer to an exported buffer handle
 - ``xrt::bo()`` constructor: Allocate a BO imported from exported buffer handle
 
 
-Consider the situation of exporting buffer from device 1 to device 2. 
+Consider the situation of exporting buffer from device 1 to device 2 (inside same host process). 
 
 .. code:: c++
       :number-lines: 18
@@ -785,4 +799,171 @@ The above code shows
 - Member function ``xrt::error::to_string()`` is called to obtain the error string. 
 
 
+
+Profiling
+---------
+
+In Versal ACAPs with AI Engines, the XRT Profiling class (``xrt::aie::profiling``) and its member functions can be used to configure AI Engine hardware resources for performance profiling and event tracing.
+
+Create Profiling Event
+~~~~~~~~~~~~~~~~~~~~~~
+
+The class constructor ``xrt::aie::profiling`` is used to create profiling event object as shown below 
+
+.. code:: c
+      :number-lines: 35
+           
+           auto event = xrt::aie::profiling(device);
+           
+The profling object can be used to execute the profiling functions and collect profile statistics by calling profiling APIs.
+
+Start Profiling
+~~~~~~~~~~~~~~~
+
+The member function ``xrt::aie::profiling::start()`` is used to start performance counters in AI Engine as per the profiling option passed as an argument. This function configures the performance counters in the AI Engine and starts profiling.
+
+
+.. code:: c
+      :number-lines: 45
+           
+           auto graph = xrt::graph(device, xclbin_uuid, "graph_name");
+           auto handle = event.start(xrt::aie::profiling::profiling_option option, std::string& port1, std::string& port2, int value);
+           
+           // run graph 
+           ...
+           s2mm_run.wait();
+           
+It returns a handle to be used by read and stop.
+
+Read Profiling
+~~~~~~~~~~~~~~
+
+The ``xrt::aie::profiling::read`` function will return the current performance counter value associated with the profiling handle. It can be used using profiling event object as shown below
+
+.. code:: c
+      :number-lines: 35
+           
+           long long cycle_count = profile.read();
+           
+Stop Profiling
+~~~~~~~~~~~~~~
+
+The ``xrt::aie::profiling::stop`` function stops the performance profiling associated with the profiling handle and releases the corresponding hardware resources.
+
+.. code:: c
+      :number-lines: 35
+           
+        event.stop();
+        double throughput = output_size_in_bytes / (cycle_count *0.8 * 1e-3); 
+        // Every AIE cycle is 0.8ns in production board
+        std::cout << "Throughput of the graph: " << throughput << " MB/s" << std::endl;
+           
+
+
+Asynchornous Programming with XRT (experimental)
+------------------------------------------------
+
+From the 22.1 release, XRT offers a simple asynchronous programming mechanism through the user-defined queues. The ``xrt::queue`` is lightweight, general-purpose queue implementation which is completely separated from core XRT native API data structures. If needed, the user can also use their own queue implementation instead of the implementation offered by ``xrt::queue``. 
+
+XRT queue implementation needs ``#include <experimental/xrt_queue.h`` to be added as the header file. The implementation also use C++17 features so the host code must be compiled with ``g++ -std=c++17``
+
+As a premise, by default, all XRT native APIs execute from the host-thread, so if an API has synchronous behavior the host-thread blocks until that task is finished. For example 
+
+.. code:: c++
+      :number-lines: 41
+      
+          buffer.sync(XCL_BO_SYNC_BO_TO_DEVICE);
+
+As ``xrt::bo::sync`` is a synchronous API, the host thread blocks until its completion. 
+
+XRT defines a queue with ``xrt::queue`` with the following properties
+
+  - Any task enqueued on the queue runs parallel to the original host-thread. So the host threads does not wait for its completion and can do other tasks in parallel. 
+  - The task enqueued on the queue must be synchronous in nature
+  - All the tasks enqueued on the queue will be completed in the order it is enqueued (strict in-order execution). 
+  - The task enqueued on a queue can be any C++ Callable, which can conveniently be expressed by a C++ lambda
+  - When a synchronous task is enqueued on a queue, an event (``xrt::queue:event``) is returned. The event can be used for multiple purposes, such as: 
+  
+       - The host-thread can wait on that event to synchronize with the ``queue::enqueue(task)`` from where the event was generated. 
+       - The event can be enqueued to other queues to synchronize among the queues 
+       
+Let's understand the above properties by reviewing the examples below
+
+Executing synchronous task asynchronously 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
+.. code:: c++
+      :number-lines: 41
+      
+          auto bo0 = xrt::bo(device, vector_size_bytes, krnl.group_id(0));
+          auto bo0_map = bo0.map<dtype*>();
+          .... // fill buffer content
+
+          xrt::queue my_queue;
+          auto sync_event = queue.enqueue([&bo0] {bo0.sync(XCL_BO_SYNC_BO_TO_DEVICE); });
+
+          myCpuTask(b);  // here we can perform other host task that will run parallel to the above bo::sync task
+          
+          sync_event.wait();  // stall the host-thread till sync operation completes 
+          
+The above code shows the synchronous API ``xrt::bo::sync`` is enqueued through an ``xrt::queue``. The argument of xrt::queue is unnamed callable written using C++ lambda capturing buffer object. This technique is useful to execute any synchronous task asynchronously from the host-thread, and while this task is ongoing, the host-thread can do other operation in parallel (``myCpuTask()`` in the above code). The return type of ``xrt::queue::enqueue()`` is type of ``xrt::queue::event`` which is later synchronized to the host-thread by ``xrt::queue::event::wait()`` blocking function. 
+
+
+Executing multiple tasks through queue 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Every new ``xrt::queue`` can be thought of as a new thread running parallel to the host-thread executing a series of synchronous tasks following the order they were submitted (enqueued) on the queue. For example, let's consider tasks A, B, C and D as below
+   
+    - Task A: Host to device data transfer (buffer bo0)
+    - Task B: Execute the kernel and wait for the kernel to finish execution
+    - Task C: Device to host data transfer (buffer bo_out) 
+    - Task D: Check return data bo_out
+    
+The above four tasks should be executed in-order for correct functionality. To execute them in parallel to the host-thread, these four tasks can be enqueued through a queue as below. 
+
+
+.. code:: c++
+      :number-lines: 41
+      
+        
+          xrt::queue queue;
+          queue.enqueue([&bo0] {bo0.sync(XCL_BO_SYNC_BO_TO_DEVICE); });
+          queue.enqueue([&run] {run.start(); run.wait(); });
+          queue.enqueue([&bo_out] {bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE); });
+          queue.enqueue([&bo_out_map]{my_function_to_check_data(bo_out_map)});
+          
+The user can create and use as many queues in the host code to overlap tasks in parallel. Next, we will see how it is possible to synchronize among the queues using the event. 
+
+
+Using events to synchronize among the queues 
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Let's assume in the above example, it is required to do two host-to-device buffer transfers before the kernel execution. If using a single queue the code would appear as
+
+.. code:: c++
+      :number-lines: 41
+      
+        
+          xrt::queue main_queue;
+          main_queue.enqueue([&bo0] {bo0.sync(XCL_BO_SYNC_BO_TO_DEVICE); });
+          main_queue.enqueue([&bo1] {bo1.sync(XCL_BO_SYNC_BO_TO_DEVICE); });
+          main_queue.enqueue([&run] {run.start(); run.wait(); });
+          main_queue.enqueue([&bo_out] {bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE); });
+
+In the above code, as a single queue (``main_queue``) is used, the host-to-device data transfers for buffer ``bo0`` and ``bo1`` would happen sequentially. In order to do parallel data transfer for ``bo0`` and ``bo1``, a separate queue is needed for one of the buffers, and also it is required to ensure that the kernel executes only after both the buffer transfers are completed. 
+
+.. code:: c++
+      :number-lines: 41
+      
+        
+          xrt::queue main_queue;
+          xrt::queue queue_bo1;
+          main_queue.enqueue([&bo0] {bo0.sync(XCL_BO_SYNC_BO_TO_DEVICE); });
+          auto bo1_event = queue_bo1.enqueue([&bo1] {bo1.sync(XCL_BO_SYNC_BO_TO_DEVICE); });
+          main_queue.enqueue(bo1_event); 
+          main_queue.enqueue([&run] {run.start(); run.wait(); });
+          main_queue.enqueue([&bo_out] {bo_out.sync(XCL_BO_SYNC_BO_FROM_DEVICE); });
+
+In line number 43 and 44 ``bo0`` and ``bo1`` host-to-device data transfers are enqueued through two separate queues to achieve parallel transfers. To synchronize between these two queues the returned event from the ``queue_bo1`` is enqueued in the ``main_queue``, similar to a task enqueue (line 45). As a result, any other task submitted after that event won't execute until the event is finished. So in the above code example, subsequent task in the ``main_queue`` (such as kernel execution) would wait till the ``bo1_event`` is completed. By submitting an event returned from a ``queue::enqueue`` to another queue, we can synchronize among the queues. 
 

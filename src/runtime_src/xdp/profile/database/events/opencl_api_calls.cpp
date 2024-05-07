@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,16 +15,17 @@
  * under the License.
  */
 
-#define XDP_SOURCE
+#define XDP_CORE_SOURCE
 
 #include "xdp/profile/database/events/opencl_api_calls.h"
 
 namespace xdp {
 
   OpenCLAPICall::OpenCLAPICall(uint64_t s_id, double ts, uint64_t /*f_id*/,
-                               uint64_t name, uint64_t q)
+                               uint64_t name, uint64_t q, bool l)
       : APICall(s_id, ts, name, OPENCL_API_CALL),
-        queueAddress(q)
+        queueAddress(q),
+        isLOP(l)
   {
   }
 

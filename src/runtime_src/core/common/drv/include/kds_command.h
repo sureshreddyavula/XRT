@@ -2,9 +2,11 @@
 /*
  * Xilinx Kernel Driver Scheduler
  *
- * Copyright (C) 2020 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2020-2022 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Authors: min.ma@xilinx.com
+ *          jefflin@amd.com
  *
  * This file is dual-licensed; you may select either the GNU General Public
  * License version 2 or Apache License, Version 2.0.
@@ -13,11 +15,13 @@
 #ifndef _KDS_COMMAND_H
 #define _KDS_COMMAND_H
 
+#include "xgq_cmd_ert.h"
 /* Userspace command format */
 #include "ert.h"
 
 #define REGMAP 0
 #define KEY_VAL 1
+#define XGQ_CMD 2
 
 enum kds_opcode {
 	OP_NONE = 0,
@@ -38,6 +42,7 @@ enum kds_opcode {
  * KDS_ERROR:		Command is error out
  * KDS_ABORT:		Command is abort
  * KDS_TIMEOUT:		Command is timeout
+ * KDS_SKCRASHED:	Command is PS kernel crashed
  */
 enum kds_status {
 	KDS_NEW = 0,
@@ -47,13 +52,14 @@ enum kds_status {
 	KDS_ERROR,
 	KDS_ABORT,
 	KDS_TIMEOUT,
-	KDS_STAT_MAX,
+	KDS_SKCRASHED,
+	KDS_STAT_MAX,  // Always the last one
 };
 
 struct kds_command;
 
 struct kds_cmd_ops {
-	void (*notify_host)(struct kds_command *xcmd, int status);
+	void (*notify_host)(struct kds_command *xcmd, enum kds_status status);
 	void (*free)(struct kds_command *xcmd);
 };
 
@@ -68,32 +74,39 @@ struct in_kernel_cb {
 /**
  * struct kds_command: KDS command struct
  * @client: the client that the command belongs to
+ * @hw_ctx_id: This command specific to this hw context
  * @type:   type of the command. Use this to determin controller
  */
 struct kds_command {
 	struct kds_client	*client;
-	int			 status;
+	enum kds_status		 status;
+	u32			 rcode;
 	int			 cu_idx;
+	u32			 hw_ctx_id;
 	u32			 type;
 	u32			 opcode;
 	struct list_head	 list;
+	u32			 payload_alloc;
+	u32			 payload_type;
 	void			*info;
 	size_t			 isize;
-	/* TODO: may rethink if we should have cu bit mask here
-	 * or move it to info.
-	 * Since NO all types of command have cu_mask
-	 */
-	u32			 cu_mask[4];
-	u32			 num_mask;
-	u32			 payload_type;
-	u64			 start;
+	void                    *response;
+	size_t                   response_size;
+	struct kds_cmd_ops	 cb;
 	void			*priv;
 
 	unsigned int		 tick;
 	u32			 timestamp_enabled;
 	u64			 timestamp[KDS_STAT_MAX];
 
-	struct kds_cmd_ops	 cb;
+	/* TODO: may rethink if we should have cu bit mask here
+	 * or move it to info.
+	 * Since NO all types of command have cu_mask
+	 */
+	u32			 cu_mask[4];
+	u32			 num_mask;
+	u64			 start;
+
 	/* execbuf is used to update the header
 	 * of execbuf when notifying host
 	 */
@@ -111,6 +124,8 @@ void set_xcmd_timestamp(struct kds_command *xcmd, enum kds_status s);
 void cfg_ecmd2xcmd(struct ert_configure_cmd *ecmd,
 		   struct kds_command *xcmd);
 void start_krnl_ecmd2xcmd(struct ert_start_kernel_cmd *ecmd,
+			  struct kds_command *xcmd);
+void start_skrnl_ecmd2xcmd(struct ert_start_kernel_cmd *ecmd,
 			  struct kds_command *xcmd);
 void start_krnl_kv_ecmd2xcmd(struct ert_start_kernel_cmd *ecmd,
 			     struct kds_command *xcmd);

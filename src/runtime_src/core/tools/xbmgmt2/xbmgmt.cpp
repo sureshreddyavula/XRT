@@ -1,60 +1,77 @@
-/**
- * Copyright (C) 2019-2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2022 Xilinx, Inc
+// Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
 
 // Sub Commands
+#include "SubCmdAdvanced.h"
+#include "SubCmdConfigure.h"
+#include "SubCmdDump.h"
+#include "SubCmdExamine.h"
 #include "SubCmdProgram.h"
 #include "SubCmdReset.h"
-#include "SubCmdExamine.h"
-#include "SubCmdAdvanced.h"
-#include "SubCmdDump.h"
 
 // Supporting tools
-#include "tools/common/XBMain.h"
-#include "tools/common/SubCmd.h"
 #include "common/error.h"
+#include "tools/common/SubCmd.h"
+#include "tools/common/XBMain.h"
+#include "tools/common/XBUtilities.h"
 
 #include "xrt.h"
 
 // System include files
-#include <boost/filesystem.hpp>
-#include <string>
-#include <iostream>
+#include <boost/property_tree/json_parser.hpp>
+#include <boost/property_tree/ptree.hpp>
 #include <exception>
+#include <filesystem>
+#include <iostream>
+#include <string>
+
+
+const std::string& command_config = 
+R"(
+[{
+  "alveo": [{
+    "examine": [{
+      "report": ["cmc", "firewall", "host", "mailbox", "mechanical", "platform", "vmr"]
+    }]
+  },{
+    "configure": [{
+      "suboption": ["input", "retention"]
+    }]
+  },{
+    "advanced":[{
+      "suboption": ["hotplug"]
+    }]
+  },{
+    "program":[{
+      "suboption": ["base", "shell", "revert-to-golden", "user", "boot"]
+    }]
+  },{
+    "reset": [{}]
+  },{
+    "dump": [{}]
+  }]
+}]
+)";
 
 // Program entry
 int main( int argc, char** argv )
 {
-  // force linking with libxrt_core
-  // find a way in CMake to specify -undef <symbol>
-  try{
-    xclProbe();
-  } catch (...) {
-    xrt_core::send_exception_message("xclProbe failed");
-  }
-
   // -- Build the supported subcommands
   SubCmdsCollection subCommands;
 
+  boost::property_tree::ptree configTree;
+  std::istringstream command_config_stream(command_config);
+  boost::property_tree::read_json(command_config_stream, configTree);
+
   {
     // Syntax: SubCmdClass( IsHidden, IsDepricated, IsPreliminary)
-    subCommands.emplace_back(std::make_shared<   SubCmdProgram  >(false, false, false));
+    subCommands.emplace_back(std::make_shared<   SubCmdProgram  >(false, false, false, configTree));
     subCommands.emplace_back(std::make_shared<     SubCmdReset  >(false, false, false));
-    subCommands.emplace_back(std::make_shared<  SubCmdAdvanced  >(false, false,  true));
-    subCommands.emplace_back(std::make_shared<   SubCmdExamine  >(false, false, false));
+    subCommands.emplace_back(std::make_shared<  SubCmdAdvanced  >(false, false,  true, configTree));
+    subCommands.emplace_back(std::make_shared<   SubCmdExamine  >(false, false, false, configTree));
     subCommands.emplace_back(std::make_shared<      SubCmdDump  >(false, false, false));
+    subCommands.emplace_back(std::make_shared< SubCmdConfigure  >(false, false, false, configTree));
   }
 
   const std::string executable = "xbmgmt";
@@ -69,13 +86,15 @@ int main( int argc, char** argv )
 
   // -- Ready to execute the code
   try {
-    main_( argc, argv, executable, description, subCommands);
+    main_( argc, argv, executable, description, subCommands, configTree);
     return 0;
   } catch (const xrt_core::error& e) {
     // Clean exception exit
     // If the exception is "operation_canceled" then don't print the header debug info
     if (e.code().value() != static_cast<int>(std::errc::operation_canceled))
       xrt_core::send_exception_message(e.what(), executable.c_str());
+    else
+      XBUtilities::print_exception(e);
   } catch (const std::exception &e) {
     xrt_core::send_exception_message(e.what(), executable.c_str());
   } catch (...) {

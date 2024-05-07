@@ -1,19 +1,6 @@
-/**
- * Copyright (C) 2016-2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2016-2020 Xilinx, Inc
+// Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
 #ifndef xrt_device_device_h_
 #define xrt_device_device_h_
 
@@ -21,6 +8,7 @@
 #include "xrt/device/hal.h"
 #include "xrt/util/range.h"
 #include "core/common/device.h"
+#include "core/include/xdp/common.h"
 #include "xclbin.h"
 #include "ert.h"
 
@@ -53,15 +41,6 @@ public:
   using direction = hal::device::direction;
   using memoryDomain = hal::device::Domain;
   using queue_type = hal::queue_type;
-  using stream_handle = hal::StreamHandle;
-  using stream_flags = hal::StreamFlags;
-  using stream_attrs = hal::StreamAttributes;
-  using stream_xfer_flags = hal::StreamXferFlags;
-  using stream_buf = hal::StreamBuf;
-  using stream_buf_handle = hal::StreamBufHandle;
-
-  using stream_xfer_req = hal::StreamXferReq;
-  using stream_xfer_completions = hal::StreamXferCompletions;
   using device_handle = hal::device_handle;
 
   explicit
@@ -74,7 +53,7 @@ public:
     : m_hal(std::move(rhs.m_hal)), m_setup_done(rhs.m_setup_done)
   {}
 
-  ~device()
+  virtual ~device()
   {}
 
   device(const device &dev) = delete;
@@ -305,11 +284,6 @@ public:
   copy(const buffer_object_handle& dst_bo, const buffer_object_handle& src_bo, size_t sz, size_t dst_offset, size_t src_offset)
   { return m_hal->copy(dst_bo,src_bo,sz,dst_offset,src_offset); }
 
-  void
-  fill_copy_pkt(const buffer_object_handle& dst_bo, const buffer_object_handle& src_bo
-                ,size_t sz, size_t dst_offset, size_t src_offset,ert_start_copybo_cmd* pkt)
-  { return m_hal->fill_copy_pkt(dst_bo,src_bo,sz,dst_offset,src_offset,pkt); }
-
   /**
    * Read a device register
    *
@@ -479,67 +453,6 @@ public:
   write_cache(const buffer_object_handle& bo,void* user);
 #endif
 
-//Streaming APIs
-  int
-  createWriteStream(hal::StreamFlags flags, hal::StreamAttributes attr, uint64_t route, uint64_t flow, hal::StreamHandle *stream)
-  {
-    return m_hal->createWriteStream(flags, attr, route, flow, stream);
-  }
-
-  int
-  createReadStream(hal::StreamFlags flags, hal::StreamAttributes attr, uint64_t route, uint64_t flow, hal::StreamHandle *stream)
-  {
-    return m_hal->createReadStream(flags, attr, route, flow, stream);
-  };
-
-  int
-  closeStream(hal::StreamHandle stream)
-  {
-    return m_hal->closeStream(stream);
-  };
-
-  int
-  setStreamOpt(hal::StreamHandle stream, int type, uint32_t val)
-  {
-    return m_hal->setStreamOpt(stream, type, val);
-  }
-
-  int
-  pollStream(hal::StreamHandle stream, hal::StreamXferCompletions* comps, int min, int max, int* actual, int timeout)
-  {
-    return m_hal->pollStream(stream, comps, min,max,actual,timeout);
-  };
-
-  hal::StreamBuf
-  allocStreamBuf(size_t size, hal::StreamBufHandle *buf)
-  {
-    return m_hal->allocStreamBuf(size, buf);
-  };
-
-  int
-  freeStreamBuf(hal::StreamBufHandle buf)
-  {
-    return m_hal->freeStreamBuf(buf);
-  };
-
-  ssize_t
-  writeStream(hal::StreamHandle stream, const void* ptr, size_t size, hal::StreamXferReq* req)
-  {
-    return m_hal->writeStream(stream, ptr, size, req);
-  };
-
-  ssize_t
-  readStream(hal::StreamHandle stream, void* ptr, size_t size, hal::StreamXferReq* req)
-  {
-    return m_hal->readStream(stream, ptr, size, req);
-  };
-
-  int
-  pollStreams(hal::StreamXferCompletions* comps, int min, int max, int* actual, int timeout)
-  {
-    return m_hal->pollStreams(comps, min,max,actual,timeout);
-  };
-
 private:
   void retain(const buffer_object_handle& bo)
   {
@@ -659,13 +572,13 @@ public:
 
   // Following functions are undocumented profiling functions
   hal::operations_result<size_t>
-  clockTraining(xclPerfMonType type)
+  clockTraining(xdp::MonitorType type)
   {
     return m_hal->clockTraining(type);
   }
 
   hal::operations_result<uint32_t>
-  countTrace(xclPerfMonType type)
+  countTrace(xdp::MonitorType type)
   {
     return m_hal->countTrace(type);
   }
@@ -683,19 +596,31 @@ public:
   }
 
   hal::operations_result<double>
-  getDeviceMaxRead()
+  getHostMaxRead()
   {
-    return m_hal->getDeviceMaxRead();
+    return m_hal->getHostMaxRead();
   }
 
   hal::operations_result<double>
-  getDeviceMaxWrite()
+  getHostMaxWrite()
   {
-    return m_hal->getDeviceMaxWrite();
+    return m_hal->getHostMaxWrite();
+  }
+
+  hal::operations_result<double>
+  getKernelMaxRead()
+  {
+    return m_hal->getKernelMaxRead();
+  }
+
+  hal::operations_result<double>
+  getKernelMaxWrite()
+  {
+    return m_hal->getKernelMaxWrite();
   }
 
   hal::operations_result<size_t>
-  readCounters(xclPerfMonType type, xclCounterResults& result)
+  readCounters(xdp::MonitorType type, xdp::CounterResults& result)
   {
     return m_hal->readCounters(type,result);
   }
@@ -707,7 +632,7 @@ public:
   }
 
   hal::operations_result<size_t>
-  readTrace(xclPerfMonType type, xclTraceResultsVector& vec)
+  readTrace(xdp::MonitorType type, xdp::TraceEventsVector& vec)
   {
     return m_hal->readTrace(type,vec);
   }
@@ -731,56 +656,56 @@ public:
   }
 
   hal::operations_result<void>
-  setProfilingSlots(xclPerfMonType type, uint32_t slots)
+  setProfilingSlots(xdp::MonitorType type, uint32_t slots)
   {
     return m_hal->setProfilingSlots(type, slots);
   }
 
   hal::operations_result<uint32_t>
-  getProfilingSlots(xclPerfMonType type)
+  getProfilingSlots(xdp::MonitorType type)
   {
     return m_hal->getProfilingSlots(type);
   }
 
   hal::operations_result<void>
-  getProfilingSlotName(xclPerfMonType type, uint32_t slotnum,
+  getProfilingSlotName(xdp::MonitorType type, uint32_t slotnum,
                        char* slotName, uint32_t length)
   {
     return m_hal->getProfilingSlotName(type, slotnum, slotName, length);
   }
 
   hal::operations_result<uint32_t>
-  getProfilingSlotProperties(xclPerfMonType type, uint32_t slotnum)
+  getProfilingSlotProperties(xdp::MonitorType type, uint32_t slotnum)
   {
     return m_hal->getProfilingSlotProperties(type, slotnum);
   }
 
   hal::operations_result<void>
-  configureDataflow(xclPerfMonType type, unsigned *ip_config)
+  configureDataflow(xdp::MonitorType type, unsigned *ip_config)
   {
     return m_hal->configureDataflow(type, ip_config);
   }
 
   hal::operations_result<size_t>
-  startCounters(xclPerfMonType type)
+  startCounters(xdp::MonitorType type)
   {
     return m_hal->startCounters(type);
   }
 
   hal::operations_result<size_t>
-  startTrace(xclPerfMonType type, uint32_t options)
+  startTrace(xdp::MonitorType type, uint32_t options)
   {
     return m_hal->startTrace(type,options);
   }
 
   hal::operations_result<size_t>
-  stopCounters(xclPerfMonType type)
+  stopCounters(xdp::MonitorType type)
   {
     return m_hal->stopCounters(type);
   }
 
   hal::operations_result<size_t>
-  stopTrace(xclPerfMonType type)
+  stopTrace(xdp::MonitorType type)
   {
     return m_hal->stopTrace(type);
   }

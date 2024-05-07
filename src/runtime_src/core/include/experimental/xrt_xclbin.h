@@ -1,22 +1,12 @@
 /*
- * Copyright (C) 2020-2021, Xilinx Inc - All rights reserved
- * Xilinx Runtime (XRT) Experimental APIs
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
+ * Copyright (C) 2020-2022 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. All rights reserved.
+ * SPDX-License-Identifier: Apache-2.0
  */
-
 #ifndef XRT_XCLBIN_H_
 #define XRT_XCLBIN_H_
+
+#include "xrt/detail/config.h"
 
 #include "xrt.h"
 #include "xclbin.h"
@@ -24,6 +14,7 @@
 #include "xrt/detail/pimpl.h"
 
 #ifdef __cplusplus
+# include <iterator>
 # include <utility>
 # include <vector>
 # include <string>
@@ -45,7 +36,7 @@ namespace xrt {
  *
  * @details
  * The xclbin object is constructed by the user from a file.
- * 
+ *
  * When the xclbin object is constructed from a complete xclbin, then it
  * can be used by xrt::device to program the xclbin onto the device.
  *
@@ -57,7 +48,7 @@ namespace xrt {
  *
  * From the xclbin object
  * xrt::xclbin::kernel or xrt::xclbin::ip objects can be constructed.
- * 
+ *
  * The xrt:xclbin::kernel is a concept modelled only in the xclbin XML
  * metadata, it corresponds to a function that can be executed by one
  * or more compute units modelled by xrt::xclbin::ip objects.  An
@@ -84,6 +75,18 @@ class xclbin : public detail::pimpl<xclbin_impl>
 {
 public:
   /*!
+   * @enum target_type
+   *
+   * @brief
+   * Type of xclbin
+   *
+   * @details
+   * See `xclbin.h`
+   */
+  enum class target_type { hw, sw_emu, hw_emu };
+
+public:
+  /*!
    * @class mem
    *
    * @brief
@@ -98,7 +101,7 @@ public:
   {
   public:
     /**
-     * @enum memory_type - type of memory 
+     * @enum memory_type - type of memory
      *
      * @details
      * See `xclbin.h`
@@ -116,8 +119,10 @@ public:
       streaming_connection = MEM_STREAMING_CONNECTION,
       host                 = MEM_HOST
     };
-  
+
   public:
+    mem() = default;
+
     explicit
     mem(std::shared_ptr<mem_impl> handle)
       : detail::pimpl<mem_impl>(std::move(handle))
@@ -129,17 +134,17 @@ public:
      * @return
      *   Memory tag name
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     std::string
     get_tag() const;
 
     /**
      * get_base_address() - Get the base address of the memory bank
      *
-     * @return 
+     * @return
      *  Base address of the memory bank, or -1 for invalid base address
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     uint64_t
     get_base_address() const;
 
@@ -149,7 +154,7 @@ public:
      * @return
      *  Size of memory in KB, or -1 for invalid size
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     uint64_t
     get_size_kb() const;
 
@@ -158,12 +163,12 @@ public:
      *
      * @return
      *  True of this memory bank is used by kernels in the xclbin
-     *  or false otherwise.  
+     *  or false otherwise.
      *
      * A value of false indicates that no buffer can be allocated
      * in this memory bank.
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     bool
     get_used() const;
 
@@ -174,20 +179,20 @@ public:
      *  Memory type
      *
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     memory_type
     get_type() const;
 
     /**
      * get_index() - Get the index of the memory
      *
-     * @return 
+     * @return
      *  Index of the memory within the memory topology
      *
      * The returned index can be used when allocating buffers using
      * \ref xrt::bo provided the memory bank is connected / used.
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     int32_t
     get_index() const;
   };
@@ -198,11 +203,11 @@ public:
    * @brief
    * class arg - xrt::xclbin::arg represents a compute unit argument
    *
-   * @details 
+   * @details
    * The argument object constructed from the xclbin connectivity
    * section.  An argument is connected to a memory bank or a memory
    * group, which dictates where in device memory a global buffer
-   * used with this kernel argument must be allocated.  
+   * used with this kernel argument must be allocated.
    */
   class arg_impl;
   class arg : public detail::pimpl<arg_impl>
@@ -222,7 +227,7 @@ public:
      *  Name of argument.
      *
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     std::string
     get_name() const;
 
@@ -233,7 +238,7 @@ public:
      *  A list of xrt::xclbin::mem objects to which this argument
      *  is connected.
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     std::vector<mem>
     get_mems() const;
 
@@ -243,54 +248,81 @@ public:
      * @return
      *  Port name
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     std::string
     get_port() const;
 
     /**
      * get_size() - Argument size in bytes
-     * 
+     *
      * @return
      *   Argument size
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     uint64_t
     get_size() const;
 
     /**
      * get_offset() - Argument offset
-     * 
+     *
      * @return
      *   Argument offset
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     uint64_t
     get_offset() const;
 
     /**
      * get_host_type() - Get the argument host type
-     * 
+     *
      * @return
      *   Argument host type
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     std::string
     get_host_type() const;
+
+    /**
+     * get_index() - Get the index of this argument
+     *
+     * @return
+     *   Argument index
+     */
+    XRT_API_EXPORT
+    size_t
+    get_index() const;
   };
 
   /*!
-   * @class ip 
+   * @class ip
    *
-   * @brief 
+   * @brief
    * xrt::xclbin::ip represents a IP in an xclbin.
    *
    * @details
    * The ip corresponds to an entry in the IP_LAYOUT section of the
-   * xclbin.  
+   * xclbin.
    */
   class ip_impl;
   class ip : public detail::pimpl<ip_impl>
   {
+  public:
+    /**
+     * @enum control_type -
+     *
+     * @details
+     * See `xclbin.h`
+     */
+    enum class control_type : uint8_t { hs = 0, chain = 1, none = 2, fa = 5 };
+
+    /**
+     * @enum ip_type
+     *
+     * @details
+     * See `xclbin.h`
+     */
+    enum class ip_type : uint8_t { pl = IP_KERNEL, ps = IP_PS_KERNEL };
+
   public:
     ip() = default;
 
@@ -305,9 +337,29 @@ public:
      * @return
      *  IP name.
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     std::string
     get_name() const;
+
+    /**
+     * get_type() - Get the IP type
+     *
+     * @return
+     *  IP type
+     */
+    XRT_API_EXPORT
+    ip_type
+    get_type() const;
+
+    /**
+     * get_control_type() - Get the IP control protocol
+     *
+     * @return
+     *  Control type
+     */
+    XRT_API_EXPORT
+    control_type
+    get_control_type() const;
 
     /**
      * get_num_args() - Number of arguments
@@ -315,7 +367,7 @@ public:
      * @return
      *  Number of arguments for this IP per CONNECTIVITY section
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     size_t
     get_num_args() const;
 
@@ -327,19 +379,21 @@ public:
      *
      * An argument may have multiple memory connections
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     std::vector<arg>
     get_args() const;
 
     /**
      * get_arg() - Get argument at index.
      *
+     * @param index
+     *  Index of argument
      * @return
      *  The argument a specified index
      *
      * The argument may have multiple memory connections
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     arg
     get_arg(int32_t index) const;
 
@@ -349,9 +403,25 @@ public:
      * @return
      *  The base address of the IP
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     uint64_t
     get_base_address() const;
+
+    /**
+     * get_size() - Get the address range size of this IP.
+     *
+     * @return
+     *  The size of this IP
+     *
+     * The address range is a property of the kernel and
+     * as such only valid for for kernel compute units.
+     *
+     * For IPs that are not associated with a kernel, the
+     * size return is 0.
+     */
+    XRT_API_EXPORT
+    size_t
+    get_size() const;
   };
 
   /*!
@@ -370,6 +440,14 @@ public:
   class kernel : public detail::pimpl<kernel_impl>
   {
   public:
+    /**
+     * @enum kernel_type
+     *
+     * The kernel type is extracted from the XML kernel meta data section
+     */
+    enum class kernel_type : uint8_t { none = 0, pl = 1, ps = 2, dpu = 3};
+    
+  public:
     kernel() = default;
 
     explicit
@@ -383,9 +461,19 @@ public:
      * @return
      *  The name of the kernel
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     std::string
     get_name() const;
+
+    /**
+     * get_type() - Get kernel type
+     *
+     * @return
+     *  The type of the kernel
+     */
+    XRT_API_EXPORT
+    kernel_type
+    get_type() const;
 
     /**
      * get_cus() - Get list of cu from kernel.
@@ -394,18 +482,34 @@ public:
      *  A list of xrt::xclbin::ip objects corresponding the compute units
      *  for this kernel object.
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     std::vector<ip>
     get_cus() const;
+
+    /**
+     * get_cus() - Get list of compute units that matches name
+     *
+     * @param name
+     *  Name to match against, prefixed with kernel name
+     * @return
+     *  A list of xrt::xclbin::ip objects that are compute units
+     *  of this kernel object and matches the specified name.
+     *
+     * The kernel name can optionally specify which kernel instance(s) to
+     * match "kernel:{cu1,cu2,...} syntax.
+     */
+    XRT_API_EXPORT
+    std::vector<ip>
+    get_cus(const std::string& name) const;
 
     /**
      * get_cu() - Get compute unit by name
      *
      * @return
-     *  The xct::xclbin::ip object matching the specified name, or error if 
+     *  The xct::xclbin::ip object matching the specified name, or error if
      *  not present.
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     ip
     get_cu(const std::string& name) const;
 
@@ -415,7 +519,7 @@ public:
      * @return
      *  Number of arguments for this kernel.
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     size_t
     get_num_args() const;
 
@@ -427,7 +531,7 @@ public:
      *
      * An argument may have multiple memory connections
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     std::vector<arg>
     get_args() const;
 
@@ -443,10 +547,35 @@ public:
      * by ``get_arg()`` there is at least one compute unit that has
      * that connection.
      */
-    XCL_DRIVER_DLLESPEC
+    XRT_API_EXPORT
     arg
     get_arg(int32_t index) const;
   };
+
+  /// @cond
+  /** undocumented access to aie metadata, subject to change **/
+  class aie_partition_impl;
+  class aie_partition : detail::pimpl<aie_partition_impl>
+  {
+  public:
+    explicit
+    aie_partition(std::shared_ptr<aie_partition_impl> handle)
+      : detail::pimpl<aie_partition_impl>(std::move(handle))
+    {}
+
+    XRT_API_EXPORT
+    uint64_t
+    get_inference_fingerprint() const;
+
+    XRT_API_EXPORT
+    uint64_t
+    get_pre_post_fingerprint() const;
+
+    XRT_API_EXPORT
+    uint32_t
+    get_operations_per_cycle() const;
+  };
+  /// @endcond
 
 public:
   /**
@@ -467,12 +596,18 @@ public:
   /**
    * xclbin() - Constructor from an xclbin filename
    *
-   * @param filename
-   *  Path to the xclbin file
    *
-   * Throws if file not found.
+   * @param filename : A path relative or absolute to an xclbin file
+   *
+   * If the specified path is an absolute path then the function
+   * returns this path or throws if file does not exist.  If the path
+   * is relative, or just a plain file name, then the function check
+   * first in current directory, then in the platform specific xclbin
+   * repository. 
+   *
+   * Throws if file could not be found.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   explicit
   xclbin(const std::string& filename);
 
@@ -485,7 +620,7 @@ public:
    * The raw data of the xclbin can be deleted after calling the
    * constructor.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   explicit
   xclbin(const std::vector<char>& data);
 
@@ -497,7 +632,7 @@ public:
    *
    * The argument axlf is copied by the constructor.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   explicit
   xclbin(const axlf* top);
 
@@ -511,7 +646,7 @@ public:
    * A kernel groups one or more compute units. A kernel has arguments
    * from which offset, type, etc can be retrived.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   std::vector<kernel>
   get_kernels() const;
 
@@ -528,7 +663,7 @@ public:
    * xclbin.  A kernel groups one or more compute units. A kernel has
    * arguments from which offset, type, etc can be retrived.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   kernel
   get_kernel(const std::string& name) const;
 
@@ -541,9 +676,25 @@ public:
    * The returned xrt::xclbin::ip objects are extracted from the
    * IP_LAYOUT section of the xclbin.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   std::vector<ip>
   get_ips() const;
+
+  /**
+   * get_ips() - Get list of ips that matches name
+   *
+   * @param name
+   *  Name to match against, prefixed with kernel name
+   * @return
+   *  A list of xrt::xclbin::ip objects that are compute units
+   *  of this kernel object and matches the specified name.
+   *
+   * The kernel name can optionally specify which kernel instance(s) to
+   * match "kernel:{ip1,ip2,...} syntax.
+   */
+  XRT_API_EXPORT
+  std::vector<ip>
+  get_ips(const std::string& name) const;
 
   /**
    * get_ip() - Get a specific IP from the xclbin
@@ -554,7 +705,7 @@ public:
    * The returned xrt::xclbin::ip object is extracted from the
    * IP_LAYOUT section of the xclbin.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   ip
   get_ip(const std::string& name) const;
 
@@ -567,47 +718,265 @@ public:
    * The returned xrt::xclbin::mem objects are extracted from
    * the xclbin.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   std::vector<mem>
   get_mems() const;
+
+  /// @cond
+  XRT_API_EXPORT
+  std::vector<aie_partition>
+  get_aie_partitions() const;
+  /// @endcond
 
   /**
    * get_xsa_name() - Get Xilinx Support Archive (XSA) name of xclbin
    *
-   * @return 
+   * @return
    *  Name of XSA (vbnv name).
    *
    * An exception is thrown if the data is missing.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   std::string
   get_xsa_name() const;
 
   /**
+   * get_fpga_device_name() - Get FPGA device name
+   *
+   * @return
+   *  Name of fpga device per XML metadata.
+   */
+  XRT_API_EXPORT
+  std::string
+  get_fpga_device_name() const;
+
+  /**
    * get_uuid() - Get the uuid of the xclbin
    *
-   * @return 
+   * @return
    *  UUID of xclbin
    *
    * An exception is thrown if the data is missing.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   uuid
   get_uuid() const;
 
   /**
+  * get_interface_uuid() - Get the interface uuid of the xclbin
+  *
+  * @return
+  *  Interface uuid of the xclbin
+  *
+  * An exception is thrown if the data is missing.
+  */
+  XRT_API_EXPORT
+  uuid
+  get_interface_uuid() const;
+
+  /**
+   * get_target_type() - Get the type of this xclbin
+   *
+   * @return
+   *  Target type, which can be hw, sw_emu, or hw_emu
+   */
+  XRT_API_EXPORT
+  target_type
+  get_target_type() const;
+
+  /// @cond
+  /**
    * get_axlf() - Get the axlf data of the xclbin
    *
-   * @return 
+   * @return
    *  The axlf data of the xclbin object
    *
    * An exception is thrown if the data is missing.
    */
-  XCL_DRIVER_DLLESPEC
+  XRT_API_EXPORT
   const axlf*
   get_axlf() const;
 
+  /**
+   * get_axlf_section() - Retrieve specified xclbin section
+   *
+   * @param section
+   *  The section to retrieve
+   * @return
+   *  The specified section if available cast to specified type.
+   *  Note, that this is an unsafe cast, behavior is undefined if the
+   *  specified SectionType is invalid.
+   *
+   * The SectionType template parameter is an axlf type from xclbin.h
+   * and it much match the type of the section data retrieved.
+   *
+   * Throws if requested section does not exist in the xclbin.
+   */
+  template <typename SectionType>
+  SectionType
+  get_axlf_section(axlf_section_kind section) const
+  {
+    return reinterpret_cast<SectionType>(get_axlf_section(section).first);
+  }
+  /// @endcond
+
+private:
+  XRT_API_EXPORT
+  std::pair<const char*, size_t>
+  get_axlf_section(axlf_section_kind section) const;
 };
+
+/**
+ * xclbin_repository - Repository of xclbins
+ *
+ * A repository of xclbins is a collection of xclbins that can be
+ * searched for a specific xclbin through iteration.
+ *
+ * The location of a repository is specified by a directory or it
+ * can be implementations and platform specific.
+ */
+class xclbin_repository_impl;
+class xclbin_repository : public detail::pimpl<xclbin_repository_impl>
+{
+public:
+  /**
+   * xclbin_repository - Default constructor
+   *
+   * Create repository from builtin platform specific repository
+   * path or paths.
+   */
+  XRT_API_EXPORT
+  xclbin_repository();
+
+  /**
+   * xclbin_repository - 
+   *
+   * Create repository from specified path.
+   *
+   * The specified directory can be an absolute path to a directory or
+   * it can be a relative path to a directory rooted at the current
+   * working directory.
+   */
+  XRT_API_EXPORT
+  explicit
+  xclbin_repository(const std::string& dir);
+
+  /**
+   * iterator - Iterator over xclbins in repository
+   *
+   * The iterator is a forward iterator that iterates over the
+   * xclbins in the repository.  The iterator dereferences to an
+   * xrt::xclbin object by value.
+   */
+  class iterator_impl;
+  class iterator : public detail::pimpl<iterator_impl>
+  {
+  public:
+    using iterator_category = std::forward_iterator_tag;
+    using difference_type   = std::ptrdiff_t;
+    using value_type        = xclbin;
+    using pointer           = value_type;
+    using reference         = value_type;
+
+  public:
+    /**
+     * iterator - Default constructor from implmentation
+     */
+    iterator(std::shared_ptr<iterator_impl> handle)
+      : detail::pimpl<iterator_impl>(std::move(handle))
+    {}
+
+    /**
+     * iterator - Copy constructor
+     *
+     * Create a copy of an iterator
+     */
+    XRT_API_EXPORT
+    iterator(const iterator&);
+
+    /**
+     * Advance iterator to next xclbin
+     */
+    XRT_API_EXPORT
+    iterator&
+    operator++();
+
+    /**
+     * Advance iterator to next xclbin return old iterator
+     *
+     * This is a relatively expensive operation that duplicates
+     * the internal representation of the original iterator.
+     */
+    XRT_API_EXPORT
+    iterator
+    operator++(int);
+
+    /**
+     * Compare iterators
+     */
+    XRT_API_EXPORT
+    bool
+    operator==(const iterator& rhs) const;
+
+    /**
+     * Compare iterators
+     */
+    bool
+    operator!=(const iterator& rhs) const
+    {
+      return !(*this == rhs);
+    }
+
+    /**
+     * Dereference iterator
+     *
+     * Returns xrt::xclbin object by value.  The xclbin object
+     * is constructed on the fly.
+     */
+    XRT_API_EXPORT
+    value_type
+    operator*() const;
+
+    /**
+     * Dereference iterator
+     *
+     * Returns xrt::xclbin object by value.  The xclbin object
+     * is constructed on the fly.
+     */
+    XRT_API_EXPORT
+    value_type
+    operator->() const;
+
+    /**
+     * Get path to xclbin file path in repository for this iterator
+     */
+    XRT_API_EXPORT
+    std::string
+    path() const;
+  };
+
+  /**
+   * begin() - Get iterator to first xclbin in repository
+   */
+  XRT_API_EXPORT
+  iterator
+  begin() const;
+
+  /**
+   * end() - Get iterator to end of xclbin repository
+   */
+  XRT_API_EXPORT
+  iterator
+  end() const;
+
+  /**
+   * load() - Load xclbin from repository
+   */
+  XRT_API_EXPORT
+  xclbin
+  load(const std::string& name) const;
+};
+
 } // namespace xrt
 
 /// @cond
@@ -620,7 +989,7 @@ extern "C" {
  * @filename:      path to the xclbin file
  * Return:         xrtXclbinHandle on success or NULL with errno set
  */
-XCL_DRIVER_DLLESPEC
+XRT_API_EXPORT
 xrtXclbinHandle
 xrtXclbinAllocFilename(const char* filename);
 
@@ -631,7 +1000,7 @@ xrtXclbinAllocFilename(const char* filename);
  * @top_axlf:      an axlf
  * Return:         xrtXclbinHandle on success or NULL with errno set
  */
-XCL_DRIVER_DLLESPEC
+XRT_API_EXPORT
 xrtXclbinHandle
 xrtXclbinAllocAxlf(const struct axlf* top_axlf);
 
@@ -642,7 +1011,7 @@ xrtXclbinAllocAxlf(const struct axlf* top_axlf);
  * @size:          size (in bytes) of raw data buffer of xclbin
  * Return:         xrtXclbinHandle on success or NULL with errno set
  */
-XCL_DRIVER_DLLESPEC
+XRT_API_EXPORT
 xrtXclbinHandle
 xrtXclbinAllocRawData(const char* data, int size);
 
@@ -652,7 +1021,7 @@ xrtXclbinAllocRawData(const char* data, int size);
  * @xhdl:          xclbin handle
  * Return:         0 on success, -1 on error
  */
-XCL_DRIVER_DLLESPEC
+XRT_API_EXPORT
 int
 xrtXclbinFreeHandle(xrtXclbinHandle xhdl);
 
@@ -669,7 +1038,7 @@ xrtXclbinFreeHandle(xrtXclbinHandle xhdl);
  *              Otherwise, the the content of this value will be populated.
  * Return:  0 on success or appropriate error number
  */
-XCL_DRIVER_DLLESPEC
+XRT_API_EXPORT
 int
 xrtXclbinGetXSAName(xrtXclbinHandle xhdl, char* name, int size, int* ret_size);
 
@@ -680,39 +1049,35 @@ xrtXclbinGetXSAName(xrtXclbinHandle xhdl, char* name, int size, int* ret_size);
  * @ret_uuid: Return xclbin id in this uuid_t struct
  * Return:    0 on success or appropriate error number
  */
-XCL_DRIVER_DLLESPEC
+XRT_API_EXPORT
 int
 xrtXclbinGetUUID(xrtXclbinHandle xhdl, xuid_t ret_uuid);
 
 /**
  * xrtXclbinGetNumKernels() - Get number of PL kernels in xclbin
  *
- * @param xhdl
- *  Xclbin handle obtained from an xrtXclbinAlloc function
- * @return
- *  The number of PL kernels in the xclbin
+ * @xhdl:   Xclbin handle obtained from an xrtXclbinAlloc function
+ * Return:  The number of PL kernels in the xclbin
  *
  * Kernels are extracted from embedded XML metadata in the xclbin.
  * A kernel groups one or more compute units. A kernel has arguments
  * from which offset, type, etc can be retrived.
  */
-XCL_DRIVER_DLLESPEC
+XRT_API_EXPORT
 size_t
 xrtXclbinGetNumKernels(xrtXclbinHandle xhdl);
 
 /**
  * xrtXclbinGetNumKernelComputeUnits() - Get number of CUs in xclbin
  *
- * @param xhdl
- *  Xclbin handle obtained from an xrtXclbinAlloc function
- * @return
- *  The number of compute units
+ * @xhdl:   Xclbin handle obtained from an xrtXclbinAlloc function
+ * Return:  The number of compute units
  *
  * Compute units are associated with kernels.  This function returns
  * the total number of compute units as the sum of compute units over
  * all kernels.
  */
-XCL_DRIVER_DLLESPEC
+XRT_API_EXPORT
 size_t
 xrtXclbinGetNumKernelComputeUnits(xrtXclbinHandle xhdl);
 
@@ -729,7 +1094,7 @@ xrtXclbinGetNumKernelComputeUnits(xrtXclbinHandle xhdl);
  *              Otherwise, the the content of this value will be populated.
  * Return:  0 on success or appropriate error number
  */
-XCL_DRIVER_DLLESPEC
+XRT_API_EXPORT
 int
 xrtXclbinGetData(xrtXclbinHandle xhdl, char* data, int size, int* ret_size);
 
@@ -740,7 +1105,7 @@ xrtXclbinGetData(xrtXclbinHandle xhdl, char* data, int size, int* ret_size);
  * @out:    Return xclbin id in this uuid_t struct
  * Return:  0 on success or appropriate error number
  */
-XCL_DRIVER_DLLESPEC
+XRT_API_EXPORT
 int
 xrtXclbinUUID(xclDeviceHandle dhdl, xuid_t out);
 

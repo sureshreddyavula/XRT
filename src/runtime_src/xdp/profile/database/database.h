@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -17,15 +18,15 @@
 #ifndef VTF_DATABASE_DOT_H
 #define VTF_DATABASE_DOT_H
 
-#include <vector>
 #include <list>
 #include <map>
-
-#include "xdp/profile/database/statistics_database.h"
-#include "xdp/profile/database/static_info_database.h"
-#include "xdp/profile/database/dynamic_event_database.h"
+#include <memory>
+#include <vector>
 
 #include "xdp/config.h"
+#include "xdp/profile/database/dynamic_event_database.h"
+#include "xdp/profile/database/static_info_database.h"
+#include "xdp/profile/database/statistics_database.h"
 
 namespace xdp {
 
@@ -40,7 +41,7 @@ namespace xdp {
   {
   public:
     // For messages sent to specific plugins
-    enum MessageType { READ_COUNTERS, READ_TRACE } ;
+    enum MessageType { READ_COUNTERS, READ_TRACE, DUMP_TRACE, DUMP_AIE_PROFILE, READ_RECORD_TIMESTAMPS } ;
 
   private:
     // The information stored in the database will be separated into 
@@ -58,7 +59,7 @@ namespace xdp {
     std::list<XDPPlugin*> plugins ;
 
     // The database itself keeps track of the generic summary
-    VPWriter* summary ;
+    std::unique_ptr<VPWriter> summary;
 
     // Additionally, for summary generation, the database must expose
     //  what plugins were loaded and what information is available
@@ -74,9 +75,9 @@ namespace xdp {
     static bool live ;
 
   public:
-    XDP_EXPORT ~VPDatabase() ;
-    XDP_EXPORT static VPDatabase* Instance() ;
-    XDP_EXPORT static bool alive() ;
+    XDP_CORE_EXPORT ~VPDatabase() ;
+    XDP_CORE_EXPORT static VPDatabase* Instance() ;
+    XDP_CORE_EXPORT static bool alive() ;
 
     // Access to the three different types of information
     inline VPStatisticsDatabase& getStats()       { return stats ; }
@@ -89,16 +90,11 @@ namespace xdp {
     inline void registerInfo(uint64_t info)    { pluginInfo |= info ; }
     inline bool infoAvailable(uint64_t info)   { return (pluginInfo&info)!=0; }
 
-    XDP_EXPORT uint64_t addDevice(const std::string&);
-    XDP_EXPORT uint64_t getDeviceId(const std::string&);
-
-    // Functions that provide arbitration between multiple plugins
-    //  for resources that should only exist once regardless of 
-    //  the number of plugins
-    XDP_EXPORT bool claimDeviceOffloadOwnership() ;
+    XDP_CORE_EXPORT uint64_t addDevice(const std::string&);
+    XDP_CORE_EXPORT uint64_t getDeviceId(const std::string&);
 
     // Functions that send messages to registered plugins
-    XDP_EXPORT void broadcast(MessageType msg, void* blob = nullptr);
+    XDP_CORE_EXPORT void broadcast(MessageType msg, void* blob = nullptr);
   } ;
 }
 

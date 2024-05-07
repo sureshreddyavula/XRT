@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -40,8 +40,8 @@ namespace xocl {
     inline void
     set_event_action(xocl::event* e, F&& f, Args&&... args)
     {
-      if (xrt_core::config::get_timeline_trace() ||
-	  xrt_core::config::get_opencl_trace())
+      if (xrt_core::config::get_opencl_trace() ||
+          xrt_core::config::get_host_trace())
 	e->set_profile_action(f(std::forward<Args>(args)...)) ;
     }
 
@@ -60,21 +60,21 @@ namespace xocl {
 
     // Functions used by the host trace plugin
     void log_dependency(uint64_t id, uint64_t dependency) ;
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
       action_read(cl_mem buffer) ;
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
       action_write(cl_mem buffer) ;
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
       action_map(cl_mem buffer, cl_map_flags flags) ;
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
       action_migrate(cl_mem mem0, cl_mem_migration_flags flags) ;
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
       action_ndrange_migrate(cl_event event, cl_kernel kernel) ;
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
       action_ndrange(cl_event event, cl_kernel kernel) ;
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
       action_unmap(cl_mem buffer) ;
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
       action_copy(cl_mem src_buffer, cl_mem dst_buffer) ;
 
     // Functions used by the device trace plugin

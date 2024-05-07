@@ -1,6 +1,7 @@
 /**
  * Copyright (C) 2019 Xilinx, Inc
- *
+ * Copyright (C) 2022 Advanced Micro Devices, Inc.
+ * 
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
  * License is located at
@@ -30,7 +31,11 @@
 #include "core/common/device.h"
 
 // directory where all MCS files are saved
-#define FIRMWARE_DIRS       {"/lib/firmware/xilinx", "/lib/firmware/arista", "C:\\Xilinx"}
+#ifndef _WIN32
+# define FIRMWARE_DIRS       {"/lib/firmware/xilinx", "/lib/firmware/arista"}
+#else
+# define FIRMWARE_DIRS       {"C:\\Xilinx"}
+#endif
 #define FORMATTED_FW_DIR    "/opt/xilinx/firmware"
 #define QSPI_GOLDEN_IMAGE   "BOOT_golden.BIN"	
 #define DSA_FILE_SUFFIX     "mcs"
@@ -80,12 +85,13 @@ enum imageType
     BMC_FIRMWARE,
     MCS_FIRMWARE_PRIMARY,
     MCS_FIRMWARE_SECONDARY,
+    STRIPPED_FIRMWARE
 };
 
 class firmwareImage : public std::istringstream
 {
 public:
-    firmwareImage(const char *file, imageType type);
+    firmwareImage(const std::string& file, imageType type);
     ~firmwareImage();
     static std::vector<DSAInfo> getIntalledDSAs();
 private:

@@ -1,9 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (C) 2019-2021 Xilinx, Inc. All rights reserved.
 #
+
+pkg_check_modules(LIBFFI REQUIRED libffi)
+find_package(libffi REQUIRED)
+
 include_directories(
+  ${BOOST_SYSTEM_INCLUDE_DIRS}
   ${CMAKE_CURRENT_SOURCE_DIR}
   ${CMAKE_CURRENT_SOURCE_DIR}/../include
+  ${LIBFFI_INCLUDE_DIR}
   )
 
 file(GLOB XRT_SKD_FILES
@@ -18,16 +24,18 @@ set(SKD_SRC
 
 add_executable(skd ${SKD_SRC})
 
-add_dependencies(skd 
+add_dependencies(skd
   xrt_core
   xrt_coreutil
   )
 
 target_link_libraries(skd
   PRIVATE
+  ${Boost_SYSTEM_LIBRARY}
   xrt_core
   xrt_coreutil
   dl
+  ${LIBFFI_LDFLAGS}
   )
 
 # This linking with xrt_coreutil resolves link path for indirect link

@@ -1,25 +1,14 @@
-/**
- * Copyright (C) 2019 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019 Xilinx, Inc
+// Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
 #ifndef XRT_CORE_SYSTEM_H
 #define XRT_CORE_SYSTEM_H
 
+// Local - Include files
 #include "config.h"
 #include "device.h"
 
+// 3rd Party Library - Include files
 #include <boost/property_tree/ptree.hpp>
 
 namespace xrt_core {
@@ -39,13 +28,8 @@ protected:
   XRT_CORE_COMMON_EXPORT
   system();
 public:
-  // REMOVE
   virtual void
-  get_xrt_info(boost::property_tree::ptree&) {}
-
-  // REMOVE
-  virtual void
-  get_os_info(boost::property_tree::ptree&) {}
+  get_driver_info(boost::property_tree::ptree&) {}
 
   // REMOVE
   virtual void
@@ -66,6 +50,14 @@ public:
   XRT_CORE_COMMON_EXPORT
   virtual device::id_type
   get_device_id(const std::string& str) const;
+
+  /**
+   */
+  virtual std::tuple<uint16_t, uint16_t, uint16_t, uint16_t>
+  get_bdf_info(device::id_type, bool) const
+  {
+    return std::make_tuple(uint16_t(0), uint16_t(0), uint16_t(0), uint16_t(0));
+  }
 
   /**
    */
@@ -124,21 +116,9 @@ public:
   }
 
   virtual void
-  program_plp(const device*, const std::vector<char>&) const
+  program_plp(const device*, const std::vector<char>&, bool) const
   {
     throw std::runtime_error("plp program is not supported");
-  }
-
-  virtual void
-  mem_read(const device*, long long, long long, const std::string&) const
-  {
-    throw std::runtime_error("memory read is not supported");
-  }
-
-  virtual void
-  mem_write(const device*, long long, long long, unsigned int) const
-  {
-    throw std::runtime_error("memory write is not supported");
   }
 }; // system
 
@@ -146,19 +126,7 @@ public:
  */
 XRT_CORE_COMMON_EXPORT
 void
-get_xrt_build_info(boost::property_tree::ptree& pt);
-
-/**
- */
-XRT_CORE_COMMON_EXPORT
-void
-get_xrt_info(boost::property_tree::ptree& pt);
-
-/**
- */
-XRT_CORE_COMMON_EXPORT
-void
-get_os_info(boost::property_tree::ptree& pt);
+get_driver_info(boost::property_tree::ptree& pt);
 
 /**
  */
@@ -167,12 +135,23 @@ void
 get_devices(boost::property_tree::ptree& pt);
 
 /**
+ * @brief Get the bdf info object
+ * 
+ * @param id 
+ * @param is_user 
+ * @return std::tuple<uint16_t, uint16_t, uint16_t, uint16_t> 
+ */
+XRT_CORE_COMMON_EXPORT
+std::tuple<uint16_t, uint16_t, uint16_t, uint16_t>
+get_bdf_info(device::id_type id, bool is_user = true);
+
+/**
  * get_total_devices() - Get total devices and total usable devices
  *
  * Return: Pair of total devices and usable devices
  */
 XRT_CORE_COMMON_EXPORT
-std::pair<uint64_t, uint64_t>
+std::pair<device::id_type, device::id_type>
 get_total_devices(bool is_user);
 
 /**
@@ -262,16 +241,7 @@ get_monitor_access_type();
 
 XRT_CORE_COMMON_EXPORT
 void
-program_plp(const device* dev, const std::vector<char> &buffer);
-
-XRT_CORE_COMMON_EXPORT
-void
-mem_read(const device* dev, long long addr, long long size, const std::string& output_file);
-
-XRT_CORE_COMMON_EXPORT
-void
-mem_write(const device* device, long long addr, long long size, unsigned int pattern);
-
+program_plp(const device* dev, const std::vector<char> &buffer, bool force);
 } //xrt_core
 
 #endif /* CORE_SYSTEM_H */

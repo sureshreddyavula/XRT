@@ -1,19 +1,6 @@
-/**
- * Copyright (C) 2016-2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2016-2022 Xilinx, Inc.  All rights reserved.
+// Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
 #include "program.h"
 #include "device.h"
 #include "kernel.h"
@@ -23,7 +10,6 @@
 
 #include "xocl/api/plugin/xdp/profile_v2.h"
 
-#include <boost/filesystem/operations.hpp>
 #include <vector>
 #include <iostream>
 #include <fstream>
@@ -99,7 +85,7 @@ get_target() const
 {
   if (auto metadata = get_xclbin(nullptr))
     return metadata.target();
-  return xclbin::target_type::invalid;
+  throw std::runtime_error("No program metadata");
 }
 
 xclbin
@@ -126,10 +112,12 @@ xrt_core::uuid
 program::
 get_xclbin_uuid(const device* d) const
 {
+  // switch to parent device if necessary
+  d = d->get_root_device();
   auto itr = m_binaries.find(d);
   if (itr == m_binaries.end())
     return {};
-  
+
   auto top = reinterpret_cast<const axlf*>((*itr).second.data());
   return top->m_header.uuid;
 }
@@ -170,7 +158,7 @@ get_num_kernels() const
     return metadata.num_kernels();
   return 0;
 }
-  
+
 std::vector<std::string>
 program::
 get_kernel_names() const
@@ -195,15 +183,24 @@ create_kernel(const std::string& kernel_name)
 {
   auto deleter = [](kernel* k) { k->release(); };
 
-  // Look up kernel symbol from arbitrary (first) xclbin
+  // Look up kernel symbol from first matching xclbin
   if (m_binaries.empty())
     throw xocl::error(CL_INVALID_PROGRAM_EXECUTABLE,"No binary for program");
 
-  auto symbol_name = kernel_utils::normalize_kernel_name(kernel_name);
-  auto metadata = get_xclbin(nullptr);
-  auto& symbol = metadata.lookup_kernel(symbol_name);
-  auto k = std::make_unique<kernel>(this,kernel_name,symbol);
-  return std::unique_ptr<kernel,decltype(deleter)>(k.release(),deleter);
+  // Find first matching kernel in any device program
+  auto normalized_kernel_name = kernel_utils::normalize_kernel_name(kernel_name);
+  for (const auto& device : m_devices) {
+    const auto& xclbin = device->get_xrt_xclbin();
+    auto xk = xclbin.get_kernel(normalized_kernel_name);
+    if (!xk)
+      continue;
+
+    auto k = std::make_unique<kernel>(this, kernel_name, xk);
+    return std::unique_ptr<kernel,decltype(deleter)>(k.release(), deleter);
+  }
+
+  throw xocl::error(CL_INVALID_PROGRAM_EXECUTABLE,"Kernel not found");
+
 }
 
 program::creation_type

@@ -187,7 +187,7 @@ CardMgmtControllerFamily=""
 SchedulerFamily=""
 
 
-XBMGMT=/opt/xilinx/xrt/bin/xbmgmt
+XBMGMT=${XILINX_XRT}/bin/xbmgmt
 post_inst_msg="XSA package installed successfully.
 Please flash card manually by running below command:
 sudo ${XBMGMT} flash --update --shell ${opt_xsa}"
@@ -679,7 +679,7 @@ doxsabin()
 
 dodebdev()
 {
-    uRel=`lsb_release -r -s`
+    uRel=`awk -F= '$1=="VERSION_ID" {print $2}' /etc/os-release | tr -d '"'`
     dir=debbuild/$xsa-$version-dev_${uRel}
     pkg_dirname=debbuild/$xsa-dev-${version}-${revision}_${uRel}
     pkgdir=$opt_pkgdir/$pkg_dirname
@@ -730,7 +730,7 @@ EOF
 
 dodeb()
 {
-    uRel=`lsb_release -r -s`
+    uRel=`awk -F= '$1=="VERSION_ID" {print $2}' /etc/os-release | tr -d '"'`
     dir=debbuild/$xsa-${version}_${uRel}
     pkg_dirname=debbuild/$xsa-${version}-${revision}_${uRel}
     pkgdir=$opt_pkgdir/$pkg_dirname

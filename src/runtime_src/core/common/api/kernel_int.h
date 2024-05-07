@@ -1,19 +1,8 @@
-/*
- * Copyright (C) 2020, Xilinx Inc - All rights reserved
- * Xilinx Runtime (XRT) Experimental APIs
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2020 Xilinx, Inc
+// Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
+//
+// Xilinx Runtime (XRT) Experimental APIs
 
 #ifndef _XRT_COMMON_KERNEL_INT_H_
 #define _XRT_COMMON_KERNEL_INT_H_
@@ -23,6 +12,8 @@
 
 #include "core/common/config.h"
 #include "core/common/xclbin_parser.h"
+#include "core/common/shim/buffer_handle.h"
+#include "core/include/experimental/xrt_xclbin.h"
 
 #include <bitset>
 #include <cstdint>
@@ -36,8 +27,8 @@ namespace xrt_core { namespace kernel_int {
 void
 copy_bo_with_kdma(const std::shared_ptr<xrt_core::device>& core_device,
                   size_t sz,
-                  xclBufferHandle dst_bo, size_t dst_offset,
-                  xclBufferHandle src_bo, size_t src_offset);
+                  buffer_handle* dst_bo, size_t dst_offset,
+                  buffer_handle* src_bo, size_t src_offset);
 
 XRT_CORE_COMMON_EXPORT
 std::vector<const xclbin::kernel_argument*>
@@ -63,6 +54,13 @@ XRT_CORE_COMMON_EXPORT
 xrt::run
 clone(const xrt::run& run);
 
+// This API is provide to allow implementations such as OpenCL
+// to dictate what kernel CUs to use.  For example sub-device
+// may restrict CUs.
+XRT_CORE_COMMON_EXPORT
+void
+set_cus(xrt::run& run, const std::bitset<128>& mask);
+
 XRT_CORE_COMMON_EXPORT
 const std::bitset<128>&
 get_cumask(const xrt::run& run);
@@ -74,12 +72,29 @@ get_num_cus(const xrt::run& run)
 }
 
 XRT_CORE_COMMON_EXPORT
-IP_CONTROL
+xrt::xclbin::ip::control_type
 get_control_protocol(const xrt::run& run);
 
 XRT_CORE_COMMON_EXPORT
 void
 pop_callback(const xrt::run& run);
+
+XRT_CORE_COMMON_EXPORT
+size_t
+get_regmap_size(const xrt::kernel& kernel);
+
+// Get hw ctx using which this kernel is created
+xrt::hw_context
+get_hw_ctx(const xrt::kernel& kernel);
+
+// Allows the creation of the kernel object from a kernel_impl pointer
+// This is used for logging usage mertrics
+xrt::kernel
+create_kernel_from_implementation(const xrt::kernel_impl* kernel_impl);
+
+// Get the exec buffers associated with a runlist
+const std::vector<xrt_core::buffer_handle*>&
+get_runlist_buffer_handles(const xrt::runlist& runlist);
 
 }} // kernel_int, xrt_core
 

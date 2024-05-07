@@ -1,22 +1,10 @@
 /*
- * Copyright (C) 2020-2021, Xilinx Inc - All rights reserved
- * Xilinx Runtime (XRT) Experimental APIs
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
+ * SPDX-License-Identifier: Apache-2.0
+ * Copyright (C) 2020-2022 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
  */
-
-#ifndef _XRT_KERNEL_H_
-#define _XRT_KERNEL_H_
+#ifndef XRT_KERNEL_H_
+#define XRT_KERNEL_H_
 
 #include "ert.h"
 #include "xrt.h"
@@ -24,9 +12,13 @@
 #include "xrt/xrt_device.h"
 #include "xrt/xrt_uuid.h"
 
+
 #ifdef __cplusplus
-# include "experimental/xrt_enqueue.h"
+# include "experimental/xrt_exception.h"
+# include "experimental/xrt_fence.h"
+# include "experimental/xrt_hw_context.h"
 # include <chrono>
+# include <condition_variable>
 # include <cstdint>
 # include <functional>
 # include <memory>
@@ -56,19 +48,19 @@ namespace xrt {
 /*!
  * @class autostart
  *
- * @brief 
+ * @brief
  * xrt::autostart is a specific type used as template argument.
  *
- * @details 
+ * @details
  * When implicitly starting a kernel through templated operator, the
  * first argument can be specified as xrt::autostart indicating the
  * number of iterations the kernel run should perform.
  *
  * The default iterations, or xrt::autostart constructed with the
  * value 0, represents a for-ever running kernel.
- * 
+ *
  * When a kernel is auto-started, the running kernel can be manipulated
- * through a \ref xrt::mailbox object provided the kernel is synthesized 
+ * through a \ref xrt::mailbox object provided the kernel is synthesized
  * with mailbox.
  *
  * The counted auto-restart feature is supported only for kernels that
@@ -85,12 +77,11 @@ struct autostart
 };
 
 class kernel;
-class event_impl;
 
 /*!
- * @class run 
+ * @class run
  *
- * @brief 
+ * @brief
  * xrt::run represents one execution of a kernel
  *
  * @details
@@ -102,7 +93,36 @@ class event_impl;
 class run_impl;
 class run
 {
- public:
+public:
+  /**
+   * command_error - exception for abnormal command execution
+   *
+   * Used by ``wait2()`` when command completes unsuccessfully.
+   */
+  class command_error_impl;
+  class command_error : public detail::pimpl<command_error_impl>, public std::exception
+  {
+  public:
+    XCL_DRIVER_DLLESPEC
+    command_error(ert_cmd_state state, const std::string& what);
+
+    /**
+     * get_command_state() - command state upon completion
+     */
+    XCL_DRIVER_DLLESPEC
+    ert_cmd_state
+    get_command_state() const;
+
+    XCL_DRIVER_DLLESPEC
+    const char*
+    what() const noexcept override;
+
+  private:
+    // This member is a mistake, but cannot remove it without breaking ABI
+    std::shared_ptr<command_error_impl> m_impl;
+  };
+
+public:
   /**
    * run() - Construct empty run object
    *
@@ -132,8 +152,8 @@ class run
   /**
    * start() - Start auto-restart execution of a run
    *
-   * @param iterations  
-   *   Number of times to iterate the same run.  
+   * @param iterations
+   *   Number of times to iterate the same run.
    *
    * An iteration count of zero means that the kernel should run
    * forever, or until explicitly stopped using ``stop()``.
@@ -159,9 +179,9 @@ class run
   /**
    * stop() - Stop kernel run object at next safe iteration
    *
-   * If the kernel run object has been started by specifying 
-   * an iteration count or by specifying default iteration count, 
-   * then this function can be used to stop the iteration early.  
+   * If the kernel run object has been started by specifying
+   * an iteration count or by specifying default iteration count,
+   * then this function can be used to stop the iteration early.
    *
    * The function is synchronous and waits for the kernel
    * run object to complete.
@@ -174,18 +194,47 @@ class run
   stop();
 
   /**
+   * abort() - Abort a run object that has been started
+   *
+   * @return
+   *  State of aborted command
+   *
+   * If the run object has been sent to scheduler for execution, then
+   * this function can be used to abort the scheduled command.
+   *
+   * The function is synchronous and will wait for abort to complete.
+   * The return value is the state of the aborted command.
+   */
+  XCL_DRIVER_DLLESPEC
+  ert_cmd_state
+  abort();
+
+  /**
    * wait() - Wait for a run to complete execution
    *
-   * @param timeout  
+   * @param timeout
    *  Timeout for wait (default block till run completes)
-   * @return 
-   *  Command state upon return of wait
+   * @return
+   *  Command state upon return of wait, or ERT_CMD_STATE_TIMEOUT
+   *  if timeout exceeded.
    *
    * The default timeout of 0ms indicates blocking until run completes.
    *
    * The current thread will block until the run completes or timeout
    * expires. Completion does not guarantee success, the run status
    * should be checked by using ``state``.
+   *
+   * If specified time out is exceeded, the function returns with
+   * ERT_CMD_STATE_TIMEOUT, it is the callers responsibility to abort
+   * the run if it continues to time out.
+   *
+   * The current implementation of this API can mask out the timeout
+   * of this run so that the call either never returns or doesn't
+   * return until the run completes by itself. This can happen if
+   * other runs are continuosly completing within the specified
+   * timeout for this run.  If the device is otherwise idle, or if the
+   * time between run completion exceeds the specified timeout, then
+   * this function will identify the timeout.
    */
   XCL_DRIVER_DLLESPEC
   ert_cmd_state
@@ -197,13 +246,26 @@ class run
    * @param timeout_ms
    *  Timeout in milliseconds
    * @return
-   *  Command state upon return of wait
+   *  Command state upon return of wait, or ERT_CMD_STATE_TIMEOUT
+   *  if timeout exceeded.
    *
    * The default timeout of 0ms indicates blocking until run completes.
    *
    * The current thread will block until the run completes or timeout
    * expires. Completion does not guarantee success, the run status
    * should be checked by using ``state``.
+   *
+   * If specified time out is exceeded, the function returns with
+   * ERT_CMD_STATE_TIMEOUT, it is the callers responsibility to abort
+   * the run if it continues to time out.
+   *
+   * The current implementation of this API can mask out the timeout
+   * of this run so that the call either never returns or doesn't
+   * return until the run completes by itself. This can happen if
+   * other runs are continuosly completing within the specified
+   * timeout for this run.  If the device is otherwise idle, or if the
+   * time between run completion exceeds the specified timeout, then
+   * this function will identify the timeout.
    */
   ert_cmd_state
   wait(unsigned int timeout_ms) const
@@ -212,9 +274,62 @@ class run
   }
 
   /**
+   * wait2() - Wait for specified milliseconds for run to complete
+   *
+   * @param timeout
+   *  Timeout for wait (default block until run completes)
+   * @return
+   *  std::cv_status::no_timeout when command completes successfully.
+   *  std::cv_status::timeout when wait timed out without command
+   *  completing.
+   *
+   * Successful command completion means that the command state is
+   * ERT_CMD_STATE_COMPLETED.  All other command states result in this
+   * function throwing ``command_error`` exception with the command
+   * state embedded in the exception.
+   *
+   * Throws ``xrt::run::command_error`` on abnormal command termination.
+   *
+   * The current thread blocks until the run successfully completes or
+   * timeout expires. A return code of std::cv_state::no_timeout
+   * guarantees that the command completed successfully.
+   *
+   * If specified time out is exceeded, the function returns with
+   * std::cv_status::timeout, it is the callers responsibility to abort
+   * the run if it continues to time out.
+   *
+   * The current implementation of this API can mask out the timeout
+   * of this run so that the call either never returns or doesn't
+   * return until the run completes by itself. This can happen if
+   * other runs are continuosly completing within the specified
+   * timeout for this run.  If the device is otherwise idle, or if the
+   * time between run completion exceeds the specified timeout, then
+   * this function will identify the timeout.
+   */
+  XCL_DRIVER_DLLESPEC
+  std::cv_status
+  wait2(const std::chrono::milliseconds& timeout) const;
+
+  /**
+   * wait2() - Wait for successful command completion
+   *
+   * Successful command completion means that the command state is
+   * ERT_CMD_STATE_COMPLETED.  All other command states result in this
+   * function throwing ``command_error`` exception with the command
+   * state embedded in the exception.
+   *
+   * Throws ``xrt::run::command_error`` on abnormal command termination.
+   */
+  void
+  wait2() const
+  {
+    wait2(std::chrono::milliseconds{0});
+  }
+
+  /**
    * state() - Check the current state of a run object
    *
-   * @return 
+   * @return
    *  Current state of this run object
    *
    * The state values are defined in ``include/ert.h``
@@ -224,15 +339,25 @@ class run
   state() const;
 
   /**
+   * return_code() - Get the return code from PS kernel
+   *
+   * @return
+   *  Return code from PS kernel run
+   */
+  XCL_DRIVER_DLLESPEC
+  uint32_t
+  return_code() const;
+
+  /**
    * add_callback() - Add a callback function for run state
    *
    * @param state       State to invoke callback on
-   * @param callback    Callback function 
+   * @param callback    Callback function
    * @param data        User data to pass to callback function
    *
    * The function is called when the run object changes state to
    * argument state or any error state.  Only
-   * ``ERT_CMD_STATE_COMPLETED`` is supported currently. 
+   * ``ERT_CMD_STATE_COMPLETED`` is supported currently.
    *
    * The function object's first parameter is a unique 'key'
    * for this xrt::run object implmentation on which the callback
@@ -248,30 +373,13 @@ class run
                std::function<void(const void*, ert_cmd_state, void*)> callback,
                void* data);
 
-  /// @cond
-  /**
-   * set_event() - Add event for enqueued operations
-   *
-   * @param event    
-   *   Opaque implementation object
-   *
-   * This function is used when a run object is enqueued in an event
-   * graph.  The event must be notified upon completion of the run.
-   *
-   * This is an experimental API using a WIP feature.
-   */
-  XCL_DRIVER_DLLESPEC
-  void
-  set_event(const std::shared_ptr<event_impl>& event) const;
-  /// @endcond
-
   /**
    * operator bool() - Check if run handle is valid
    *
-   * @return 
+   * @return
    *   True if run is associated with kernel object, false otherwise
    */
-  explicit 
+  explicit
   operator bool() const
   {
     return handle != nullptr;
@@ -296,9 +404,9 @@ class run
    *
    * @param index
    *  Index of kernel argument to update
-   * @param arg        
+   * @param arg
    *  The scalar argument value to set.
-   * 
+   *
    * Use this API to explicit set or change a kernel argument prior
    * to starting kernel execution.  After setting arguments, the
    * kernel can be started using ``start()`` on the run object.
@@ -319,7 +427,7 @@ class run
    *  Index of kernel argument to set
    * @param boh
    *  The global buffer argument value to set (lvalue).
-   * 
+   *
    * Use this API to explicit set or change a kernel argument prior
    * to starting kernel execution.  After setting arguments, the
    * kernel can be started using ``start()`` on the run object.
@@ -350,6 +458,37 @@ class run
     set_arg_at_index(index, boh);
   }
 
+  ///@cond
+  /// Experimental in 2023.2
+  XCL_DRIVER_DLLESPEC
+  void
+  submit_wait(const xrt::fence& fence);
+  
+  XCL_DRIVER_DLLESPEC
+  void
+  submit_signal(const xrt::fence& fence);
+  ///@endcond
+
+  /**
+   * set_arg - set named argument
+   *
+   * @param argnm
+   *   Name of kernel argument
+   * @param argvalue
+   *   Argument value
+   *
+   * Throws if specified argument name doesn't match kernel
+   * specification. Throws if argument value is incompatible with
+   * specified argument
+   */
+  template <typename ArgType>
+  void
+  set_arg(const std::string& argnm, ArgType&& argvalue)
+  {
+    auto index = get_arg_index(argnm);
+    set_arg(index, std::forward<ArgType>(argvalue));
+  }
+
   /**
    * udpdate_arg() - Asynchronous update of scalar kernel global argument
    *
@@ -357,7 +496,7 @@ class run
    *  Index of kernel argument to update
    * @param arg
    *  The scalar argument value to set.
-   * 
+   *
    * Use this API to asynchronously update a specific scalar argument
    * of the kernel associated with the run object.
    *
@@ -377,9 +516,9 @@ class run
    *  Index of kernel argument to update
    * @param boh
    *  The global buffer argument value to set.
-   * 
+   *
    * Use this API to asynchronously update a specific kernel
-   * argument of an existing run.  
+   * argument of an existing run.
    *
    * This API is only supported on Edge.
    */
@@ -395,7 +534,7 @@ class run
    * @param args
    *  Kernel arguments
    *
-   * Use this API to explicitly set all kernel arguments and 
+   * Use this API to explicitly set all kernel arguments and
    * start kernel execution.
    */
   template<typename ...Args>
@@ -454,8 +593,27 @@ public:
   get_ert_packet() const;
   /// @endcond
 
+public:
+  // Use at your own risk, prefer documented type-safe arguments
+  void
+  set_arg(int index, const void* value, size_t bytes)
+  {
+    set_arg_at_index(index, value, bytes);
+  }
+
+  // Use at your own risk, prefer documented type-safe arguments
+  void
+  update_arg(int index, const void* value, size_t bytes)
+  {
+    update_arg_at_index(index, value, bytes);
+  }
+
 private:
   std::shared_ptr<run_impl> handle;
+
+  XCL_DRIVER_DLLESPEC
+  int
+  get_arg_index(const std::string& argnm) const;
 
   XCL_DRIVER_DLLESPEC
   void
@@ -481,16 +639,16 @@ private:
     set_arg(++argno, std::forward<Args>(args)...);
   }
 };
- 
+
 
 /*!
  * @class kernel
  *
  * A kernel object represents a set of instances matching a specified name.
- * The kernel is created by finding matching kernel instances in the 
+ * The kernel is created by finding matching kernel instances in the
  * currently loaded xclbin.
  *
- * Most interaction with kernel objects are through \ref xrt::run objects created 
+ * Most interaction with kernel objects are through \ref xrt::run objects created
  * from the kernel object to represent an execution of the kernel
  */
 class kernel_impl;
@@ -536,6 +694,13 @@ public:
   kernel(const xrt::device& device, const xrt::uuid& xclbin_id, const std::string& name,
          cu_access_mode mode = cu_access_mode::shared);
 
+
+  /// @cond
+  /// Experimental in 2022.2, 2023.1, 2023.3
+  XCL_DRIVER_DLLESPEC
+  kernel(const xrt::hw_context& ctx, const std::string& name);
+  /// @endcond
+
   /// @cond
   /// Deprecated construtor for exclusive access
   kernel(const xrt::device& device, const xrt::uuid& xclbin_id, const std::string& name, bool ex)
@@ -555,7 +720,7 @@ public:
    *
    * @param args
    *  Kernel arguments
-   * @return 
+   * @return
    *  Run object representing this kernel function invocation
    */
   template<typename ...Args>
@@ -590,47 +755,38 @@ public:
    *  The kernel register offset of the argument with specified index
    *
    * Use with ``read_register()`` and ``write_register()`` if manually
-   * reading or writing kernel registers for explicit arguments. 
+   * reading or writing kernel registers for explicit arguments.
    */
   XCL_DRIVER_DLLESPEC
   uint32_t
   offset(int argno) const;
 
-  /**
-   * write() - Write to the address range of a kernel
-   *
-   * @param offset
-   *  Offset in register space to write to
-   * @param data     
-   *  Data to write
-   *
-   * Throws std::out_or_range if offset is outside the
-   * kernel address space
-   *
-   * The kernel must be associated with exactly one kernel instance 
-   * (compute unit), which must be opened for exclusive access.
-   */
+  [[deprecated("Please use user-managed xrt::ip "
+               "for read and write register functionality")]]
   XCL_DRIVER_DLLESPEC
   void
   write_register(uint32_t offset, uint32_t data);
 
-  /**
-   * read() - Read data from kernel address range
-   *
-   * @param offset  
-   *  Offset in register space to read from
-   * @return 
-   *  Value read from offset
-   *
-   * Throws std::out_or_range if offset is outside the
-   * kernel address space
-   *
-   * The kernel must be associated with exactly one kernel instance 
-   * (compute unit), which must be opened for exclusive access.
-   */
+  [[deprecated("It is not recommended to use read_register() with XRT "
+               "managed kernels.  Please use user-managed xrt::ip for read and "
+               "write register functionality")]]
   XCL_DRIVER_DLLESPEC
   uint32_t
   read_register(uint32_t offset) const;
+
+  /**
+   * get_name() - Return the name of the kernel
+   */
+  XCL_DRIVER_DLLESPEC
+  std::string
+  get_name() const;
+
+  /**
+   * get_xclbin() - Return the xclbin containing the kernel
+   */
+  XCL_DRIVER_DLLESPEC
+  xrt::xclbin
+  get_xclbin() const;
 
 public:
   /// @cond
@@ -639,6 +795,10 @@ public:
   {
     return handle;
   }
+
+  kernel(std::shared_ptr<kernel_impl> impl)
+    : handle(std::move(impl))
+  {}
   /// @endcond
 
 private:
@@ -646,14 +806,12 @@ private:
 };
 
 /// @cond
-// Specialization from xrt_enqueue.h for run objects, which
-// are asynchronous waitable objects.
-template <>
-struct callable_traits<run>
-{
-  enum { is_async = true };
-};
+// Undocumented experimental API subject to be replaced
+XCL_DRIVER_DLLESPEC
+void
+set_read_range(const xrt::kernel& kernel, uint32_t start, uint32_t size);
 /// @endcond
+
 
 } // namespace xrt
 
@@ -672,9 +830,9 @@ extern "C" {
  * The kernel name must uniquely identify compatible kernel instances
  * (compute units).  Optionally specify which kernel instance(s) to
  * open using "kernelname:{instancename1,instancename2,...}" syntax.
- * The compute units are opened with shared access, meaning that 
+ * The compute units are opened with shared access, meaning that
  * other kernels and other process will have shared access to same
- * compute units.  If exclusive access is needed then open the 
+ * compute units.  If exclusive access is needed then open the
  * kernel using @xrtPLKernelOpenExclusve().
  *
  * An xclbin with the specified kernel must have been loaded prior
@@ -738,7 +896,7 @@ xrtKernelArgGroupId(xrtKernelHandle kernelHandle, int argno);
  * @argno:  Index of kernel argument
  * Return:  The kernel register offset of the argument with specified index
  *
- * Use with ``xrtKernelReadRegister()`` and ``xrtKernelWriteRegister()`` 
+ * Use with ``xrtKernelReadRegister()`` and ``xrtKernelWriteRegister()``
  * if manually reading or writing kernel registers for explicit arguments.
  */
 XCL_DRIVER_DLLESPEC
@@ -753,7 +911,7 @@ xrtKernelArgOffset(xrtKernelHandle khdl, int argno);
  * @datap:        Pointer to location where to write data
  * Return:        0 on success, errcode otherwise
  *
- * The kernel must be associated with exactly one kernel instance 
+ * The kernel must be associated with exactly one kernel instance
  * (compute unit), which must be opened for exclusive access.
  */
 XCL_DRIVER_DLLESPEC
@@ -768,7 +926,7 @@ xrtKernelReadRegister(xrtKernelHandle kernelHandle, uint32_t offset, uint32_t* d
  * @data:         Data to write
  * Return:        0 on success, errcode otherwise
  *
- * The kernel must be associated with exactly one kernel instance 
+ * The kernel must be associated with exactly one kernel instance
  * (compute unit), which must be opened for exclusive access.
  */
 XCL_DRIVER_DLLESPEC
@@ -830,10 +988,10 @@ xrtRunSetArg(xrtRunHandle rhdl, int index, ...);
  * Return:      0 on success, -1 on error
  *
  * Use this API to asynchronously update a specific kernel
- * argument of an existing run.  
+ * argument of an existing run.
  *
  * This API is only supported on Edge.
- */  
+ */
 XCL_DRIVER_DLLESPEC
 int
 xrtRunUpdateArg(xrtRunHandle rhdl, int index, ...);
@@ -893,7 +1051,7 @@ xrtRunState(xrtRunHandle rhdl);
  *
  * @rhdl:        Handle to set callback on
  * @state:       State to invoke callback on
- * @callback:    Callback function 
+ * @callback:    Callback function
  * @data:        User data to pass to callback function
  *
  * Register a run callback function that is invoked when the

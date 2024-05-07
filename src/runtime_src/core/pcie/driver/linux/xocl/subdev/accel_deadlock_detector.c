@@ -170,17 +170,20 @@ long accel_deadlock_detector_ioctl(struct file *filp, unsigned int cmd, unsigned
     struct xocl_accel_deadlock_detector *accel_deadlock_detector = NULL;
     void __user *data = NULL;
     long result = 0;
+    uint32_t reg = 0;
 
     accel_deadlock_detector = (struct xocl_accel_deadlock_detector *)filp->private_data;
     data = (void __user *)(arg);
 
     mutex_lock(&accel_deadlock_detector->lock);
-
     switch (cmd) {
         case ACCEL_DEADLOCK_DETECTOR_IOC_RESET:
             break;
         case ACCEL_DEADLOCK_DETECTOR_IOC_GET_STATUS:
-            result = XOCL_READ_REG32(accel_deadlock_detector->base + 0x0);
+            reg = XOCL_READ_REG32(accel_deadlock_detector->base + 0x0);
+            if (copy_to_user(data, &reg, sizeof(uint32_t))) {
+                result = -EFAULT;
+            }
             break;
         default:
             result = -ENOTTY;
@@ -223,9 +226,17 @@ static int accel_deadlock_detector_mmap(struct file *filp, struct vm_area_struct
 
     // prevent touching the pages (byte access) for swap-in, and prevent the pages from being swapped out
 #ifndef VM_RESERVED
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
     vma->vm_flags |= VM_IO | VM_DONTEXPAND | VM_DONTDUMP;
 #else
+    vm_flags_set(vma, VM_IO | VM_DONTEXPAND | VM_DONTDUMP);
+#endif
+#else
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
     vma->vm_flags |= VM_IO | VM_RESERVED;
+#else
+    vm_flags_set(vma, VM_IO | VM_RESERVED);
+#endif
 #endif
 
     // make MMIO accessible to user space

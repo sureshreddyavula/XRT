@@ -20,27 +20,41 @@
 
 namespace xdp {
 
+  bool UserEventsPlugin::live = false;
+
   UserEventsPlugin::UserEventsPlugin() : XDPPlugin()
   {
-    db->registerPlugin(this) ;
-    db->registerInfo(info::user) ;
+    UserEventsPlugin::live = true;
 
-    VPWriter* writer = new UserEventsTraceWriter("user_events.csv") ;
-    writers.push_back(writer) ;
-    (db->getStaticInfo()).addOpenedFile(writer->getcurrentFileName(), "VP_TRACE") ;
+    db->registerPlugin(this);
+    db->registerInfo(info::user);
+
+    VPWriter* writer = new UserEventsTraceWriter("user_events.csv");
+    writers.push_back(writer);
   }
 
   UserEventsPlugin::~UserEventsPlugin()
   {
-    if (VPDatabase::alive())
-    {
+    if (VPDatabase::alive()) {
       // We were destroyed before the database, so write the writers
-      //  and unregister ourselves from the database
-      for (auto w : writers)
-      {
-	w->write(false) ;
+      // and unregister ourselves from the database
+      for (auto w : writers) {
+        w->write(false);
+        db->getStaticInfo().addOpenedFile(w->getcurrentFileName(), "VP_TRACE");
       }
-      db->unregisterPlugin(this) ;
+
+      db->unregisterPlugin(this);
+    }
+
+    UserEventsPlugin::live = false;
+  }
+
+  void UserEventsPlugin::writeAll(bool openNewFiles)
+  {
+    XDPPlugin::writeAll(openNewFiles);
+
+    for (auto w : writers) {
+      db->getStaticInfo().addOpenedFile(w->getcurrentFileName(), "VP_TRACE");
     }
   }
 

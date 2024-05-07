@@ -2,6 +2,9 @@
 # Copyright (C) 2019-2021 Xilinx, Inc. All rights reserved.
 #
 set(ERT_INSTALL_PREFIX "/opt/xilinx/xrt/share/fw")
+if (DEFINED XRT_INSTALL_PREFIX)
+  set(ERT_INSTALL_PREFIX "${XRT_INSTALL_PREFIX}/xrt/share/fw")
+endif()
 set(ERT_INSTALL_FIRMWARE_PREFIX "/lib/firmware/xilinx")
 
 if ((EXISTS $ENV{XILINX_VITIS}/gnu/microblaze) AND (${XRT_NATIVE_BUILD} STREQUAL "yes") AND (${CMAKE_HOST_SYSTEM_PROCESSOR} STREQUAL "x86_64"))
@@ -9,27 +12,12 @@ if ((EXISTS $ENV{XILINX_VITIS}/gnu/microblaze) AND (${XRT_NATIVE_BUILD} STREQUAL
 message("-- MicroBlaze toolchain found, preparing ERT build")
 set(ERT_BUILD_ALL "yes")
 add_subdirectory(scheduler)
-add_subdirectory(management)
-
-# CMC and BMC require gitenterprise access, disable if no access
-# Improve this test to check for url access to gitenterprise.xilinx.com
-if (EXISTS /tools/batonroot/rodin/devkits)
-message("-- Preparing cmc and bmc legacy")
-add_subdirectory(cmc)
-add_subdirectory(bmc)
-endif()
 
 add_custom_target(ert ALL
- DEPENDS scheduler management cmc bmc
+ DEPENDS scheduler
  )
 
 elseif (DEFINED ENV{XRT_FIRMWARE_DIR})
-
-file(GLOB XRTFW_FILES
-  "$ENV{XRT_FIRMWARE_DIR}/*"
-  )
-
-message("-- Firmare files copied from ${XRTFW_FILES}")
 
 file(GLOB ERTFW_FILES
   "$ENV{XRT_FIRMWARE_DIR}/sched*.bin"

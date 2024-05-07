@@ -17,6 +17,7 @@
 #ifndef XDP_PROFILE_AIE_TRACE_LOGGER_H
 #define XDP_PROFILE_AIE_TRACE_LOGGER_H
 
+#include <cstdint>
 #include<iostream>
 
 namespace xdp {
@@ -28,7 +29,7 @@ public:
   AIETraceLogger() {}
   virtual ~AIETraceLogger() {}
 
-  virtual void addAIETraceData(uint64_t strmIndex, void* buffer, uint64_t bufferSz) = 0; 
+  virtual void addAIETraceData(uint64_t strmIndex, void* buffer, uint64_t bufferSz, bool copy) = 0;
 };
 
 }

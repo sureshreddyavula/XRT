@@ -2,6 +2,7 @@
  * A GEM style device manager for PCIe based OpenCL accelerators.
  *
  * Copyright (C) 2016-2019 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2022 Advanced Micro Devices, Inc.
  *
  * Authors:
  *
@@ -22,10 +23,9 @@
 #include <linux/hashtable.h>
 #endif
 
-typedef void (*xocl_execbuf_callback)(unsigned long data, int error);
+#define MAX_MEM_BANK_COUNT 	128
 
-#define IS_HOST_MEM(m_tag)	(!strncmp(m_tag, "HOST[0]", 7))
-#define IS_PLRAM(m_tag)		(!strncmp(m_tag, "PLRAM[", 6))
+typedef void (*xocl_execbuf_callback)(unsigned long data, int error);
 
 /**
  * struct drm_xocl_exec_metadata - Meta data for exec bo
@@ -52,23 +52,40 @@ struct xocl_cma_memory {
 struct xocl_cma_bank {
 	uint64_t		entry_sz;
 	uint64_t		entry_num;
+	uint64_t 		*phys_addrs;
 	struct xocl_cma_memory	cma_mem[1];
+};
+
+struct xocl_mm {
+	/* Memory manager */
+	struct drm_mm           *mm;
+
+	/* Array of bo stats for whole device memory manager */
+	struct drm_xocl_mm_stat *bo_usage_stat;
+};
+
+struct xocl_mem_stat {
+	struct list_head        link;
+	uint32_t 		mem_idx;
+	uint32_t 		slot_idx;
+	
+	/* Memory usage stats for each memory bank per slot */
+	struct drm_xocl_mm_stat mm_usage_stat;
 };
 
 struct xocl_drm {
 	xdev_handle_t		xdev;
-	/* memory management */
 	struct drm_device       *ddev;
-	/* Memory manager */
-	struct drm_mm           *mm;
 	struct mutex            mm_lock;
-	struct drm_xocl_mm_stat **mm_usage_stat;
 
+	/* Memory manager */
+	struct xocl_mm		*xocl_mm;
+	struct drm_xocl_mm_stat mm_usage_stat[MAX_MEM_BANK_COUNT];
+
+	/* Xocl driver memory list head */
+	struct list_head        mem_list_head;
+	struct mem_data		ps_mem_data;
 	int			cma_bank_idx;
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 7, 0)
-	DECLARE_HASHTABLE(mm_range, 6);
-#endif
 };
 
 struct drm_xocl_bo {
@@ -86,6 +103,8 @@ struct drm_xocl_bo {
 	unsigned              flags;
 	unsigned              mem_idx;
 	unsigned	      user_flags;
+	/* variable to store the actual bo size instead of aligned size*/
+	uint64_t 	      actual_bo_size;
 };
 
 struct drm_xocl_unmgd {
@@ -96,7 +115,7 @@ struct drm_xocl_unmgd {
 };
 
 struct drm_xocl_bo *__xocl_create_bo_ioctl(struct drm_device *dev,
-	struct drm_xocl_create_bo *args);
+	struct drm_file *filp, struct drm_xocl_create_bo *args);
 struct drm_xocl_bo *xocl_drm_create_bo(struct xocl_drm *drm_p,
 	uint64_t unaligned_size, unsigned user_flags);
 void xocl_drm_free_bo(struct drm_gem_object *obj);
@@ -107,16 +126,14 @@ void xocl_mm_get_usage_stat(struct xocl_drm *drm_p, u32 ddr,
 void xocl_mm_update_usage_stat(struct xocl_drm *drm_p, u32 ddr,
         u64 size, int count);
 
-int xocl_mm_insert_node_range(struct xocl_drm *drm_p, u32 mem_id,
-                    struct drm_mm_node *node, u64 size);
-int xocl_mm_insert_node(struct xocl_drm *drm_p, u32 ddr,
-                struct drm_mm_node *node, u64 size);
+int xocl_mm_insert_node(struct xocl_drm *drm_p, unsigned memidx,
+                uint32_t slotidx, struct drm_xocl_bo *xobj, u64 size);
 
 void *xocl_drm_init(xdev_handle_t xdev);
 void xocl_drm_fini(struct xocl_drm *drm_p);
-uint32_t xocl_get_shared_ddr(struct xocl_drm *drm_p, struct mem_data *m_data);
-int xocl_init_mem(struct xocl_drm *drm_p);
-int xocl_cleanup_mem(struct xocl_drm *drm_p);
+int xocl_init_mem(struct xocl_drm *drm_p, uint32_t slot_id);
+int xocl_cleanup_mem_all(struct xocl_drm *drm_p);
+int xocl_cleanup_mem(struct xocl_drm *drm_p, uint32_t slot_id);
 
 int xocl_check_topology(struct xocl_drm *drm_p);
 
@@ -157,5 +174,9 @@ static inline struct drm_xocl_bo *to_xocl_bo(struct drm_gem_object *bo)
 int xocl_init_unmgd(struct drm_xocl_unmgd *unmgd, uint64_t data_ptr,
 		        uint64_t size, u32 write);
 void xocl_finish_unmgd(struct drm_xocl_unmgd *unmgd);
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0) || defined(RHEL_8_5_GE)
+extern const struct drm_gem_object_funcs xocl_gem_object_funcs;
+#endif
 
 #endif

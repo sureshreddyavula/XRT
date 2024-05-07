@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2017 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -19,6 +19,7 @@
 #include "time.h"
 #include "gen/version.h"
 #include "config_reader.h"
+#include "utils.h"
 
 #include <map>
 #include <fstream>
@@ -28,29 +29,17 @@
 #include <algorithm>
 #include <cstdarg>
 #include <climits>
-#ifdef __GNUC__
-# include <unistd.h>
+#ifdef __linux__
 # include <syslog.h>
 # include <linux/limits.h>
 # include <sys/stat.h>
 # include <sys/types.h>
 #endif
 #ifdef _WIN32
-# include <process.h>
 # include <winsock.h>
 #endif
 
 namespace {
-
-static int
-get_processid()
-{
-#ifdef _WIN32
-  return _getpid();
-#else
-  return getpid();
-#endif
-}
 
 static unsigned int
 get_userid()
@@ -63,21 +52,9 @@ get_userid()
 }
 
 static std::string
-get_hostname()
-{
-  std::string hn;
-#ifdef __GNUC__
-  char hostname[256] = {0};
-  gethostname(hostname, 256);
-  hn = hostname;
-#endif
-  return hn;
-}
-
-static std::string
 get_exe_path()
 {
-#ifdef __GNUC__
+#ifdef __linux__
   char buf[PATH_MAX] = {0};
   auto len = ::readlink("/proc/self/exe", buf, PATH_MAX);
   return std::string(buf, (len>0) ? len : 0);
@@ -217,9 +194,9 @@ file_dispatch(const std::string &file)
   handle << "Build date: " << xrt_build_version_date << "\n";
   handle << "Git branch: " << xrt_build_version_branch<< "\n";
   handle << "[" << xrt_core::timestamp() << "]" << "\n";
-  handle << "PID: " << get_processid() << "\n";
+  handle << "PID: " << xrt_core::utils::get_pid() << "\n";
   handle << "UID: " << get_userid() << "\n";
-  handle << "HOST: " <<  get_hostname() << "\n";
+  handle << "HOST: " <<  xrt_core::utils::get_hostname() << "\n";
   handle << "EXE: " << get_exe_path() << std::endl;
 }
 
@@ -246,10 +223,10 @@ console_dispatch()
   std::cerr << "Build hash: " << xrt_build_version_hash << "\n";
   std::cerr << "Build date: " << xrt_build_version_date << "\n";
   std::cerr << "Git branch: " << xrt_build_version_branch<< "\n";
-  std::cerr << "PID: " << get_processid() << "\n";
+  std::cerr << "PID: " << xrt_core::utils::get_pid() << "\n";
   std::cerr << "UID: " << get_userid() << "\n";
   std::cerr << "[" << xrt_core::timestamp() << "]\n";
-  std::cerr << "HOST: " << get_hostname() << "\n";
+  std::cerr << "HOST: " << xrt_core::utils::get_hostname() << "\n";
   std::cerr << "EXE: " << get_exe_path() << std::endl;
 }
 
@@ -284,9 +261,9 @@ void
 sendv(severity_level l, const char* tag, const char* format, va_list args)
 {
   static auto verbosity = xrt_core::config::get_verbosity();
-  if (l > (xrt_core::message::severity_level)verbosity) 
+  if (l > (xrt_core::message::severity_level)verbosity)
     return;
-  
+
   va_list args_bak;
   // vsnprintf will mutate va_list so back it up
   va_copy(args_bak, args);
@@ -304,5 +281,5 @@ sendv(severity_level l, const char* tag, const char* format, va_list args)
   std::vsnprintf(buf.data(), len, format, args);
   send(l, tag, buf.data());
 }
-  
+
 }} // message,xrt

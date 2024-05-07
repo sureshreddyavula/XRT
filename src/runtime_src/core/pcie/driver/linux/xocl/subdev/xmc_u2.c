@@ -1808,7 +1808,7 @@ static ssize_t scaling_threshold_power_override_show(struct device *dev,
 	}
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uW\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t scaling_threshold_power_override_store(struct device *dev,
@@ -1903,7 +1903,7 @@ static ssize_t scaling_critical_temp_threshold_show(struct device *dev,
 		return sprintf(buf, "N/A\n");
 	}
 
-	return sprintf(buf, "%uC\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 static DEVICE_ATTR_RO(scaling_critical_temp_threshold);
 
@@ -1926,7 +1926,7 @@ static ssize_t scaling_threshold_temp_limit_show(struct device *dev,
 		val = xmc_get_threshold_temp(xmc);
 	}
 
-	return sprintf(buf, "%uC\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 static DEVICE_ATTR_RO(scaling_threshold_temp_limit);
 
@@ -1949,7 +1949,7 @@ static ssize_t scaling_threshold_power_limit_show(struct device *dev,
 		val = xmc_get_threshold_power(xmc);
 	}
 
-	return sprintf(buf, "%uW\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 static DEVICE_ATTR_RO(scaling_threshold_power_limit);
 
@@ -1997,7 +1997,7 @@ static ssize_t scaling_threshold_temp_override_show(struct device *dev,
 	}
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uC\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t scaling_threshold_temp_override_store(struct device *dev,
@@ -2139,7 +2139,7 @@ static ssize_t scaling_enabled_store(struct device *dev,
 {
 	struct xocl_xmc *xmc = platform_get_drvdata(to_platform_device(dev));
 
-	if (strncmp(buf, "enable", strlen("enable")) == 0)
+	if (strncmp(buf, "true", strlen("true")) == 0)
 		runtime_clk_scale_enable(xmc);
 	else
 		runtime_clk_scale_disable(xmc);
@@ -2182,7 +2182,7 @@ static ssize_t hwmon_scaling_target_power_show(struct device *dev,
 	val = val * 1000000;
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uW\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t hwmon_scaling_target_power_store(struct device *dev,
@@ -2238,7 +2238,7 @@ static ssize_t hwmon_scaling_target_temp_show(struct device *dev,
 	val = val * 1000;
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uc\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t hwmon_scaling_target_temp_store(struct device *dev,
@@ -2301,7 +2301,7 @@ static ssize_t hwmon_scaling_threshold_temp_show(struct device *dev,
 	val = val * 1000;
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uC\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t hwmon_scaling_threshold_power_show(struct device *dev,
@@ -2329,7 +2329,7 @@ static ssize_t hwmon_scaling_threshold_power_show(struct device *dev,
 	val = val * 1000000;
 	mutex_unlock(&xmc->xmc_lock);
 
-	return sprintf(buf, "%uW\n", val);
+	return sprintf(buf, "%u\n", val);
 }
 
 static ssize_t reg_base_show(struct device *dev,
@@ -2473,18 +2473,22 @@ static ssize_t read_temp_by_mem_topology(struct file *filp,
 {
 	u32 nread = 0;
 	size_t size = 0;
+	int ret = 0;
 	u32 i;
-	int err = 0;
+	uint32_t slot_id = DEFAULT_PL_SLOT;
 	struct mem_topology *memtopo = NULL;
 	struct xocl_xmc *xmc =
 		dev_get_drvdata(container_of(kobj, struct device, kobj));
 	uint32_t *temp = NULL;
 	xdev_handle_t xdev = xocl_get_xdev(xmc->pdev);
+        struct xocl_drm *drm = XDEV(xdev)->drm;
 
-	err = xocl_icap_get_xclbin_metadata(xdev, MEMTOPO_AXLF,
-		(void **)&memtopo);
-	if (err)
-		return nread;
+        if (!drm)
+                return 0;
+
+	ret  = XOCL_GET_MEM_TOPOLOGY(xdev, memtopo, slot_id);
+	if (ret)
+		return ret;
 
 	if (!memtopo)
 		goto done;
@@ -2508,7 +2512,7 @@ static ssize_t read_temp_by_mem_topology(struct file *filp,
 
 	memcpy(buffer, temp, nread);
 done:
-	xocl_icap_put_xclbin_metadata(xdev);
+	XOCL_PUT_MEM_TOPOLOGY(xdev, slot_id);
 	vfree(temp);
 	/* xocl_icap_unlock_bitstream */
 	return nread;
@@ -4179,9 +4183,7 @@ static void clock_status_check(struct platform_device *pdev, bool *latched)
 
 		if (status & XMC_CLOCK_SCALING_CLOCK_STATUS_SHUTDOWN) {
 			xocl_err(&pdev->dev, "Critical temperature event, "
-					"kernel clocks have been stopped, run "
-					"'xbutil validate -q' to continue. "
-					"See AR 73398 for more details.");
+					"kernel clocks have been stopped.");
 			/* explicitly indicate reset should be latched */
 			*latched = true;
 		}

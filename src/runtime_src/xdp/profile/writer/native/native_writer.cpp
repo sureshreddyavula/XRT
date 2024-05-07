@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2016-2021 Xilinx, Inc
+ * Copyright (C) 2022-2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,12 +15,12 @@
  * under the License.
  */
 
-#define XDP_SOURCE
+#define XDP_PLUGIN_SOURCE
 
-#include "xdp/profile/writer/native/native_writer.h"
 #include "xdp/profile/database/database.h"
-
+#include "xdp/profile/database/events/native_events.h"
 #include "xdp/profile/plugin/vp_base/utility.h"
+#include "xdp/profile/writer/native/native_writer.h"
 
 namespace xdp {
 
@@ -42,11 +43,13 @@ namespace xdp {
   {
     // There is only one bucket where all the APIs will go
     fout << "STRUCTURE" << "\n" ;
-    fout << "Group_Start,Host APIs" << "\n" ;
-    fout << "Group_Start,Native XRT API Calls" << "\n" ;
-    fout << "Dynamic_Row," << 1 << ",General,API Events" << "\n" ;
-    fout << "Group_End,Native XRT API Calls" << "\n" ;
-    fout << "Group_End,Host APIs" << "\n" ;
+    fout << "Group_Start,Native API Host Trace\n" ;
+    fout << "Dynamic_Row," << APIBucket << ",Native XRT API Calls,API Events" << "\n" ;
+    fout << "Group_Start,Host to Device Data Transfers\n" ;
+    fout << "Dynamic_Row," << readBucket << ",Reads,Read Transfers\n" ;
+    fout << "Dynamic_Row," << writeBucket << ",Writes,Write Transfers\n" ;
+    fout << "Group_End,Host to Device Data Transfers\n" ;
+    fout << "Group_End,Native API Host Trace\n" ;
   }
 
   void NativeTraceWriter::writeStringTable()
@@ -58,27 +61,32 @@ namespace xdp {
   void NativeTraceWriter::writeTraceEvents()
   {
     std::vector<VTFEvent*> APIEvents =
-      (db->getDynamicInfo()).filterEraseUnsortedHostEvents(
+      (db->getDynamicInfo()).moveUnsortedHostEvents(
         [](VTFEvent* e)
         {
-          return e->isNativeHostEvent() ;
+          return e->isNativeHostEvent();
         } ) ;
 
     std::sort(APIEvents.begin(), APIEvents.end(),
               [](VTFEvent* x, VTFEvent* y)
                 {
                   if (x->getTimestamp() < y->getTimestamp()) return true;
-                  return false ;
+                  return false;
                 }) ;
 
-    fout << "EVENTS" << "\n" ;
+    fout << "EVENTS" << "\n";
     for (auto& e : APIEvents) {
-      e->dump(fout, 1) ; // 1 is the only bucket
+      // If this is a read/write, then dump the event in the other bucket
+      if (e->isNativeRead())
+        e->dumpSync(fout, readBucket);
+      else if (e->isNativeWrite())
+        e->dumpSync(fout, writeBucket);
+      else
+        e->dump(fout, APIBucket);
     }
 
-    for (auto& e : APIEvents) {
-      delete e ;
-    }
+    for (auto& e : APIEvents)
+      delete e;
   }
 
   void NativeTraceWriter::writeDependencies()

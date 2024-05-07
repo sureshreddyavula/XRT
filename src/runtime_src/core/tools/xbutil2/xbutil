@@ -3,10 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-# Copyright (C) 2020-2021 Xilinx, Inc.
-#
-# xbutil loader which automatically switches between legacy and next-gen
-# xbutil utility. Starting with 2021.1 the default is next-gen xbutil tool.
+# Copyright (C) 2020-2022 Xilinx, Inc.
 #
 
 # -- Detect a Windows environment and automatically switch to the .bat file
@@ -17,121 +14,26 @@ if [[ "`uname`" == windows32* ]] || [[ "`uname`" == CYGWIN* ]] ; then
 fi
 
 # Working variables
-DEFAULT=xbutil2
-XBUTIL=xbutil
-XBUTIL2=xbutil2
-XRT_PROG=""
-
-# Table to resolve validate sub-command based on switch passed to validate
-declare -A VALOPT=( \
-        ["--device"]="XBUTIL2" \
-        ["--format"]="XBUTIL2" \
-        ["--run"]="XBUTIL2" \
-        ["--output"]="XBUTIL2" \
-        ["--help"]="XBUTIL2" \
-        ["-d"]="DEVICE" \
-        ["-q"]="XBUTIL" \
-        ["-f"]="XBUTIL2" \
-        ["-r"]="XBUTIL2" \
-        ["-o"]="XBUTIL2" \
-        ["-h"]="XBUTIL2" \
-    )
-
-# Table to resolve reset sub-command based on switch passed to reset
-declare -A RSTOPT=( \
-       ["--device"]="XBUTIL2" \
-       ["--type"]="XBUTIL2" \
-       ["--help"]="XBUTIL2" \
-       ["-d"]="DEVICE" \
-       ["-r"]="XBUTIL2" \
-       ["-h"]="XBUTIL2" \
-   )
-
-# Table to resolve program sub-command based on switch passed to program
-declare -A PROGOPT=( \
-        ["-p"]="XBUTIL" \
-        ["--user"]="XBUTIL2" \
-        ["-u"]="XBUTIL2" \
-        ["--device"]="XBUTIL2" \
-        ["--help"]="XBUTIL2" \
-        ["-d"]="DEVICE" \
-        ["-h"]="XBUTIL2" \
-    )
-
-# In the following table "reset", "program" and "validate" point to a second
-# table by name. Note that reset, program and validate are valid both for
-# legacy and next-gen tool and hence require a second lookup to resolve
-# between xbutil and xbutil2
-declare -A COMMANDS=( \
-        ["help"]="XBUTIL" \
-        ["version"]="XBUTIL" \
-        ["--version"]="XBUTIL" \
-        ["program"]="PROGOPT" \
-        ["clock"]="XBUTIL" \
-        ["boot"]="XBUTIL" \
-        ["query"]="XBUTIL" \
-        ["dump"]="XBUTIL" \
-        ["run"]="XBUTIL" \
-        ["fan"]="XBUTIL" \
-        ["dmatest"]="XBUTIL" \
-        ["list"]="XBUTIL" \
-        ["scan"]="XBUTIL" \
-        ["mem"]="XBUTIL" \
-        ["dd"]="XBUTIL" \
-        ["status"]="XBUTIL" \
-        ["m2mtest"]="XBUTIL" \
-        ["flash"]="XBUTIL" \
-        ["validate"]="VALOPT" \
-        ["top"]="XBUTIL" \
-        ["reset"]="RSTOPT" \
-        ["p2p"]="XBUTIL" \
-        ["host_mem"]="XBUTIL" \
-        ["scheduler"]="XBUTIL" \
-        ["examine"]="XBUTIL2" \
-        ["advanced"]="XBUTIL2" \
-        ["--help"]="XBUTIL2" \
-        ["--verbose"]="XBUTIL2" \
-        ["--batch"]="XBUTIL2" \
-        ["--force"]="XBUTIL2" \
-    )
-
-INTRE='^[0-9]+$'
-
-
-function parse_device_arg() {
-    local RESULT="DEFAULT"
-    case $1 in
-	XBUTIL)
-	    RESULT="XBUTIL"
-	    ;;
-	XBUTIL2)
-	    RESULT="XBUTIL2"
-	    ;;
-	DEVICE)
-	    if [[ -n $2 ]] && [[ $2 =~ ${INTRE} ]]; then
-		RESULT="XBUTIL"
-	    elif [[ -n $2 ]]; then
-		RESULT="XBUTIL2"
-	    fi
-	    ;;
-    esac
-    PROG=${RESULT}
-}
+XRT_PROG=xbutil2
 
 # -- Examine the options
 XRTWARP_PROG_ARGS_size=0
 XRTWRAP_PROG_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
-	# Indicates that the new version of xbutil (e.g., xbutil2) should be used
-	-new|--new)
-	    XRT_PROG=xbutil2
-	    shift
-	    ;;
-	# Indicates that the legacy version of xbutil should be used
-	-legacy|--legacy)
-	    XRT_PROG=xbutil
-	    shift
+    # Indicates that the legacy was specified
+    -legacy|--legacy)
+        echo "----------------------------------------------------------------------"
+        echo "Error: Obsoleted option
+       The --legacy option is no longer supported.
+    
+       For legacy migration, please refer to the XRT github.io utility 
+       migration guide.
+
+       Commands, options, arguments and their descriptions can also be 
+       reported via the --help option."
+        echo "----------------------------------------------------------------------"
+        exit 1
 	    ;;
 	# Copy the options the remaining options
 	*)
@@ -142,89 +44,18 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Determine which version of xbutil should be used
-# Check to see environment variable is set
-if [ "${XRT_TOOLS_NEXTGEN,,}" = "true" ]; then
-     XRT_PROG=xbutil2
+# -- Find loader directory
+XRT_LOADER_DIR="`dirname \"$0\"`"
+
+# For edge platforms loader is not required as tools are in standard location(/usr).
+# So calling unwrapped tool from this script itself.
+if [[ $XRT_LOADER_DIR =~ "/usr" ]]; then
+    "${XRT_LOADER_DIR}/unwrapped/${XRT_PROG}" "${XRTWRAP_PROG_ARGS[@]}"
+    exit 0
 fi
 
-# If user did not specify -legacy/--legacy then attempt to determine if
-# user wants to use legacy or next-gen by peeking inside the command line.
-# Ideally with bash 'nameref' the case/esac would not be necessary and
-# we should be able to deref in one step using helper declaration like
-# declare -n PROG=${COMMANDS[${XRTWRAP_PROG_ARGS[0]}]}
-# However RHEL 7.X still uses bash 4.2 which does not support nameref :-(
-
-if [[ -z ${XRT_PROG} ]] && [[ ${#XRTWRAP_PROG_ARGS[@]} -gt 0 ]]; then
-    # Look up the utility usin the first command line argument
-    PROG=${COMMANDS[${XRTWRAP_PROG_ARGS[0]}]}
-    case ${PROG} in
-	XBUTIL | XBUTIL2)
-        # Non ambiguous command line argument, utility already resolved
-	;;
-	RSTOPT)
-	    # We have an ambiguous sub-command, use the next token/switch to
-	    # disambiguate by a second look up
-	    PROG="DEFAULT"
-	    if [ ${#XRTWRAP_PROG_ARGS[@]} -gt 1 ]; then
-		PROG=${RSTOPT[${XRTWRAP_PROG_ARGS[1]}]:-${DEFAULT}}
-		parse_device_arg ${PROG} ${XRTWRAP_PROG_ARGS[2]}
-	    fi
-	    ;;
-	PROGOPT)
-	    # We have an ambiguous sub-command, use the next token/switch to
-	    # disambiguate by a second look up
-	    PROG="DEFAULT"
-	    if [ ${#XRTWRAP_PROG_ARGS[@]} -gt 1 ]; then
-		PROG=${PROGOPT[${XRTWRAP_PROG_ARGS[1]}]:-${DEFAULT}}
-		parse_device_arg ${PROG} ${XRTWRAP_PROG_ARGS[2]}
-	    fi
-	    ;;
-	VALOPT)
-	    # We have an ambiguous sub-command, use the next token/switch to
-	    # disambiguate by a second look up
-	    PROG="DEFAULT"
-	    if [ ${#XRTWRAP_PROG_ARGS[@]} -gt 1 ]; then
-		PROG=${VALOPT[${XRTWRAP_PROG_ARGS[1]}]:-${DEFAULT}}
-		parse_device_arg ${PROG} ${XRTWRAP_PROG_ARGS[2]}
-	    fi
-	    ;;
-	*)
-	    # Bogus sub-command which failed lookup
-	    PROG="DEFAULT"
-	    ;;
-    esac
-    # Get named reference to the value pointed by the string returned
-    XRT_PROG=${!PROG}
-fi
-
-# Default to the new gen tool if we still could not disambuguate the choice
-if [[ -z ${XRT_PROG} ]]; then
-    XRT_PROG=${DEFAULT}
-fi
-
-# Friendly message if running in a terminal
-if [[ ${XRT_PROG} == "xbutil" ]] && [[ -t 1 ]]; then
-    echo "---------------------------------------------------------------------"
-    echo "Deprecation Warning:
-    The given legacy sub-command and/or option has been deprecated
-    to be obsoleted in the next release.
- 
-    Further information regarding the legacy deprecated sub-commands
-    and options along with their mappings to the next generation
-    sub-commands and options can be found on the Xilinx Runtime (XRT)
-    documentation page:
-    
-    https://xilinx.github.io/XRT/master/html/xbtools_map.html
-
-    Please update your scripts and tools to use the next generation
-    sub-commands and options."
-    echo "---------------------------------------------------------------------"
-fi
-
-# -- Find and call the loader
-XRT_LOADER="`dirname \"$0\"`/unwrapped/loader"
-
+# Call loader for dc platforms
+XRT_LOADER="${XRT_LOADER_DIR}/unwrapped/loader"
 if [ ! -f "$XRT_LOADER" ]; then
     echo "ERROR: Could not find 64-bit loader executable."
     echo "ERROR: ${XRT_LOADER} does not exist."

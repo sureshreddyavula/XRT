@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -20,6 +20,8 @@
 #include "core/common/config_reader.h"
 
 namespace xdp {
+
+  bool LowOverheadProfilingPlugin::live = false;
 
   const char* LowOverheadProfilingPlugin::APIs[] =
     {
@@ -128,13 +130,13 @@ namespace xdp {
 
   LowOverheadProfilingPlugin::LowOverheadProfilingPlugin() : XDPPlugin()
   {
+    LowOverheadProfilingPlugin::live = true ;
+
     db->registerPlugin(this) ;
     db->registerInfo(info::lop);
 
     VPWriter* writer = new LowOverheadTraceWriter("lop_trace.csv") ;
     writers.push_back(writer) ;
-
-    emulationSetup() ;
 
     (db->getStaticInfo()).addOpenedFile(writer->getcurrentFileName(), "VP_TRACE") ;
 
@@ -145,10 +147,8 @@ namespace xdp {
     {
       (db->getDynamicInfo()).addString(api) ;
     }
-    auto continuous_trace =
-      xrt_core::config::get_continuous_trace() ;
 
-    if (continuous_trace)
+    if (xrt_core::config::get_continuous_trace())
       XDPPlugin::startWriteThread(XDPPlugin::get_trace_file_dump_int_s(), "VP_TRACE");
   }
 
@@ -156,12 +156,16 @@ namespace xdp {
   {
     if (VPDatabase::alive())
     {
+      // OpenCL could be running hardware emulation or software emulation,
+      //  so be sure to account for any peculiarities here
+      emulationSetup() ;
+
       // We were destroyed before the database, so write the writers
       //  and unregister ourselves from the database
-      XDPPlugin::endWrite(false);
+      XDPPlugin::endWrite();
 
       db->unregisterPlugin(this) ;
     }
+    LowOverheadProfilingPlugin::live = false ;
   }
-
 }

@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -17,6 +18,7 @@
 #ifndef VTF_EVENT_DOT_H
 #define VTF_EVENT_DOT_H
 
+#include <cstdint>
 #include <fstream>
 
 #include "xdp/config.h"
@@ -91,8 +93,8 @@ namespace xdp {
     void dumpType(std::ofstream& fout, bool humanReadable) ;
 
   public:
-    XDP_EXPORT VTFEvent(uint64_t s_id, double ts, VTFEventType ty) ;
-    XDP_EXPORT virtual ~VTFEvent() ;
+    XDP_CORE_EXPORT VTFEvent(uint64_t s_id, double ts, VTFEventType ty) ;
+    XDP_CORE_EXPORT virtual ~VTFEvent() ;
 
     // Getters and Setters
     inline double       getTimestamp()    const { return timestamp ; }
@@ -103,10 +105,13 @@ namespace xdp {
 
     // Functions that can be used as filters
     virtual bool isUserEvent()       { return false ; }
-    virtual bool isOpenCLAPI()       { return false ; } 
+    virtual bool isOpenCLAPI()       { return false ; }
+    virtual bool isLOPAPI()          { return false ; }
     virtual bool isHALAPI()          { return false ; }
     virtual bool isHostEvent()       { return false ; }
-    virtual bool isNativeHostEvent() { return false ; } 
+    virtual bool isNativeHostEvent() { return false ; }
+    virtual bool isNativeRead()      { return false ; }
+    virtual bool isNativeWrite()     { return false ; }
     virtual bool isOpenCLHostEvent()
       { return type == READ_BUFFER  || type == READ_BUFFER_P2P  ||
                type == WRITE_BUFFER || type == WRITE_BUFFER_P2P ||
@@ -129,7 +134,8 @@ namespace xdp {
 	                                    type == LOP_KERNEL_ENQUEUE ; }
 
     virtual uint64_t getDevice() { return 0 ; } // CHECK
-    XDP_EXPORT virtual void dump(std::ofstream& fout, uint32_t bucket) ;
+    XDP_CORE_EXPORT virtual void dump(std::ofstream& fout, uint32_t bucket) ;
+    XDP_CORE_EXPORT virtual void dumpSync(std::ofstream& /*fout*/, uint32_t /*bucket*/) {};
   } ;
 
   // Used so the database can sort based on timestamp order
@@ -149,8 +155,8 @@ namespace xdp {
 
     APICall() = delete ;
   public:
-    XDP_EXPORT APICall(uint64_t s_id, double ts, uint64_t name, VTFEventType ty);
-    XDP_EXPORT ~APICall() ;
+    XDP_CORE_EXPORT APICall(uint64_t s_id, double ts, uint64_t name, VTFEventType ty);
+    XDP_CORE_EXPORT ~APICall() ;
 
     virtual bool isHostEvent() { return true ; } 
   } ;

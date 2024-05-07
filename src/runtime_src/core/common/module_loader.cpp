@@ -1,33 +1,23 @@
-/**
- * Copyright (C) 2016-2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2016-2020 Xilinx, Inc
+// Copyright (C) 2024 Advanced Micro Devices, Inc. All rights reserved.
+
 #define XRT_CORE_COMMON_SOURCE
 #include "core/common/module_loader.h"
 
 #include "core/common/dlfcn.h"
 #include "core/common/config_reader.h"
+#include "detail/xilinx_xrt.h"
 
-#include <boost/filesystem/operations.hpp>
-#include <boost/filesystem/path.hpp>
-
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
 
 #ifdef _WIN32
 # pragma warning (disable : 4996)
 #endif
 
-namespace bfs = boost::filesystem;
+namespace sfs = std::filesystem;
 
 namespace {
 
@@ -94,54 +84,136 @@ shim_name()
   throw std::runtime_error("Unexected error creating shim library name");
 }
 
-static bfs::path
+static sfs::path
+get_xilinx_xrt()
+{
+  sfs::path xrt(value_or_empty(getenv("XILINX_XRT")));
+  if (!xrt.empty())
+    return xrt;
+
+  return xrt_core::detail::xilinx_xrt();
+}
+
+static const sfs::path&
 xilinx_xrt()
 {
-  bfs::path xrt(value_or_empty(getenv("XILINX_XRT")));
-  if (xrt.empty()){
-#if defined (__aarch64__) || defined (__arm__)
-    xrt = bfs::path("/usr");
-#else
-    throw std::runtime_error("XILINX_XRT not set");
-#endif
-  }
-
+  // Cache Xilinx XRT path
+  static auto xrt = get_xilinx_xrt();
   return xrt;
 }
 
-static bfs::path
+// Get list of platform repository paths from ini file and append
+// default repository paths
+std::vector<sfs::path>
+get_platform_repo_paths()
+{
+  std::vector<sfs::path> paths;
+  
+  // Get repo path from ini file if any
+  auto repo = xrt_core::config::get_platform_repo();
+  auto token = std::strtok(repo.data(), ":;");
+  while (token) {
+    paths.push_back(token);
+    token = std::strtok(nullptr, ":;");
+  }
+
+  // Append default path(s)
+  const auto default_paths = xrt_core::detail::platform_repo_path();
+  paths.insert(paths.end(), default_paths.begin(), default_paths.end());
+  return paths;
+}
+
+static const std::vector<sfs::path>&
+platform_repo_paths()
+{
+  // Cache repo paths
+  static std::vector<sfs::path> paths{get_platform_repo_paths()};
+  return paths;
+}
+
+// Return the full path to the file if it exists in a platform
+// repository, else throw.
+static sfs::path
+platform_repo_path(const std::string& file)
+{
+  for (const auto& path : platform_repo_paths()) {
+    auto xpath = path / file;
+    if (sfs::exists(xpath) && sfs::is_regular_file(xpath))
+      return xpath;
+  }
+
+  throw std::runtime_error("No such file '" + file + "'");
+}
+
+/**
+ * Refer to \ref platform_path(path) in module_loader.h
+ */
+static sfs::path
+platform_path(const std::string& file_name)
+{
+  sfs::path xpath{file_name};
+  if (sfs::exists(xpath) && sfs::is_regular_file(xpath))
+    return xpath;
+
+  if (!xpath.is_absolute())
+    return platform_repo_path(file_name);
+
+  throw std::runtime_error("No such file '" + xpath.string() + "'");
+}
+
+static sfs::path
 module_path(const std::string& module)
 {
   auto path = xilinx_xrt();
 #ifdef _WIN32
-  path /= "bin/" + module + ".dll";
+  path /= module + ".dll";
 #else
   path /= "lib/xrt/module/lib" + module + ".so";
 #endif
 
-  if (!bfs::exists(path) || !bfs::is_regular_file(path))
+  if (!sfs::exists(path) || !sfs::is_regular_file(path))
     throw std::runtime_error("No such library '" + path.string() + "'");
 
   return path;
 }
-
   
-static bfs::path
+static sfs::path
 shim_path()
 {
   auto path = xilinx_xrt();
   auto name = shim_name();
 
 #ifdef _WIN32
-  path /= "bin/" + name + ".dll";
+  path /= name + ".dll";
 #else
   path /= "lib/lib" + name + ".so." + XRT_VERSION_MAJOR;
 #endif
 
-  if (!bfs::exists(path) || !bfs::is_regular_file(path))
+  if (!sfs::exists(path) || !sfs::is_regular_file(path))
     throw std::runtime_error("No such library '" + path.string() + "'");
 
   return path;
+}
+
+static std::vector<std::string>
+driver_plugin_paths()
+{
+  std::vector<std::string> ret;
+  sfs::directory_iterator p{shim_path().parent_path()};
+
+  // All driver plug-ins are in the same directory as shim .so and with below prefix and suffix.
+  const std::string pre = "libxrt_driver_";
+  const std::string suf = std::string(".so.") + XRT_VERSION_MAJOR;
+  while (p != sfs::directory_iterator{}) {
+    const auto name = p->path().filename().string();
+    if ((name.size() > (pre.size() + suf.size())) &&
+      !name.compare(0, pre.size(), pre) &&
+      !name.compare(name.size() - suf.size(), suf.size(), suf))
+      ret.push_back(p->path().string());
+    p++;
+  }
+
+  return ret;
 }
 
 static void*
@@ -190,5 +262,36 @@ shim_loader()
   auto path = shim_path();
   load_library(path.string());
 }
+
+driver_loader::
+driver_loader()
+{
+  auto paths = driver_plugin_paths();
+
+  for (const auto& p : paths)
+    load_library(p);
+}
+
+namespace environment {
+
+const sfs::path&
+xilinx_xrt()
+{
+  return ::xilinx_xrt();
+}
+
+sfs::path
+platform_path(const std::string& file_name)
+{
+  return ::platform_path(file_name);
+}
+
+const std::vector<sfs::path>&
+platform_repo_paths()
+{
+  return ::platform_repo_paths();
+}
+
+} // environment
 
 } // xrt_core

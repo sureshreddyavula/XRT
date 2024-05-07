@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. = All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -19,10 +20,10 @@
 namespace xdp {
 
   HALHostTraceWriter::HALHostTraceWriter(const char* filename, 
-					 const std::string& version,
-					 const std::string& creationTime,
-					 const std::string& xrtV,
-					 const std::string& toolV)
+                                         const std::string& version,
+                                         const std::string& creationTime,
+                                         const std::string& xrtV,
+                                         const std::string& toolV)
     : VPTraceWriter(filename, version, creationTime, 6 /* us */),
       xrtVersion(xrtV),
       toolVersion(toolV)
@@ -52,12 +53,10 @@ namespace xdp {
     uint32_t rowCount = 0;
     fout << "STRUCTURE" << std::endl ;
     
-    fout << "Group_Start,Host" << std::endl ;
+    fout << "Group_Start,HAL Host Trace" << std::endl ;
 
-    fout << "Group_Start,HAL API Calls" << std::endl ;
-    fout << "Dynamic_Row," << ++rowCount << ",General,0x0,API_CALL" << std::endl;
+    fout << "Dynamic_Row," << ++rowCount << ",HAL API Calls,API_CALL" << std::endl;
     eventTypeBucketIdMap[HAL_API_CALL] = rowCount;
-    fout << "Group_End,HAL API Calls" << std::endl ;
     
     fout << "Group_Start,Data Transfer" << std::endl ;
     fout << "Dynamic_Row," << ++rowCount << ",Read,READ_BUFFER" << std::endl ;
@@ -66,7 +65,7 @@ namespace xdp {
     eventTypeBucketIdMap[WRITE_BUFFER] = rowCount;
     fout << "Group_End,Data Transfer" << std::endl ;
     
-    fout << "Group_End,Host" << std::endl ;
+    fout << "Group_End,HAL Host Trace" << std::endl ;
   }
 
   void HALHostTraceWriter::writeStringTable()
@@ -77,17 +76,16 @@ namespace xdp {
 
   void HALHostTraceWriter::writeTraceEvents()
   {
-    fout << "EVENTS" << std::endl ;
+    fout << "EVENTS\n";
     std::vector<VTFEvent*> HALAPIEvents = 
-      (db->getDynamicInfo()).filterEvents( [](VTFEvent* e)
-					   {
-					     return e->isHostEvent()  &&
-					            !e->isOpenCLAPI() &&
-					            !e->isLOPHostEvent() ;
-					   }
-					 ) ;
-    for (auto e : HALAPIEvents)
-    {
+      db->getDynamicInfo().copySortedHostEvents( [](VTFEvent* e)
+                                                 {
+                                                   return e->isHostEvent()  &&
+                                                          !e->isOpenCLAPI() &&
+                                                          !e->isLOPHostEvent();
+                                                 }
+                                               );
+    for (auto e : HALAPIEvents) {
       VTFEventType eventType = e->getEventType();
       e->dump(fout, eventTypeBucketIdMap[eventType]) ;
     }

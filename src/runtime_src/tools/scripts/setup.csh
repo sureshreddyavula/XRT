@@ -23,17 +23,21 @@ foreach x ($called)
         set script_path=`readlink -f $x`
         set xrt_dir=`dirname $script_path`
     endif
-    if ( $xrt_dir =~ */opt/xilinx/xrt ) break
+    if ( $xrt_dir =~ */xrt ) break
 end
 
-if ( $xrt_dir !~ */opt/xilinx/xrt ) then
+if ( $xrt_dir !~ */xrt ) then
     echo "Invalid location: $xrt_dir"
     echo "This script must be sourced from XRT install directory"
     exit 1
 endif
 
-set OSDIST=`lsb_release -i |awk -F: '{print tolower($2)}' | tr -d ' \t'`
-set OSREL=`lsb_release -r |awk -F: '{print tolower($2)}' |tr -d ' \t' | awk -F. '{print $1*100+$2}'`
+set OSDIST=`cat /etc/os-release | grep -i "^ID=" | awk -F= '{print $2}'`
+if ( "$OSDIST" =~ "centos" ) then
+    set OSREL=`cat /etc/redhat-release | awk '{print $4}' | tr -d '"' | awk -F. '{print $1*100+$2}'`
+else    
+    set OSREL=`cat /etc/os-release | grep -i "^VERSION_ID=" | awk -F= '{print $2}' | tr -d '"' | awk -F. '{print $1*100+$2}'`
+endif
 
 if ( "$OSDIST" =~ "ubuntu" ) then
     if ( $OSREL < 1604 ) then
@@ -42,7 +46,7 @@ if ( "$OSDIST" =~ "ubuntu" ) then
     endif
 endif
 
-if ( "$OSDIST" =~ centos  || "$OSDIST" =~ redhat* ) then
+if ( "$OSDIST" =~ centos  || "$OSDIST" =~ rhel* ) then
     if ( $OSREL < 704 ) then
         echo "ERROR: Centos or RHEL release version must be 7.4 or later"
         exit 1
@@ -68,6 +72,10 @@ if ( ! $?PYTHONPATH ) then
 else
     setenv PYTHONPATH $XILINX_XRT/python:$PYTHONPATH
 endif
+
+# Enable autocompletion for the xbutil and xbmgmt commands
+source $XILINX_XRT/share/completions/xbutil-csh-completion-wrapper
+source $XILINX_XRT/share/completions/xbmgmt-csh-completion-wrapper
 
 # To use the newest version of the XRT tools, either uncomment or set 
 # the following environment variable in your profile:

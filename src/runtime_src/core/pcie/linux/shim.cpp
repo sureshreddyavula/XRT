@@ -1,75 +1,64 @@
-/**
- * Copyright (C) 2016-2020 Xilinx, Inc
- * Author(s): Umang Parekh
- *          : Sonal Santan
- *          : Ryan Radjabi
- *
- * XRT PCIe library layered on top of xocl kernel driver
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2016-2022 Xilinx, Inc
+// Copyright (C) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 
-#include "shim.h"
-#include "scan.h"
+#include "shim.h"  // This file implements shim.h
+#include "xrt.h"   // This file implements xrt.h
+
+#include "ert.h"
+#include "pcidev.h"
 #include "system_linux.h"
-#include "core/common/message.h"
-#include "core/common/xclbin_parser.h"
-#include "core/common/scheduler.h"
+#include "xclbin.h"
+
+#include "core/common/shim/buffer_handle.h"
+#include "core/common/shim/hwctx_handle.h"
+#include "core/common/shim/hwqueue_handle.h"
+#include "core/common/shim/shared_handle.h"
+#include "core/include/shim_int.h"
+#include "core/include/xdp/fifo.h"
+#include "core/include/xdp/trace.h"
+#include "core/include/experimental/xrt_hw_context.h"
+
 #include "core/common/bo_cache.h"
 #include "core/common/config_reader.h"
+#include "core/common/message.h"
 #include "core/common/query_requests.h"
+#include "core/common/scheduler.h"
+#include "core/common/xclbin_parser.h"
 #include "core/common/AlignedAllocator.h"
+#include "core/common/api/hw_context_int.h"
 
-#include "plugin/xdp/hal_profile.h"
 #include "plugin/xdp/hal_api_interface.h"
-#include "plugin/xdp/hal_device_offload.h"
-
-#include "plugin/xdp/aie_trace.h"
-
-#include "xclbin.h"
-#include "ert.h"
-#include "shim_int.h"
+#include "plugin/xdp/hal_profile.h"
+#include "plugin/xdp/shim_callbacks.h"
 
 #include "core/pcie/driver/linux/include/mgmt-reg.h"
 
+#include <cassert>
+#include <cerrno>
+#include <chrono>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <condition_variable>
+#include <fstream>
 #include <iostream>
 #include <iomanip>
-#include <fstream>
 #include <sstream>
-#include <vector>
-#include <cstring>
 #include <thread>
-#include <chrono>
-#include <cstdio>
-#include <cstdarg>
-#include <cerrno>
-#include <condition_variable>
+#include <utility>
+#include <vector>
 
 #include <unistd.h>
 #include <poll.h>
 
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
-#include <sys/uio.h>
 #include <sys/syscall.h>
-#include <sys/file.h>
-#include <linux/aio_abi.h>
+#include <sys/uio.h>
 #include <asm/mman.h>
-
-#ifdef NDEBUG
-# undef NDEBUG
-# include<cassert>
-#endif
+#include <linux/aio_abi.h>
 
 #if defined(__GNUC__)
 #define SHIM_UNUSED __attribute__((unused))
@@ -80,11 +69,7 @@
 
 #define SHIM_QDMA_AIO_EVT_MAX   1024 * 64
 
-// Profiling
-#define AXI_FIFO_RDFD_AXI_FULL          0x1000
-#define MAX_TRACE_NUMBER_SAMPLES                        16384
-#define XPAR_AXI_PERF_MON_0_TRACE_WORD_WIDTH            64
-
+namespace xq = xrt_core::query;
 namespace {
 
 template <typename ...Args>
@@ -124,7 +109,231 @@ inline int io_getevents(aio_context_t ctx, long min_nr, long max_nr,
   return syscall(__NR_io_getevents, ctx, min_nr, max_nr, events, timeout);
 }
 
+static
+xocl::shim*
+get_shim_object(xclDeviceHandle handle)
+{
+  if (auto shim = xocl::shim::handleCheck(handle))
+    return shim;
+
+  throw xrt_core::error("Invalid shim handle");
+}
+
 } // namespace
+
+namespace xrt_shim {
+
+class shared_object : public xrt_core::shared_handle
+{
+  xocl::shim* m_shim;
+  xclBufferExportHandle m_ehdl;
+public:
+  shared_object(xocl::shim* shim, xclBufferExportHandle ehdl)
+    : m_shim(shim)
+    , m_ehdl(ehdl)
+  {}
+
+  ~shared_object()
+  {
+    if (m_ehdl != XRT_NULL_BO_EXPORT)
+      close(m_ehdl);
+  }
+
+  // Detach and return export handle for legacy xclAPI use
+  xclBufferExportHandle
+  detach_handle()
+  {
+    return std::exchange(m_ehdl, XRT_NULL_BO_EXPORT);
+  }
+
+  export_handle
+  get_export_handle() const override
+  {
+    return static_cast<export_handle>(m_ehdl);
+  }
+};
+
+class buffer_object : public xrt_core::buffer_handle
+{
+  xocl::shim* m_shim;
+  xclBufferHandle m_hdl;
+public:
+  buffer_object(xocl::shim* shim, int fd)
+    : m_shim(shim)
+    , m_hdl(fd)
+  {}
+
+  ~buffer_object()
+  {
+    if (m_hdl != XRT_NULL_BO)
+      m_shim->xclFreeBO(m_hdl);
+  }
+
+  xclBufferHandle
+  get_handle() const
+  {
+    return m_hdl;
+  }
+
+  // Detach and return export handle for legacy xclAPI use
+  xclBufferHandle
+  detach_handle()
+  {
+    return std::exchange(m_hdl, XRT_NULL_BO);
+  }
+
+  // Export buffer for use with another process or device
+  // An exported buffer can be imported by another device
+  // or hardware context.
+  std::unique_ptr<xrt_core::shared_handle>
+  share() const override
+  {
+    return m_shim->xclExportBO(m_hdl);
+  }
+
+  void*
+  map(map_type mt) override
+  {
+    return m_shim->xclMapBO(m_hdl, (mt == xrt_core::buffer_handle::map_type::write));
+  }
+
+  void
+  unmap(void* addr) override
+  {
+    m_shim->xclUnmapBO(m_hdl, addr);
+  }
+
+  void
+  sync(direction dir, size_t size, size_t offset) override
+  {
+    m_shim->xclSyncBO(m_hdl, static_cast<xclBOSyncDirection>(dir), size, offset);
+  }
+
+  void
+  copy(const buffer_handle* src, size_t size, size_t dst_offset, size_t src_offset) override
+  {
+    auto bo_src = static_cast<const buffer_object*>(src);
+    m_shim->xclCopyBO(m_hdl, bo_src->get_handle(), size, dst_offset, src_offset);
+  }
+
+  properties
+  get_properties() const override
+  {
+    xclBOProperties xprop;
+    m_shim->xclGetBOProperties(m_hdl, &xprop);
+    return {xprop.flags, xprop.size, xprop.paddr};
+  }
+
+  xclBufferHandle
+  get_xcl_handle() const override
+  {
+    return get_handle();
+  }
+}; // buffer_object
+
+class hwcontext : public xrt_core::hwctx_handle
+{
+  xocl::shim* m_shim;
+  xrt::uuid m_uuid;
+  slot_id m_slotidx;
+  xrt::hw_context::access_mode m_mode;
+  bool m_null = false;
+
+public:
+  hwcontext(xocl::shim* shim, slot_id slotidx, xrt::uuid uuid, xrt::hw_context::access_mode mode)
+    : m_shim(shim)
+    , m_uuid(std::move(uuid))
+    , m_slotidx(slotidx)
+    , m_mode(mode)
+  {}
+
+  hwcontext(xocl::shim* shim, const xrt::uuid& uuid, xrt::hw_context::access_mode mode)
+    : hwcontext(shim, 0, uuid, mode)
+  {
+    m_null = true;
+  }
+
+  ~hwcontext()
+  {
+    try {
+      m_shim->destroy_hw_context(m_slotidx);
+    }
+    catch (const std::exception& ex) {
+      xrt_core::send_exception_message(ex.what());
+    }
+  }
+
+  void
+  update_access_mode(access_mode mode) override
+  {
+    m_mode = mode;
+  }
+
+  slot_id
+  get_slotidx() const override
+  {
+    return m_slotidx;
+  }
+
+  xrt::hw_context::access_mode
+  get_mode() const
+  {
+    return m_mode;
+  }
+
+  xrt::uuid
+  get_xclbin_uuid() const
+  {
+    return m_uuid;
+  }
+
+  xrt_core::hwqueue_handle*
+  get_hw_queue() override
+  {
+    return nullptr;
+  }
+
+  std::unique_ptr<xrt_core::buffer_handle>
+  alloc_bo(void* userptr, size_t size, uint64_t flags) override
+  {
+    // The hwctx is embedded in the flags, use regular shim path
+    return m_shim->xclAllocUserPtrBO(userptr, size, xcl_bo_flags{flags}.flags);
+  }
+
+  std::unique_ptr<xrt_core::buffer_handle>
+  alloc_bo(size_t size, uint64_t flags) override
+  {
+    // The hwctx is embedded in the flags, use regular shim path
+    return m_shim->xclAllocBO(size, xcl_bo_flags{flags}.flags);
+  }
+
+  xrt_core::cuidx_type
+  open_cu_context(const std::string& cuname) override
+  {
+    return m_shim->open_cu_context(this, cuname);
+  }
+
+  void
+  close_cu_context(xrt_core::cuidx_type cuidx) override
+  {
+    m_shim->close_cu_context(this, cuidx);
+  }
+
+  void
+  exec_buf(xrt_core::buffer_handle* cmd) override
+  {
+    auto cmd_bo = static_cast<const buffer_object*>(cmd);
+    m_shim->exec_buf(cmd_bo->get_handle(), this);
+  }
+
+  bool
+  is_null() const
+  {
+    return m_null;
+  }
+};
+
+}
 
 namespace xocl {
 
@@ -541,7 +750,7 @@ public:
  */
 shim::
 shim(unsigned index)
-  : mCoreDevice(xrt_core::pcie_linux::get_userpf_device(this, index))
+  : mCoreDevice(xrt_core::pci::get_userpf_device(this, index))
   , mUserHandle(-1)
   , mStreamHandle(-1)
   , mBoardNumber(index)
@@ -551,14 +760,15 @@ shim(unsigned index)
   , mStallProfilingNumberSlots(0)
   , mStreamProfilingNumberSlots(0)
   , mCmdBOCache(nullptr)
-  , mCuMaps(128, std::make_pair<uint32_t*, uint32_t>(nullptr, 0))
+  , mCuMaps{128, {nullptr, 0, 0, 0}}
 {
   init(index);
+  hw_context_enable = xrt_core::config::get_hw_context_flag();
 }
 
 int shim::dev_init()
 {
-    auto dev = pcidev::get_dev(mBoardNumber);
+    auto dev = xrt_core::pci::get_dev(mBoardNumber);
     if(dev == nullptr) {
         xrt_logmsg(XRT_ERROR, "%s: Card [%d] not found", __func__, mBoardNumber);
         return -ENOENT;
@@ -592,8 +802,6 @@ int shim::dev_init()
     mCmdBOCache = std::make_unique<xrt_core::bo_cache>(this, xrt_core::config::get_cmdbo_cache());
 
     mStreamHandle = mDev->open("dma.qdma", O_RDWR | O_SYNC);
-    if (mStreamHandle <= 0)
-       mStreamHandle = mDev->open("dma.qdma4", O_RDWR | O_SYNC);
     memset(&mAioContext, 0, sizeof(mAioContext));
     mAioEnabled = (io_setup(SHIM_QDMA_AIO_EVT_MAX, &mAioContext) == 0);
 
@@ -633,7 +841,7 @@ init(unsigned int index)
 
     // Profiling - defaults
     // Class-level defaults: mIsDebugIpLayoutRead = mIsDeviceProfiling = false
-    mDevUserName = mDev->sysfs_name;
+    mDevUserName = mDev->m_sysfs_name;
     mMemoryProfilingNumberSlots = 0;
 }
 
@@ -642,7 +850,12 @@ init(unsigned int index)
  */
 shim::~shim()
 {
+  try {
     xrt_logmsg(XRT_INFO, "%s", __func__);
+
+    // Flush all of the profiling information from the device to the profiling
+    // library before the device is closed (when profiling is enabled).
+    xdp::finish_flush_device(this);
 
     // The BO cache unmaps and releases all execbo, but this must
     // be done before the device is closed.
@@ -650,10 +863,16 @@ shim::~shim()
 
     dev_fini();
 
-    for (auto p : mCuMaps) {
-        if (p.first)
-            (void) munmap(p.first, p.second);
+    for (const auto& p : mCuMaps) {
+        if (p.addr)
+            (void) munmap(p.addr, p.size);
     }
+  }
+  catch (const std::exception& ex) {
+    xrt_core::send_exception_message(ex.what());
+  }
+  catch (...) {
+  }
 }
 
 /*
@@ -743,32 +962,32 @@ size_t shim::xclRead(xclAddressSpace space, uint64_t offset, void *hostBuf, size
  *
  * Assume that the memory is always created for the device ddr for now. Ignoring the flags as well.
  */
-unsigned int shim::xclAllocBO(size_t size, int unused, unsigned flags)
+std::unique_ptr<xrt_core::buffer_handle>
+shim::
+xclAllocBO(size_t size, unsigned flags)
 {
-    drm_xocl_create_bo info = {size, mNullBO, flags};
-    unsigned int bo = mNullBO;
-    int result = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_CREATE_BO, &info);
-    if (result)
-        errno = result;
-    else
-        bo = info.handle;
-    return bo;
+  drm_xocl_create_bo info = {size, mNullBO, flags};
+  int result = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_CREATE_BO, &info);
+  if (result)
+    throw xrt_core::system_error(result, "failed to allocate bo");
+
+  return std::make_unique<xrt_shim::buffer_object>(this, info.handle);
 }
 
 /*
  * xclAllocUserPtrBO()
  */
-unsigned int shim::xclAllocUserPtrBO(void *userptr, size_t size, unsigned flags)
+std::unique_ptr<xrt_core::buffer_handle>
+shim::
+xclAllocUserPtrBO(void* userptr, size_t size, unsigned flags)
 {
-    drm_xocl_userptr_bo user =
-        {reinterpret_cast<uint64_t>(userptr), size, mNullBO, flags};
-    unsigned int bo = mNullBO;
-    int result = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_USERPTR_BO, &user);
-    if (result)
-        errno = result;
-    else
-        bo = user.handle;
-    return bo;
+  drm_xocl_userptr_bo user =
+    {reinterpret_cast<uint64_t>(userptr), size, mNullBO, flags};
+  int result = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_USERPTR_BO, &user);
+  if (result)
+    throw xrt_core::system_error(result, "failed to allocate userptr bo");
+
+  return std::make_unique<xrt_shim::buffer_object>(this, user.handle);
 }
 
 /*
@@ -854,33 +1073,36 @@ int shim::xclSyncBO(unsigned int boHandle, xclBOSyncDirection dir, size_t size, 
     return ret ? -errno : ret;
 }
 
-int shim::execbufCopyBO(unsigned int dst_bo_handle,
-    unsigned int src_bo_handle, size_t size, size_t dst_offset,
-    size_t src_offset)
+int
+shim::
+execbufCopyBO(unsigned int dst_bo_handle,
+              unsigned int src_bo_handle, size_t size, size_t dst_offset,
+              size_t src_offset)
 {
-    auto bo = mCmdBOCache->alloc<ert_start_copybo_cmd>();
-    ert_fill_copybo_cmd(bo.second, src_bo_handle, dst_bo_handle,
-                        src_offset, dst_offset, size);
+  auto bo = mCmdBOCache->alloc<ert_start_copybo_cmd>();
+  ert_fill_copybo_cmd(bo.second, src_bo_handle, dst_bo_handle,
+                      src_offset, dst_offset, size);
 
-    int ret = xclExecBuf(bo.first);
-    if (ret) {
-        mCmdBOCache->release<ert_start_copybo_cmd>(bo);
-        return ret;
-    }
-
-    do {
-        ret = xclExecWait(1000);
-        if (ret == -1)
-            break;
-    }
-    while (bo.second->state < ERT_CMD_STATE_COMPLETED);
-
-    ret = (ret == -1) ? -errno : 0;
-    if (!ret && (bo.second->state != ERT_CMD_STATE_COMPLETED))
-        ret = -EINVAL;
-
-    mCmdBOCache->release<ert_start_copybo_cmd>(bo);
+  auto boh = static_cast<xrt_shim::buffer_object*>(bo.first.get());
+  int ret = xclExecBuf(boh->get_handle());
+  if (ret) {
+    mCmdBOCache->release<ert_start_copybo_cmd>(std::move(bo));
     return ret;
+  }
+
+  do {
+    ret = xclExecWait(1000);
+    if (ret == -1)
+      break;
+  }
+  while (bo.second->state < ERT_CMD_STATE_COMPLETED);
+
+  ret = (ret == -1) ? -errno : 0;
+  if (!ret && (bo.second->state != ERT_CMD_STATE_COMPLETED))
+    ret = -EINVAL;
+
+  mCmdBOCache->release<ert_start_copybo_cmd>(std::move(bo));
+  return ret;
 }
 
 int shim::m2mCopyBO(unsigned int dst_bo_handle,
@@ -910,29 +1132,33 @@ int shim::xclCopyBO(unsigned int dst_bo_handle,
         execbufCopyBO(dst_bo_handle, src_bo_handle, size, dst_offset, src_offset);
 }
 
-int shim::xclUpdateSchedulerStat()
+int
+shim::
+xclUpdateSchedulerStat()
 {
-    auto bo = mCmdBOCache->alloc<ert_packet>();
-    bo.second->opcode = ERT_CU_STAT;
-    bo.second->type = ERT_CTRL;
+  auto bo = mCmdBOCache->alloc<ert_packet>();
+  bo.second->opcode = ERT_CU_STAT;
+  bo.second->type = ERT_CTRL;
 
-    int ret = xclExecBuf(bo.first);
-    if (ret) {
-        mCmdBOCache->release(bo);
-        return ret;
-    }
-
-    do {
-        ret = xclExecWait(1000);
-        if (ret == -1)
-            break;
-    } while (bo.second->state < ERT_CMD_STATE_COMPLETED);
-
-    ret = (ret == -1) ? -errno : 0;
-    if (!ret && (bo.second->state != ERT_CMD_STATE_COMPLETED))
-        ret = -EINVAL;
-    mCmdBOCache->release<ert_packet>(bo);
+  auto boh = static_cast<xrt_shim::buffer_object*>(bo.first.get());
+  int ret = xclExecBuf(boh->get_handle());
+  if (ret) {
+    mCmdBOCache->release(std::move(bo));
     return ret;
+  }
+
+  do {
+    ret = xclExecWait(1000);
+    if (ret == -1)
+      break;
+  } while (bo.second->state < ERT_CMD_STATE_COMPLETED);
+
+  ret = (ret == -1) ? -errno : 0;
+  if (!ret && (bo.second->state != ERT_CMD_STATE_COMPLETED))
+    ret = -EINVAL;
+
+  mCmdBOCache->release(move(bo));
+  return ret;
 }
 
 /*
@@ -995,10 +1221,18 @@ void shim::xclSysfsGetDeviceInfo(xclDeviceInfo2 *info)
     mDev->sysfs_get<unsigned long long>("rom", "timestamp", errmsg, info->mTimeStamp, static_cast<unsigned long long>(-1));
     mDev->sysfs_get<unsigned short>("rom", "ddr_bank_count_max", errmsg, info->mDDRBankCount, static_cast<unsigned short>(-1));
     info->mDDRSize *= info->mDDRBankCount;
-    info->mPciSlot = (mDev->domain<<16) + (mDev->bus<<8) + (mDev->dev<<3) + mDev->func;
+    info->mPciSlot = (mDev->m_domain<<16) + (mDev->m_bus<<8) + (mDev->m_dev<<3) + mDev->m_func;
     info->mNumClocks = numClocks(info->mName);
+    info->mNumCDMA = xrt_core::device_query<xrt_core::query::kds_numcdmas>(mCoreDevice);
 
-    mDev->sysfs_get<unsigned short>("mb_scheduler", "kds_numcdmas", errmsg, info->mNumCDMA, static_cast<unsigned short>(-1));
+    mDev->sysfs_get("", "link_width", errmsg, info->mPCIeLinkWidth, static_cast<unsigned short>(-1));
+    mDev->sysfs_get("", "link_speed", errmsg, info->mPCIeLinkSpeed, static_cast<unsigned short>(-1));
+    mDev->sysfs_get("", "link_speed_max", errmsg, info->mPCIeLinkSpeedMax, static_cast<unsigned short>(-1));
+    mDev->sysfs_get("", "link_width_max", errmsg, info->mPCIeLinkWidthMax, static_cast<unsigned short>(-1));
+
+    //dont try to get any information which needs mailbox communication when device is not ready.
+    if (!mDev->m_is_mgmt && !mDev->m_is_ready)
+        return;
 
     //get sensors
     unsigned int m12VPex, m12VAux, mPexCurr, mAuxCurr, mDimmTemp_0, mDimmTemp_1, mDimmTemp_2,
@@ -1062,10 +1296,6 @@ void shim::xclSysfsGetDeviceInfo(xclDeviceInfo2 *info)
 
     //get sensors end
 
-    mDev->sysfs_get("", "link_width", errmsg, info->mPCIeLinkWidth, static_cast<unsigned short>(-1));
-    mDev->sysfs_get("", "link_speed", errmsg, info->mPCIeLinkSpeed, static_cast<unsigned short>(-1));
-    mDev->sysfs_get("", "link_speed_max", errmsg, info->mPCIeLinkSpeedMax, static_cast<unsigned short>(-1));
-    mDev->sysfs_get("", "link_width_max", errmsg, info->mPCIeLinkWidthMax, static_cast<unsigned short>(-1));
     mDev->sysfs_get("", "mig_calibration", errmsg, info->mMigCalib, false);
     std::vector<uint64_t> freqs;
     mDev->sysfs_get("icap", "clock_freqs", errmsg, freqs);
@@ -1111,15 +1341,28 @@ int shim::resetDevice(xclResetKind kind)
 
     dev_fini();
 
+    // This loop used to wait for device come online and ready to use. It reads "dev_offline"
+    // sysfs node to retrieve latest status of device in the interval of 500 milli sec.
+    // In certain testing environement, reset never complete and waits indefinitely
+    // in this loop for dev_offline status to be false. To overcome this infinite loop issue,
+    // added loop_timer (default value set to 120 sec) which is used to exit the loop.
+    unsigned int loop_timer = xrt_core::config::get_device_offline_timer();
+    auto start = std::chrono::system_clock::now();
     while (dev_offline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        pcidev::get_dev(mBoardNumber)->sysfs_get<int>("",
+	xrt_core::pci::get_dev(mBoardNumber)->sysfs_get<int>("",
             "dev_offline", err, dev_offline, -1);
+        auto end = std::chrono::system_clock::now();
+        std::chrono::duration<double> elapsed_seconds = end - start;
+        if (elapsed_seconds.count() > loop_timer) {
+            xrt_logmsg(XRT_WARNING, "%s: device unable to come online during reset, try again", __func__);
+            ret = -EAGAIN;
+        }
     }
 
     dev_init();
 
-    return 0;
+    return ret;
 }
 
 int shim::p2pEnable(bool enable, bool force)
@@ -1182,60 +1425,61 @@ int shim::cmaEnable(bool enable, uint64_t size)
     int ret = 0;
 
     if (enable) {
+        /* Once set MAP_HUGETLB, we have to specify bit[26~31] as size in log
+         * e.g. We like to get 2M huge page, 2M = 2^21,
+         * 21 = 0x15
+         * Let's find how many 1GB huge page we have to allocate
+         */
+        std::string errmsg;
+        uint64_t hugepage_flag = 0x1e;
         uint64_t page_sz = 1 << 30;
+        uint64_t allocated_size = 0;
         uint32_t page_num = size >> 30;
         drm_xocl_alloc_cma_info cma_info = {0};
-        int err_code = 0;
+        std::vector<uint64_t> user_addr(page_num, 0);
+
+        /* We check the sysfs node host_mem_size first before going forward
+         * If the same size of host memory chunk is allocated
+         * then return 0 as SUCCESS
+         */
+
+        mDev->sysfs_get<uint64_t>("", "host_mem_size", errmsg, allocated_size, 0);
+        if (allocated_size == size)
+            return ret;
 
         cma_info.total_size = size;
-        cma_info.entry_num = 0;
+        cma_info.entry_num = page_num;
+        cma_info.user_addr = user_addr.data();
 
-        ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_ALLOC_CMA, &cma_info);
+        for (uint32_t i = 0; i < page_num; ++i) {
+            void *addr_local = mmap(0x0, page_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | hugepage_flag << MAP_HUGE_SHIFT, 0, 0);
 
-        err_code = -errno;
-        if (ret && err_code != -E2BIG)
-            return err_code;
-        else if (err_code == -E2BIG) {
-            /* Once set MAP_HUGETLB, we have to specify bit[26~31] as size in log
-             * e.g. We like to get 2M huge page, 2M = 2^21,
-             * 21 = 0x15
-             * Let's find how many 1GB huge page we have to allocate
-             */
-            uint64_t hugepage_flag = 0x1e;
-            cma_info.entry_num = page_num;
-
-            if (size < page_sz)
-                return -EINVAL;
-
-            cma_info.user_addr = (uint64_t *)alloca(sizeof(uint64_t)*page_num);
-            ret = 0;
-
-
-            for (uint32_t i = 0; i < page_num; ++i) {
-                void *addr_local = mmap(0x0, page_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_HUGETLB | hugepage_flag << MAP_HUGE_SHIFT, 0, 0);
-
-                if (addr_local == MAP_FAILED) {
-                    xrt_logmsg(XRT_ERROR, "Unable to get huge page.");
-                    ret = -ENOMEM;
-                    break;
-                } else {
-                    cma_info.user_addr[i] = (uint64_t)addr_local;
-                }
+            if (addr_local == MAP_FAILED) {
+                ret = -ENOMEM;
+                break;
+            } else {
+                cma_info.user_addr[i] = (uint64_t)addr_local;
             }
+        }
 
-            if (!ret) {
-                ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_ALLOC_CMA, &cma_info);
-                if (ret)
-                        ret = -errno;
-            }
+        if (!ret) {
+            ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_ALLOC_CMA, &cma_info);
+            if (ret)
+                    ret = -errno;
+        }
 
-            for (uint32_t i = 0; i < page_num; ++i) {
-                if (!cma_info.user_addr[i])
-                    continue;
+        for (uint32_t i = 0; i < page_num; ++i) {
+            if (!cma_info.user_addr[i])
+                continue;
 
-                 munmap((void*)cma_info.user_addr[i], page_sz);
-            }
+            munmap((void*)cma_info.user_addr[i], page_sz);
+        }
 
+        if (ret) {
+            cma_info.entry_num = 0;
+            ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_ALLOC_CMA, &cma_info);
+            if (ret)
+                    ret = -errno;
         }
 
     } else {
@@ -1305,62 +1549,36 @@ bool shim::zeroOutDDR()
     return true;
 }
 
-/*
- * xclLoadXclBin()
- */
-int shim::xclLoadXclBin(const xclBin *buffer)
+int shim::getAxlfObjSize(const axlf *buffer)
 {
-    auto top = reinterpret_cast<const axlf*>(buffer);
-    auto ret = xclLoadAxlf(top);
-    if (ret != 0) {
-      if (ret == -EOPNOTSUPP) {
-        xrt_logmsg(XRT_ERROR, "Xclbin does not match shell on card.");
-        auto xclbin_vbnv = xrt_core::xclbin::get_vbnv(top);
-        auto shell_vbnv = xrt_core::device_query<xrt_core::query::rom_vbnv>(mCoreDevice);
-        if (xclbin_vbnv != shell_vbnv) {
-          xrt_logmsg(XRT_ERROR, "Shell VBNV is '%s'", shell_vbnv.c_str());
-          xrt_logmsg(XRT_ERROR, "Xclbin VBNV is '%s'", xclbin_vbnv.c_str());
-        }
-        xrt_logmsg(XRT_ERROR, "Use 'xbmgmt flash' to update shell.");
-      }
-      else if (ret == -EBUSY) {
-        xrt_logmsg(XRT_ERROR, "Xclbin on card is in use, can't change.");
-      }
-      else if (ret == -EKEYREJECTED) {
-        xrt_logmsg(XRT_ERROR, "Xclbin isn't signed properly");
-      }
-      else if (ret == -E2BIG) {
-        xrt_logmsg(XRT_ERROR, "Not enough host_mem for xclbin");
-      }
-      else if (ret == -ETIMEDOUT) {
-        xrt_logmsg(XRT_ERROR,
-                   "Can't reach out to mgmt for xclbin downloading");
-        xrt_logmsg(XRT_ERROR,
-                   "Is xclmgmt driver loaded? Or is MSD/MPD running?");
-      }
-      else if (ret == -EDEADLK) {
-        xrt_logmsg(XRT_ERROR, "CU was deadlocked? Hardware is not stable");
-        xrt_logmsg(XRT_ERROR, "Please reset device with 'xbutil reset'");
-      }
-      xrt_logmsg(XRT_ERROR, "See dmesg log for details. err=%d", ret);
+    int ksize = 0;
+    auto kernels = xrt_core::xclbin::get_kernels(buffer);
+    /* Calculate size of kernels */
+    for (auto& kernel : kernels) {
+        ksize += sizeof(kernel_info) + (sizeof(argument_info) * kernel.args.size());
     }
 
-    return ret;
+    return ksize;
 }
 
 /*
- * xclLoadAxlf()
+ * xclPrepareAxlf()
  */
-int shim::xclLoadAxlf(const axlf *buffer)
+int shim::xclPrepareAxlf(const axlf *buffer, struct drm_xocl_axlf *axlf_obj)
 {
     xrt_logmsg(XRT_INFO, "%s, buffer: %s", __func__, buffer);
-    drm_xocl_axlf axlf_obj = {const_cast<axlf *>(buffer), 0};
+    unsigned int flags = XOCL_AXLF_BASE;
     int off = 0;
+
+    auto force_program = xrt_core::config::get_force_program_xclbin(); //default value is false
+    if(force_program) {
+        axlf_obj->flags = flags | XOCL_AXLF_FORCE_PROGRAM;
+    }
 
     auto kernels = xrt_core::xclbin::get_kernels(buffer);
     /* Calculate size of kernels */
     for (auto& kernel : kernels) {
-        axlf_obj.ksize += sizeof(kernel_info) + sizeof(argument_info) * kernel.args.size();
+        axlf_obj->ksize += sizeof(kernel_info) + (sizeof(argument_info) * kernel.args.size());
     }
 
     /* To enhance CU subdevice and KDS/ERT, driver needs all details about kernels
@@ -1394,10 +1612,8 @@ int shim::xclLoadAxlf(const axlf *buffer)
      * |   ...                 |
      * +-----------------------+
      */
-    std::vector<char> krnl_binary(axlf_obj.ksize);
-    axlf_obj.kernels = krnl_binary.data();
     for (auto& kernel : kernels) {
-        auto krnl = reinterpret_cast<kernel_info *>(axlf_obj.kernels + off);
+        auto krnl = reinterpret_cast<kernel_info *>(axlf_obj->kernels + off);
         if (kernel.name.size() > sizeof(krnl->name))
             return -EINVAL;
         std::strncpy(krnl->name, kernel.name.c_str(), sizeof(krnl->name)-1);
@@ -1426,33 +1642,205 @@ int shim::xclLoadAxlf(const axlf *buffer)
             krnl->args[ai].dir    = 1;
             ai++;
         }
-        off += sizeof(kernel_info) + sizeof(argument_info) * kernel.args.size();
+        off += sizeof(kernel_info) + (sizeof(argument_info) * kernel.args.size());
     }
 
     /* To make download xclbin and configure KDS/ERT as an atomic operation. */
-    axlf_obj.kds_cfg.ert = xrt_core::config::get_ert();
-    axlf_obj.kds_cfg.polling = xrt_core::config::get_ert_polling();
-    axlf_obj.kds_cfg.cu_dma = xrt_core::config::get_ert_cudma();
-    axlf_obj.kds_cfg.cu_isr = xrt_core::config::get_ert_cuisr() && xrt_core::xclbin::get_cuisr(buffer);
-    axlf_obj.kds_cfg.cq_int = xrt_core::config::get_ert_cqint();
-    axlf_obj.kds_cfg.dataflow = xrt_core::config::get_feature_toggle("Runtime.dataflow") || xrt_core::xclbin::get_dataflow(buffer);
-    axlf_obj.kds_cfg.rw_shared = xrt_core::config::get_rw_shared();
+    axlf_obj->kds_cfg.ert = xrt_core::config::get_ert();
+    axlf_obj->kds_cfg.polling = xrt_core::config::get_xgq_polling();
+    axlf_obj->kds_cfg.cu_dma = xrt_core::config::get_ert_cudma();
+    axlf_obj->kds_cfg.cu_isr = xrt_core::config::get_ert_cuisr() && xrt_core::xclbin::get_cuisr(buffer);
+    axlf_obj->kds_cfg.cq_int = xrt_core::config::get_ert_cqint();
+    axlf_obj->kds_cfg.dataflow = xrt_core::config::get_feature_toggle("Runtime.dataflow") || xrt_core::xclbin::get_dataflow(buffer);
+    axlf_obj->kds_cfg.rw_shared = xrt_core::config::get_rw_shared();
 
     /* TODO: In scheduler.cpp init() function, it use get_ert_slots(void) to get slot size.
      * But we cannot do this here, since the xclbin is not registered.
      * Currently, emulation flow use get_ert_slots() as well.
      * We will consider how to better determine slot size in new kds.
      */
-    //axlf_obj.kds_cfg.slot_size = mCoreDevice->get_ert_slots().second;
+    //axlf_obj->kds_cfg.slot_size = mCoreDevice->get_ert_slots().second;
     auto xml_hdr = xrt_core::xclbin::get_axlf_section(buffer, EMBEDDED_METADATA);
     if (!xml_hdr)
         throw std::runtime_error("No xml metadata in xclbin");
     auto xml_size = xml_hdr->m_sectionSize;
     auto xml_data = reinterpret_cast<const char*>(reinterpret_cast<const char*>(buffer) + xml_hdr->m_sectionOffset);
-    axlf_obj.kds_cfg.slot_size = mCoreDevice->get_ert_slots(xml_data, xml_size).second;
+    axlf_obj->kds_cfg.slot_size = mCoreDevice->get_ert_slots(xml_data, xml_size).second;
 
-    int ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_READ_AXLF, &axlf_obj);
-    if(ret)
+    axlf_obj->xclbin = const_cast<axlf *>(buffer);
+
+    return 0;
+}
+
+/*
+ * xclLoadXclBin()
+ */
+int
+shim::
+xclLoadXclBin(const xclBin *buffer)
+{
+  // Retrieve any profiling information still on this device from any previous
+  // configuration before the device is reconfigured with the new xclbin (when
+  // profiling is enabled).
+  xdp::flush_device(this);
+
+  auto top = reinterpret_cast<const axlf*>(buffer);
+  if (auto ret = xclLoadAxlf(top)) {
+    // Something wrong, determine what
+    if (ret == -EOPNOTSUPP) {
+      xrt_logmsg(XRT_ERROR, "Xclbin does not match shell on card.");
+      auto xclbin_vbnv = xrt_core::xclbin::get_vbnv(top);
+      auto shell_vbnv = xrt_core::device_query<xrt_core::query::rom_vbnv>(mCoreDevice);
+      if (xclbin_vbnv != shell_vbnv) {
+        xrt_logmsg(XRT_ERROR, "Shell VBNV is '%s'", shell_vbnv.c_str());
+        xrt_logmsg(XRT_ERROR, "Xclbin VBNV is '%s'", xclbin_vbnv.c_str());
+      }
+      xrt_logmsg(XRT_ERROR, "Use 'xbmgmt flash' to update shell.");
+    }
+    else if (ret == -EBUSY) {
+      xrt_logmsg(XRT_ERROR, "Xclbin on card is in use, can't change.");
+    }
+    else if (ret == -EKEYREJECTED) {
+      xrt_logmsg(XRT_ERROR, "Xclbin isn't signed properly");
+    }
+    else if (ret == -E2BIG) {
+      xrt_logmsg(XRT_ERROR, "Not enough host_mem for xclbin");
+    }
+    else if (ret == -ETIMEDOUT) {
+      xrt_logmsg(XRT_ERROR,
+                 "Can't reach out to mgmt for xclbin downloading");
+      xrt_logmsg(XRT_ERROR,
+                 "Is xclmgmt driver loaded? Or is MSD/MPD running?");
+    }
+    else if (ret == -EDEADLK) {
+      xrt_logmsg(XRT_ERROR, "CU was deadlocked? Hardware is not stable");
+      xrt_logmsg(XRT_ERROR, "Please reset device with 'xbutil reset'");
+    }
+    xrt_logmsg(XRT_ERROR, "See dmesg log for details. err = %d", ret);
+    return ret;
+  }
+
+  // Success
+  mCoreDevice->register_axlf(buffer);
+
+  // Update the profiling library with the information on this new xclbin
+  // configuration on this device as appropriate (when profiling is enabled).
+  xdp::update_device(this);
+
+  // Setup the user-accessible HAL API profiling interface so user host
+  // code can call functions to directly read counter values on profiling IP
+  // (if enabled in the xrt.ini).
+  START_DEVICE_PROFILING_CB(this);
+
+  return 0;
+}
+
+/*
+ * xclLoadHwAxlf()
+ */
+int shim::xclLoadHwAxlf(const axlf *buffer, drm_xocl_create_hw_ctx *hw_ctx)
+{
+    xrt_logmsg(XRT_INFO, "%s, buffer: %s", __func__, buffer);
+    drm_xocl_axlf axlf_obj = {};
+
+    int ksize = getAxlfObjSize(buffer);
+    if (!ksize) {
+        xrt_logmsg(XRT_ERROR, "%s: Invalid input XCLBIN", __func__);
+        return -EINVAL;
+    }
+
+    std::vector<char> krnl_binary(ksize);
+    axlf_obj.kernels = krnl_binary.data();
+
+    auto ret = xclPrepareAxlf(buffer, &axlf_obj);
+    if (ret)
+    	return -errno;
+
+    hw_ctx->axlf_ptr = &axlf_obj;
+    ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_CREATE_HW_CTX, hw_ctx);
+    if (ret && errno == EAGAIN) {
+        //special case for aws
+        //if EAGAIN is seen, that means a pcie removal&rescan is ongoing, let's just
+        //wait and reload 2nd time -- this time the there will be no device id
+        //change, hence no pcie removal&rescan, anymore
+        //we need to close the device otherwise the removal&rescan (unload driver) will hang
+        //we also need to reopen the device once removal&rescan completes
+        int dev_hotplug_done = 0;
+        std::string err;
+        dev_fini();
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        while (!dev_hotplug_done) {
+	    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+	    xrt_core::pci::get_dev(mBoardNumber)->sysfs_get<int>("",
+			    "dev_hotplug_done", err, dev_hotplug_done, 0);
+    }
+    dev_init();
+    ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_CREATE_HW_CTX, hw_ctx);
+    }
+
+    if (ret)
+        return -errno;
+
+    // If it is an XPR DSA, zero out the DDR again as downloading the XCLBIN
+    // reinitializes the DDR and results in ECC error.
+    if(isXPR())
+    {
+        xrt_logmsg(XRT_INFO, "%s, XPR Device found, zeroing out DDR again..", __func__);
+
+        if (zeroOutDDR() == false)
+        {
+            xrt_logmsg(XRT_ERROR, "%s, zeroing out DDR again..", __func__);
+            return -EIO;
+        }
+    }
+
+    return 0;
+}
+
+
+/*
+ * xclLoadAxlf()
+ */
+int shim::xclLoadAxlf(const axlf *buffer)
+{
+    xrt_logmsg(XRT_INFO, "%s, buffer: %s", __func__, buffer);
+    drm_xocl_axlf axlf_obj = {};
+
+    int ksize = getAxlfObjSize(buffer);
+    if (!ksize) {
+        xrt_logmsg(XRT_ERROR, "%s: Invalid input XCLBIN", __func__);
+        return -EINVAL;
+    }
+
+    std::vector<char> krnl_binary(ksize);
+    axlf_obj.kernels = krnl_binary.data();
+
+    auto ret = xclPrepareAxlf(buffer, &axlf_obj);
+    if (ret)
+        return -errno;
+
+    ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_READ_AXLF, &axlf_obj);
+    if (ret && errno == EAGAIN) {
+        //special case for aws
+        //if EAGAIN is seen, that means a pcie removal&rescan is ongoing, let's just
+        //wait and reload 2nd time -- this time the there will be no device id
+        //change, hence no pcie removal&rescan, anymore
+        //we need to close the device otherwise the removal&rescan (unload driver) will hang
+        //we also need to reopen the device once removal&rescan completes
+        int dev_hotplug_done = 0;
+        std::string err;
+        dev_fini();
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        while (!dev_hotplug_done) {
+    	    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    	    xrt_core::pci::get_dev(mBoardNumber)->sysfs_get<int>("",
+    			    "dev_hotplug_done", err, dev_hotplug_done, 0);
+        }
+        dev_init();
+        ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_READ_AXLF, &axlf_obj);
+    }
+
+    if (ret)
         return -errno;
 
     // If it is an XPR DSA, zero out the DDR again as downloading the XCLBIN
@@ -1473,31 +1861,37 @@ int shim::xclLoadAxlf(const axlf *buffer)
 /*
  * xclExportBO()
  */
-int shim::xclExportBO(unsigned int boHandle)
+std::unique_ptr<xrt_core::shared_handle>
+shim::
+xclExportBO(unsigned int boHandle)
 {
-    drm_prime_handle info = {boHandle, DRM_RDWR, -1};
-    int result = mDev->ioctl(mUserHandle, DRM_IOCTL_PRIME_HANDLE_TO_FD, &info);
-    if (result) {
-        xrt_logmsg(XRT_WARNING, "%s: DRM prime handle to fd failed with DRM_RDWR. Trying default flags.", __func__);
-        info.flags = 0;
-        result = ioctl(mUserHandle, DRM_IOCTL_PRIME_HANDLE_TO_FD, &info);
-    }
+  drm_prime_handle info = {boHandle, DRM_RDWR, -1};
+  int result = mDev->ioctl(mUserHandle, DRM_IOCTL_PRIME_HANDLE_TO_FD, &info);
+  if (result) {
+    xrt_logmsg(XRT_WARNING, "%s: DRM prime handle to fd failed with DRM_RDWR. Trying default flags.", __func__);
+    info.flags = 0;
+    result = ioctl(mUserHandle, DRM_IOCTL_PRIME_HANDLE_TO_FD, &info);
+  }
 
-    xrt_logmsg(XRT_DEBUG, "%s: boHandle %d, ioctl return %ld, fd %d", __func__, boHandle, result, info.fd);
-    return !result ? info.fd : result;
+  if (result)
+    throw xrt_core::system_error(result, "failed to export bo");
+
+  return std::make_unique<xrt_shim::shared_object>(this, info.fd);
 }
 
 /*
  * xclImportBO()
  */
-unsigned int shim::xclImportBO(int fd, unsigned flags)
+std::unique_ptr<xrt_core::buffer_handle>
+shim::
+xclImportBO(int fd, unsigned int flags)
 {
-    drm_prime_handle info = {mNullBO, flags, fd};
-    int result = mDev->ioctl(mUserHandle, DRM_IOCTL_PRIME_FD_TO_HANDLE, &info);
-    if (result) {
-        xrt_logmsg(XRT_ERROR, "%s: FD to handle IOCTL failed", __func__);
-    }
-    return !result ? info.handle : mNullBO;
+  drm_prime_handle info = {mNullBO, flags, fd};
+  int result = mDev->ioctl(mUserHandle, DRM_IOCTL_PRIME_FD_TO_HANDLE, &info);
+  if (result)
+    throw xrt_core::system_error(result, "failed to import bo");
+
+  return std::make_unique<xrt_shim::buffer_object>(this, info.handle);
 }
 
 /*
@@ -1603,7 +1997,7 @@ void shim::xclSysfsGetUsageInfo(drm_xocl_usage_stat& stat)
  */
 int shim::xclGetUsageInfo(xclDeviceUsage *info)
 {
-    drm_xocl_usage_stat stat = { 0 };
+    drm_xocl_usage_stat stat = {};
 
     xclSysfsGetUsageInfo(stat);
     std::memset(info, 0, sizeof(xclDeviceUsage));
@@ -1631,16 +2025,18 @@ bool shim::isGood() const
  *
  * Returns pointer to valid handle on success, 0 on failure.
  */
-shim *shim::handleCheck(void *handle)
+xocl::shim*
+shim::
+handleCheck(void* handle)
 {
-    if (!handle) {
-        return 0;
-    }
-    if (!((shim *) handle)->isGood() ||
-      ((shim *) handle)->mUserHandle == -1) {
-        return 0;
-    }
-    return (shim *) handle;
+  if (!handle)
+    return 0;
+
+  auto shim = reinterpret_cast<xocl::shim*>(handle);
+  if (!shim->isGood() || shim->mUserHandle == -1)
+    return 0;
+
+  return shim;
 }
 
 /*
@@ -1682,30 +2078,26 @@ int shim::xclExecBuf(unsigned int cmdBO)
 /*
  * xclExecBuf()
  */
+int shim::xclExecBuf(unsigned int cmdBO, xrt_core::hwctx_handle* hwctx_hdl)
+{
+    int ret;
+    xrt_logmsg(XRT_INFO, "%s, cmdBO: %d", __func__, cmdBO);
+    drm_xocl_hw_ctx_execbuf exec = {hwctx_hdl->get_slotidx(), cmdBO, 0,0,0,0,0,0,0,0};
+    ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_HW_CTX_EXECBUF, &exec);
+    return ret ? -errno : ret;
+}
+
+/*
+ * xclExecBuf()
+ */
 int shim::xclExecBuf(unsigned int cmdBO, size_t num_bo_in_wait_list, unsigned int *bo_wait_list)
 {
     xrt_logmsg(XRT_INFO, "%s, cmdBO: %d, num_bo_in_wait_list: %d, bo_wait_list: %d",
             __func__, cmdBO, num_bo_in_wait_list, bo_wait_list);
 
-    // New KDS does not support xclExecBufWithWaitList(). Only allow it to go through if
-    // driver is in old KDS mode.
-    static bool newkds = xrt_core::device_query<xrt_core::query::kds_mode>(mCoreDevice);
-    if (newkds) {
-        xrt_logmsg(XRT_ERROR, "xclExecBufWithWaitList() is no longer supported.");
-        return -ENOTSUP;
-    }
-
-    if (num_bo_in_wait_list > MAX_DEPS) {
-        xrt_logmsg(XRT_ERROR, "%s, Incorrect argument. Max num of BOs in wait_list: %d",
-            __func__, MAX_DEPS);
-        return -EINVAL;
-    }
-    int ret;
-    unsigned int bwl[8] = {0};
-    std::memcpy(bwl,bo_wait_list,num_bo_in_wait_list*sizeof(unsigned int));
-    drm_xocl_execbuf exec = {0, cmdBO, bwl[0],bwl[1],bwl[2],bwl[3],bwl[4],bwl[5],bwl[6],bwl[7]};
-    ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_EXECBUF, &exec);
-    return ret ? -errno : ret;
+    // New KDS does not support xclExecBufWithWaitList().
+    xrt_logmsg(XRT_ERROR, "xclExecBufWithWaitList() is no longer supported.");
+    return -ENOTSUP;
 }
 
 /*
@@ -1727,19 +2119,20 @@ int shim::xclExecWait(int timeoutMilliSec)
     return mDev->poll(mUserHandle, POLLIN, timeoutMilliSec);
 }
 
-/*
- * xclOpenContext
- */
-int shim::xclOpenContext(const uuid_t xclbinId, unsigned int ipIndex, bool shared) const
+// xclOpenContext
+int
+shim::
+xclOpenContext(const uuid_t xclbinId, unsigned int ipIndex, bool shared) const
 {
     unsigned int flags = shared ? XOCL_CTX_SHARED : XOCL_CTX_EXCLUSIVE;
-    int ret;
     drm_xocl_ctx ctx = {XOCL_CTX_OP_ALLOC_CTX};
     std::memcpy(ctx.xclbin_id, xclbinId, sizeof(uuid_t));
     ctx.cu_index = ipIndex;
     ctx.flags = flags;
-    ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_CTX, &ctx);
-    return ret ? -errno : ret;
+    if (mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_CTX, &ctx))
+      throw xrt_core::system_error(errno, "failed to open ip context");
+
+    return 0;
 }
 
 /*
@@ -1751,11 +2144,10 @@ int shim::xclCloseContext(const uuid_t xclbinId, unsigned int ipIndex)
 
     if (ipIndex < mCuMaps.size()) {
 	    // Make sure no MMIO register space access when CU is released.
-	    uint32_t *p = mCuMaps[ipIndex].first;
-	    if (p) {
-		(void) munmap(p, mCuMaps[ipIndex].second);
-		mCuMaps[ipIndex] = std::make_pair<uint32_t*, uint32_t>(nullptr, 0);
-	    }
+        if (auto p = mCuMaps[ipIndex].addr) {
+            std::ignore = munmap(p, mCuMaps[ipIndex].size);
+            mCuMaps[ipIndex] = {nullptr, 0, 0, 0};
+        }
     }
 
     drm_xocl_ctx ctx = {XOCL_CTX_OP_FREE_CTX};
@@ -1771,242 +2163,6 @@ int shim::xclCloseContext(const uuid_t xclbinId, unsigned int ipIndex)
 int shim::xclBootFPGA()
 {
     return -EOPNOTSUPP;
-}
-
-/*
- * xclCreateWriteQueue()
- */
-int shim::xclCreateWriteQueue(xclQueueContext *q_ctx, uint64_t *q_hdl)
-{
-    struct xocl_qdma_ioc_create_queue q_info;
-
-    memset(&q_info, 0, sizeof (q_info));
-    q_info.write = 1;
-    q_info.rid = q_ctx->route;
-    q_info.flowid = q_ctx->flow;
-    q_info.flags = q_ctx->flags;
-
-    int rc = ioctl(mStreamHandle, XOCL_QDMA_IOC_CREATE_QUEUE, &q_info);
-    if (rc) {
-        xrt_logmsg(XRT_ERROR, "%s: Create Write Queue IOCTL failed", __func__);
-        return -errno;
-    }
-
-    queue_cb *qcb = new xocl::queue_cb(&q_info);
-    *q_hdl = reinterpret_cast<uint64_t>(qcb);
-
-    return 0;
-}
-
-/*
- * xclCreateReadQueue()
- */
-int shim::xclCreateReadQueue(xclQueueContext *q_ctx, uint64_t *q_hdl)
-{
-    struct xocl_qdma_ioc_create_queue q_info;
-
-    memset(&q_info, 0, sizeof (q_info));
-
-    q_info.rid = q_ctx->route;
-    q_info.flowid = q_ctx->flow;
-    q_info.flags = q_ctx->flags;
-
-    int rc = ioctl(mStreamHandle, XOCL_QDMA_IOC_CREATE_QUEUE, &q_info);
-    if (rc) {
-        xrt_logmsg(XRT_ERROR, "%s: Create Read Queue IOCTL failed", __func__);
-        return -errno;
-    }
-
-    queue_cb *qcb = new xocl::queue_cb(&q_info);
-    *q_hdl = reinterpret_cast<uint64_t>(qcb);
-
-    return 0;
-}
-
-/*
- * xclDestroyQueue()
- */
-int shim::xclDestroyQueue(uint64_t q_hdl)
-{
-    queue_cb *qcb = reinterpret_cast<queue_cb *>(q_hdl);
-    int qfd = qcb->queue_get_handle();
-
-    int rc = ioctl(qfd, XOCL_QDMA_IOC_QUEUE_FLUSH, NULL);
-
-    if (rc)
-        xrt_logmsg(XRT_ERROR, "%s: Flush Queue failed", __func__);
-
-    rc = close(qfd);
-    if (rc)
-        xrt_logmsg(XRT_ERROR, "%s: Destroy Queue failed", __func__);
-
-    delete(qcb);
-
-    return rc;
-}
-
-/*
- * xclAllocQDMABuf()
- */
-void *shim::xclAllocQDMABuf(size_t size, uint64_t *buf_hdl)
-{
-    struct xocl_qdma_ioc_alloc_buf req;
-    void *buf;
-    int rc;
-
-    memset(&req, 0, sizeof (req));
-    req.size = size;
-
-    rc = ioctl(mStreamHandle, XOCL_QDMA_IOC_ALLOC_BUFFER, &req);
-    if (rc) {
-        xrt_logmsg(XRT_ERROR, "%s: Alloc buffer IOCTL failed", __func__);
-        return NULL;
-    }
-
-    buf = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, req.buf_fd, 0);
-    if (!buf) {
-        xrt_logmsg(XRT_ERROR, "%s: Map buffer failed", __func__);
-
-        close(req.buf_fd);
-    } else {
-        *buf_hdl = req.buf_fd;
-    }
-
-    return buf;
-}
-
-/*
- * xclFreeQDMABuf()
- */
-int shim::xclFreeQDMABuf(uint64_t buf_hdl)
-{
-    int rc;
-
-    rc = close((int)buf_hdl);
-    if (rc)
-        xrt_logmsg(XRT_ERROR, "%s: Destory Queue failed", __func__);
-
-
-    return rc;
-}
-
-/*
- * xclPollCompletion()
- */
-int shim::xclPollCompletion(int min_compl, int max_compl, struct xclReqCompletion *comps, int* actual, int timeout /*ms*/)
-{
-    /* TODO: populate actual and timeout args correctly */
-    struct timespec time, *ptime = nullptr;
-    int num_evt, i;
-
-    *actual = 0;
-    if (!mAioEnabled) {
-        xrt_logmsg(XRT_ERROR, "%s: async io is not enabled", __func__);
-        throw std::runtime_error("sync io is not enabled");
-    }
-
-    if (timeout > 0) {
-        memset(&time, 0, sizeof(time));
-        time.tv_sec = timeout / 1000;
-        time.tv_nsec = (timeout % 1000) * 1000000;
-        ptime = &time;
-    }
-    num_evt = io_getevents(mAioContext, min_compl, max_compl, (struct io_event *)comps, ptime);
-
-    *actual = num_evt;
-    if (num_evt <= 0) {
-        xrt_logmsg(XRT_DEBUG, "%s: failed to poll Queue Completions", __func__);
-        return -ETIMEDOUT;
-    }
-
-    for (i = num_evt - 1; i >= 0; i--) {
-        comps[i].priv_data = (void *)((struct io_event *)comps)[i].data;
-        if (((struct io_event *)comps)[i].res < 0){
-            /* error returned by AIO framework */
-            comps[i].nbytes = 0;
-            comps[i].err_code = ((struct io_event *)comps)[i].res;
-        } else {
-            comps[i].nbytes = ((struct io_event *)comps)[i].res;
-            comps[i].err_code = ((struct io_event *)comps)[i].res2;
-        }
-    }
-    return 0;
-}
-
-/*
- * xclPollQueue()
- */
-int shim::xclPollQueue(uint64_t q_hdl, int min_compl, int max_compl, struct xclReqCompletion *comps, int* actual, int timeout /*ms*/)
-{
-    queue_cb *qcb = reinterpret_cast<queue_cb *>(q_hdl);
-
-    if (!qcb->queue_aio_ctx_enabled()) {
-        xrt_logmsg(XRT_ERROR, "%s: per-queue AIO is not enabled", __func__);
-        return -EINVAL;
-    }
-    return qcb->queue_poll_completion(min_compl, max_compl, comps, actual, timeout);
-}
-
-/*
- * xclSetQueueOpt()
- */
-int shim::xclSetQueueOpt(uint64_t q_hdl, int type, uint32_t val)
-{
-    queue_cb *qcb = reinterpret_cast<queue_cb *>(q_hdl);
-
-    return qcb->set_option(type, val);
-}
-
-/*
- * xclWriteQueue()
- */
-ssize_t shim::xclWriteQueue(uint64_t q_hdl, xclQueueRequest *wr)
-{
-    queue_cb *qcb = reinterpret_cast<queue_cb *>(q_hdl);
-
-    if (!qcb->queue_is_h2c()) {
-        xrt_logmsg(XRT_ERROR, "%s: queue is read only", __func__);
-        return -EINVAL;
-    }
-
-    if ((wr->flag & XCL_QUEUE_REQ_NONBLOCKING) &&
-        !mAioEnabled && !(qcb->queue_aio_ctx_enabled())) {
-         xrt_logmsg(XRT_ERROR, "%s: NONBLOCK but aio NOT enabled.\n", __func__);
-         return -EINVAL;
-    }
-
-    if (!(wr->flag & XCL_QUEUE_REQ_EOT)) {
-        for (unsigned i = 0; i < wr->buf_num; i++) {
-            if ((wr->bufs[i].len & 0xfff)) {
-                xrt_logmsg(XRT_ERROR, "%s: write w/o EOT len %lu != N*4K.\n",
-                                 __func__, wr->bufs[i].len);
-                return -EINVAL;
-            }
-        }
-    }
-
-    return qcb->queue_submit_io(wr, &mAioContext);
-}
-
-/*
- * xclReadQueue()
- */
-ssize_t shim::xclReadQueue(uint64_t q_hdl, xclQueueRequest *wr)
-{
-    queue_cb *qcb = reinterpret_cast<queue_cb *>(q_hdl);
-
-    if (qcb->queue_is_h2c()) {
-        xrt_logmsg(XRT_ERROR, "%s: queue is write only", __func__);
-        return -EINVAL;
-    }
-
-    if ((wr->flag & XCL_QUEUE_REQ_NONBLOCKING) &&
-        !mAioEnabled && !(qcb->queue_aio_ctx_enabled())) {
-         xrt_logmsg(XRT_ERROR, "%s: NONBLOCK but aio NOT enabled.\n", __func__);
-         return -EINVAL;
-    }
-
-    return qcb->queue_submit_io(wr, &mAioContext);
 }
 
 uint32_t shim::xclGetNumLiveProcesses()
@@ -2035,7 +2191,7 @@ int shim::xclGetDebugIPlayoutPath(char* layoutPath, size_t size)
 
 int shim::xclGetSubdevPath(const char* subdev, uint32_t idx, char* path, size_t size)
 {
-    auto dev = pcidev::get_dev(mBoardNumber);
+    auto dev = xrt_core::pci::get_dev(mBoardNumber);
     std::string subdev_str = std::string(subdev);
 
     if (mLogStream.is_open()) {
@@ -2051,9 +2207,9 @@ int shim::xclGetSubdevPath(const char* subdev, uint32_t idx, char* path, size_t 
 
 int shim::xclGetTraceBufferInfo(uint32_t nSamples, uint32_t& traceSamples, uint32_t& traceBufSz)
 {
-  uint32_t bytesPerSample = (XPAR_AXI_PERF_MON_0_TRACE_WORD_WIDTH / 8);
+  uint32_t bytesPerSample = (xdp::TRACE_FIFO_WORD_WIDTH / 8);
 
-  traceBufSz = MAX_TRACE_NUMBER_SAMPLES * bytesPerSample;   /* Buffer size in bytes */
+  traceBufSz = xdp::MAX_TRACE_NUMBER_SAMPLES_FIFO * bytesPerSample;   /* Buffer size in bytes */
   traceSamples = nSamples;
 
   return 0;
@@ -2066,7 +2222,7 @@ int shim::xclReadTraceData(void* traceBuf, uint32_t traceBufSz, uint32_t numSamp
 
     uint32_t size = 0;
 
-    wordsPerSample = (XPAR_AXI_PERF_MON_0_TRACE_WORD_WIDTH / 32);
+    wordsPerSample = (xdp::TRACE_FIFO_WORD_WIDTH / 32);
     uint32_t numWords = numSamples * wordsPerSample;
 
 //    alignas is defined in c++11
@@ -2074,9 +2230,9 @@ int shim::xclReadTraceData(void* traceBuf, uint32_t traceBufSz, uint32_t numSamp
     /* Alignment is limited to 16 by PPC64LE : so , should it be
     alignas(16) uint32_t hostbuf[traceBufSzInWords];
     */
-    alignas(AXI_FIFO_RDFD_AXI_FULL) uint32_t hostbuf[traceBufWordSz];
+    alignas(xdp::IP::FIFO::alignment) uint32_t hostbuf[traceBufWordSz];
 #else
-    xrt_core::AlignedAllocator<uint32_t> alignedBuffer(AXI_FIFO_RDFD_AXI_FULL, traceBufWordSz);
+    xrt_core::AlignedAllocator<uint32_t> alignedBuffer(xdp::IP::FIFO::alignment, traceBufWordSz);
     uint32_t* hostbuf = alignedBuffer.getBuffer();
 #endif
 
@@ -2095,10 +2251,10 @@ int shim::xclReadTraceData(void* traceBuf, uint32_t traceBufSz, uint32_t numSamp
       for (; words < (numWords-chunkSizeWords); words += chunkSizeWords) {
           if(mLogStream.is_open())
             mLogStream << __func__ << ": reading " << chunkSizeBytes << " bytes from 0x"
-                          << std::hex << (ipBaseAddress + AXI_FIFO_RDFD_AXI_FULL) /*fifoReadAddress[0] or AXI_FIFO_RDFD*/ << " and writing it to 0x"
+		       << std::hex << (ipBaseAddress + xdp::IP::FIFO::AXI_LITE::RDFD) /*fifoReadAddress[0] or AXI_FIFO_RDFD*/ << " and writing it to 0x"
                           << (void *)(hostbuf + words) << std::dec << std::endl;
 
-        xclUnmgdPread(0 /*flags*/, (void *)(hostbuf + words) /*buf*/, chunkSizeBytes /*count*/, ipBaseAddress + AXI_FIFO_RDFD_AXI_FULL /*offset : or AXI_FIFO_RDFD*/);
+	  xclUnmgdPread(0 /*flags*/, (void *)(hostbuf + words) /*buf*/, chunkSizeBytes /*count*/, ipBaseAddress + xdp::IP::FIFO::AXI_LITE::RDFD /*offset : or AXI_FIFO_RDFD*/);
 
         size += chunkSizeBytes;
       }
@@ -2110,11 +2266,11 @@ int shim::xclReadTraceData(void* traceBuf, uint32_t traceBufSz, uint32_t numSamp
 
       if(mLogStream.is_open()) {
         mLogStream << __func__ << ": reading " << chunkSizeBytes << " bytes from 0x"
-                      << std::hex << (ipBaseAddress + AXI_FIFO_RDFD_AXI_FULL) /*fifoReadAddress[0]*/ << " and writing it to 0x"
+		   << std::hex << (ipBaseAddress + xdp::IP::FIFO::AXI_LITE::RDFD) /*fifoReadAddress[0]*/ << " and writing it to 0x"
                       << (void *)(hostbuf + words) << std::dec << std::endl;
       }
 
-      xclUnmgdPread(0 /*flags*/, (void *)(hostbuf + words) /*buf*/, chunkSizeBytes /*count*/, ipBaseAddress + AXI_FIFO_RDFD_AXI_FULL /*offset : or AXI_FIFO_RDFD*/);
+      xclUnmgdPread(0 /*flags*/, (void *)(hostbuf + words) /*buf*/, chunkSizeBytes /*count*/, ipBaseAddress + xdp::IP::FIFO::AXI_LITE::RDFD /*offset : or AXI_FIFO_RDFD*/);
 
       size += chunkSizeBytes;
     }
@@ -2140,22 +2296,35 @@ double shim::xclGetDeviceClockFreqMHz()
   return ((double)clockFreq);
 }
 
-// Get the maximum bandwidth for host reads from the device (in MB/sec)
-// NOTE: for now, set to: (256/8 bytes) * 300 MHz = 9600 MBps
-double shim::xclGetReadMaxBandwidthMBps()
+// For PCIe gen 3x16 or 4x8:
+// Max BW = 16.0 * (128b/130b encoding) = 15.75385 GB/s
+double shim::xclGetHostReadMaxBandwidthMBps()
 {
-  return 9600.0;
+  return 15753.85;
 }
 
-// Get the maximum bandwidth for host writes to the device (in MB/sec)
-// NOTE: for now, set to: (256/8 bytes) * 300 MHz = 9600 MBps
-double shim::xclGetWriteMaxBandwidthMBps() {
-  return 9600.0;
+// For PCIe gen 3x16 or 4x8:
+// Max BW = 16.0 * (128b/130b encoding) = 15.75385 GB/s
+double shim::xclGetHostWriteMaxBandwidthMBps()
+{
+  return 15753.85;
+}
+
+// For DDR4: Typical Max BW = 19.25 GB/s
+double shim::xclGetKernelReadMaxBandwidthMBps()
+{
+  return 19250.00;
+}
+
+// For DDR4: Typical Max BW = 19.25 GB/s
+double shim::xclGetKernelWriteMaxBandwidthMBps()
+{
+  return 19250.00;
 }
 
 int shim::xclGetSysfsPath(const char* subdev, const char* entry, char* sysfsPath, size_t size)
 {
-  auto dev = pcidev::get_dev(mBoardNumber);
+  auto dev = xrt_core::pci::get_dev(mBoardNumber);
   std::string subdev_str = std::string(subdev);
   std::string entry_str = std::string(entry);
   if (mLogStream.is_open()) {
@@ -2169,68 +2338,79 @@ int shim::xclGetSysfsPath(const char* subdev, const char* entry, char* sysfsPath
   return 0;
 }
 
-int shim::xclGetDebugProfileDeviceInfo(xclDebugProfileDeviceInfo* info)
+int shim::xclRegRW(bool rd, uint32_t ipIndex, uint32_t offset, uint32_t *datap)
 {
-  auto dev = pcidev::get_dev(mBoardNumber);
-  uint16_t user_instance = dev->instance;
-  uint16_t nifd_instance = 0;
-  std::string device_name = std::string(DRIVER_NAME_ROOT) + std::string(DEVICE_PREFIX) + std::to_string(user_instance);
-  std::string nifd_name = std::string(DRIVER_NAME_ROOT) + std::string(NIFD_PREFIX) + std::to_string(nifd_instance);
-  info->device_type = DeviceType::XBB;
-  info->device_index = mBoardNumber;
-  info->user_instance = user_instance;
-  info->nifd_instance = nifd_instance;
-  strncpy(info->device_name, device_name.c_str(), MAX_NAME_LEN - 1);
-  strncpy(info->nifd_name, nifd_name.c_str(), MAX_NAME_LEN - 1);
-  info->device_name[MAX_NAME_LEN-1] = '\0';
-  info->nifd_name[MAX_NAME_LEN-1] = '\0';
+  std::lock_guard<std::mutex> lk(mCuMapLock);
+
+  if (ipIndex >= mCuMaps.size()) {
+    xrt_logmsg(XRT_ERROR, "%s: invalid CU index: %d", __func__, ipIndex);
+    return -EINVAL;
+  }
+
+  auto& cumap = mCuMaps[ipIndex];  // {base, size, start, end}
+
+  if (cumap.addr == nullptr) {
+    auto cu_subdev = "CU[" + std::to_string(ipIndex) + "]";
+    auto size = xrt_core::device_query<xq::cu_size>(mCoreDevice, xq::request::modifier::subdev, cu_subdev);
+    if (size <= 0 || size > 0x10000) {
+      xrt_logmsg(XRT_ERROR, "%s: incorrect cu size %d", __func__, size);
+      return -EINVAL;
+    }
+    auto range_str = xrt_core::device_query<xq::cu_read_range>(mCoreDevice, xq::request::modifier::subdev, cu_subdev);
+    auto range = xq::cu_read_range::to_range(range_str);
+
+    void *p = mDev->mmap(mUserHandle, size, PROT_READ | PROT_WRITE,
+                         MAP_SHARED, static_cast<off_t>(ipIndex + 1) * getpagesize());
+    if (p != MAP_FAILED) {
+      cumap.addr = static_cast<uint32_t*>(p);
+      cumap.size = size;
+      cumap.start = range.start;
+      cumap.end = range.end;
+    }
+
+    if (cumap.addr == nullptr) {
+      xrt_logmsg(XRT_ERROR, "%s: can't map CU: %d", __func__, ipIndex);
+      return -EINVAL;
+    }
+  }
+
+  if ((offset & (sizeof(uint32_t) - 1)) != 0) {
+    xrt_logmsg(XRT_ERROR, "%s: offset is not aligned in word: %d", __func__, offset);
+    return -EINVAL;
+  }
+
+  if (offset >= cumap.size) {
+    xrt_logmsg(XRT_ERROR, "%s: invalid CU offset: %d", __func__, offset);
+    return -EINVAL;
+  }
+
+  if (cumap.start) {
+    if (!rd) {
+        xrt_logmsg(XRT_ERROR, "%s: read range is set, not allow write", __func__);
+        return -EINVAL;
+    }
+
+    if ((cumap.start > offset) || (cumap.end < offset)) {
+        xrt_logmsg(XRT_ERROR, "%s: CU offset %d out of read range, %d, %d", __func__, offset, cumap.start, cumap.end);
+        return -EINVAL;
+    }
+  }
+
+  if (rd)
+    *datap = (cumap.addr)[offset / sizeof(uint32_t)];
+  else
+    (cumap.addr)[offset / sizeof(uint32_t)] = *datap;
+
   return 0;
 }
 
-int shim::xclRegRW(bool rd, uint32_t ipIndex, uint32_t offset, uint32_t *datap)
+int shim::xclIPSetReadRange(uint32_t ipIndex, uint32_t start, uint32_t size)
 {
-    std::string errmsg;
-    std::string cu_subdev;
-    uint32_t size;
-    std::lock_guard<std::mutex> l(mCuMapLock);
+    int ret = 0;
+    drm_xocl_set_cu_range range = {ipIndex, start, size};
 
-    if (ipIndex >= mCuMaps.size()) {
-        xrt_logmsg(XRT_ERROR, "%s: invalid CU index: %d", __func__, ipIndex);
-        return -EINVAL;
-    }
-
-    cu_subdev = "CU[" + std::to_string(ipIndex) + "]";
-    mDev->sysfs_get<uint32_t>(cu_subdev, "size", errmsg, size, 0);
-    if (size <= 0) {
-        xrt_logmsg(XRT_ERROR, "%s: incorrect cu size %d", __func__, size);
-        return -EINVAL;
-    }
-
-    if (mCuMaps[ipIndex].first == nullptr) {
-        void *p = mDev->mmap(mUserHandle, size, PROT_READ | PROT_WRITE,
-                             MAP_SHARED, (ipIndex + 1) * getpagesize());
-        if (p != MAP_FAILED) {
-            mCuMaps[ipIndex].first = (uint32_t *)p;
-            mCuMaps[ipIndex].second = size;
-        }
-    }
-
-    uint32_t *cumap = mCuMaps[ipIndex].first;
-    if (cumap == nullptr) {
-        xrt_logmsg(XRT_ERROR, "%s: can't map CU: %d", __func__, ipIndex);
-        return -EINVAL;
-    }
-
-    if (offset >= mCuMaps[ipIndex].second || (offset & (sizeof(uint32_t) - 1)) != 0) {
-        xrt_logmsg(XRT_ERROR, "%s: invalid CU offset: %d", __func__, offset);
-        return -EINVAL;
-    }
-
-    if (rd)
-        *datap = cumap[offset / sizeof(uint32_t)];
-    else
-        cumap[offset / sizeof(uint32_t)] = *datap;
-    return 0;
+    ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_SET_CU_READONLY_RANGE, &range);
+    return ret ? -errno : ret;
 }
 
 int shim::xclRegRead(uint32_t ipIndex, uint32_t offset, uint32_t *datap)
@@ -2247,7 +2427,7 @@ int shim::xclIPName2Index(const char *name)
 {
     // In new kds, driver determines CU index
     try {
-      for (auto& stat : xrt_core::device_query<xrt_core::query::kds_cu_stat>(mCoreDevice))
+      for (auto& stat : xrt_core::device_query<xrt_core::query::kds_cu_info>(mCoreDevice))
         if (stat.name == name)
           return stat.index;
 
@@ -2320,37 +2500,256 @@ int shim::xclCloseIPInterruptNotify(int fd)
     return 0;
 }
 
+// open_context() - aka xclOpenContextByName
+xrt_core::cuidx_type
+shim::
+open_cu_context(const xrt_core::hwctx_handle* hwctx_hdl, const std::string& cuname)
+{
+  auto hwctx = static_cast<const xrt_shim::hwcontext*>(hwctx_hdl);
+  auto shared = (hwctx->get_mode() != xrt::hw_context::access_mode::exclusive);
+  if (hwctx->is_null()) {
+    // Alveo Linux PCIE does not yet support multiple xclbins.  Call
+    // regular flow.  Default access mode to shared unless explicitly
+    // exclusive.
+    auto cuidx = mCoreDevice->get_cuidx(0, cuname);
+    xclOpenContext(hwctx->get_xclbin_uuid().get(), cuidx.index, shared);
+
+    return cuidx;
+  }
+  else {
+    /* This is for multi slot case. New IOCTL should call */
+    unsigned int flags = shared ? XOCL_CTX_SHARED : XOCL_CTX_EXCLUSIVE;
+    // Pass Input
+    drm_xocl_open_cu_ctx cu_ctx = {};
+    cu_ctx.flags = flags;
+    cu_ctx.hw_context = hwctx_hdl->get_slotidx();
+    std::strncpy(cu_ctx.cu_name, cuname.c_str(), sizeof(cu_ctx.cu_name));
+    cu_ctx.cu_name[sizeof(cu_ctx.cu_name) - 1] = 0;
+
+    if (mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_OPEN_CU_CTX, &cu_ctx))
+      throw xrt_core::system_error(errno, "failed to open cu context");
+
+    // Retrive the return value
+    return xrt_core::cuidx_type{cu_ctx.cu_index};
+  }
+}
+
+void
+shim::
+close_cu_context(const xrt_core::hwctx_handle* hwctx_hdl, xrt_core::cuidx_type cuidx)
+{
+  auto hwctx = static_cast<const xrt_shim::hwcontext*>(hwctx_hdl);
+  if (hwctx->is_null()) {
+    if (xclCloseContext(hwctx->get_xclbin_uuid().get(), cuidx.index))
+      throw xrt_core::system_error(errno, "failed to close cu context (" + std::to_string(cuidx.index) + ")");
+  }
+  else {
+    // Pass Input
+    drm_xocl_close_cu_ctx cu_ctx = {};
+    cu_ctx.hw_context = hwctx_hdl->get_slotidx();
+    cu_ctx.cu_index = cuidx.index;
+
+    if (mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_CLOSE_CU_CTX, &cu_ctx))
+      throw xrt_core::system_error(errno, "failed to close cu context (" + std::to_string(cuidx.index) + ")");
+  }
+}
+
+// Assign xclbin with uuid to hardware resources and return a context id
+// The context handle is 1:1 with a slot idx
+std::unique_ptr<xrt_core::hwctx_handle>
+shim::
+create_hw_context(const xrt::uuid& xclbin_uuid,
+                  const xrt::hw_context::cfg_param_type& cfg_param,
+                  xrt::hw_context::access_mode mode)
+{
+  const static int qos_val = 0; // TBD qos;
+
+  if (!hw_context_enable) {
+    // Nothing to be done here for legacy flow
+    // Just create a hwcontext for default slot 0
+    return std::make_unique<xrt_shim::hwcontext>(this, 0, xclbin_uuid, mode);
+  }
+  else {
+    auto xclbin = mCoreDevice->get_xclbin(xclbin_uuid);
+    auto buffer = reinterpret_cast<const axlf*>(xclbin.get_axlf());
+    auto top = reinterpret_cast<const axlf*>(buffer);
+    drm_xocl_create_hw_ctx hw_ctx = {};
+    hw_ctx.qos = qos_val;
+
+    xrt_logmsg(XRT_INFO, "%s, buffer: %s", __func__, buffer);
+    if (auto ret = xclLoadHwAxlf(top, &hw_ctx)) {
+      // Something wrong, determine what
+      if (ret == -EOPNOTSUPP) {
+        xrt_logmsg(XRT_ERROR, "Xclbin does not match shell on card.");
+        auto xclbin_vbnv = xrt_core::xclbin::get_vbnv(top);
+        auto shell_vbnv = xrt_core::device_query<xrt_core::query::rom_vbnv>(mCoreDevice);
+        if (xclbin_vbnv != shell_vbnv) {
+          xrt_logmsg(XRT_ERROR, "Shell VBNV is '%s'", shell_vbnv.c_str());
+          xrt_logmsg(XRT_ERROR, "Xclbin VBNV is '%s'", xclbin_vbnv.c_str());
+        }
+        xrt_logmsg(XRT_ERROR, "Use 'xbmgmt flash' to update shell.");
+      }
+      else if (ret == -EBUSY) {
+        xrt_logmsg(XRT_ERROR, "Xclbin on card is in use, can't change.");
+      }
+      else if (ret == -EKEYREJECTED) {
+        xrt_logmsg(XRT_ERROR, "Xclbin isn't signed properly");
+      }
+      else if (ret == -E2BIG) {
+        xrt_logmsg(XRT_ERROR, "Not enough host_mem for xclbin");
+      }
+      else if (ret == -ETIMEDOUT) {
+        xrt_logmsg(XRT_ERROR,
+                   "Can't reach out to mgmt for xclbin downloading");
+        xrt_logmsg(XRT_ERROR,
+                   "Is xclmgmt driver loaded? Or is MSD/MPD running?");
+      }
+      else if (ret == -EDEADLK) {
+        xrt_logmsg(XRT_ERROR, "CU was deadlocked? Hardware is not stable");
+        xrt_logmsg(XRT_ERROR, "Please reset device with 'xbutil reset'");
+      }
+      xrt_logmsg(XRT_ERROR, "See dmesg log for details. err = %d", ret);
+
+      throw xrt_core::error("Failed to create hardware context");
+    }
+
+    // Success
+    mCoreDevice->register_axlf(buffer);
+
+    return std::make_unique<xrt_shim::hwcontext>(this, hw_ctx.hw_context, xclbin_uuid, mode);
+  }
+
+  return 0;
+}
+
+void
+shim::
+destroy_hw_context(xrt_core::hwctx_handle::slot_id slot)
+{
+  if (!hw_context_enable) {
+    // Nothing to be done here for legacy flow. Return from here
+    return;
+  }
+  else {
+    drm_xocl_destroy_hw_ctx hw_ctx = {};
+    hw_ctx.hw_context = slot;
+
+    auto ret = mDev->ioctl(mUserHandle, DRM_IOCTL_XOCL_DESTROY_HW_CTX, &hw_ctx);
+    if (ret)
+      throw xrt_core::system_error(errno, "Destroying hw context failed");
+  }
+}
+
+// Registers an xclbin, but does not load it.
+void
+shim::
+register_xclbin(const xrt::xclbin&)
+{
+  // Explicit hardware contexts are not supported in Alveo.
+  xrt_logmsg(XRT_INFO, "%s: XCLBIN successfully registered for this device", __func__);
+}
+
+// Exec Buf with hw ctx handle.
+void
+shim::
+exec_buf(xclBufferHandle boh, xrt_core::hwctx_handle* hwctx_hdl)
+{
+  // TODO: Implement new function, for now just call legacy xclExecBuf().
+  auto hwctx = static_cast<const xrt_shim::hwcontext*>(hwctx_hdl);
+  if (hwctx->is_null()) {
+    if (auto ret = xclExecBuf(boh))
+      throw xrt_core::system_error(ret, "failed to launch execution buffer");
+  }
+  else {
+    if (auto ret = xclExecBuf(boh, hwctx_hdl))
+      throw xrt_core::system_error(ret, "failed to launch hw ctx execution buffer");
+  }
+}
+
 } // namespace xocl
 
-/*******************************/
-/* GLOBAL DECLARATIONS *********/
-/*******************************/
+////////////////////////////////////////////////////////////////
+// Implementation of internal SHIM APIs
+////////////////////////////////////////////////////////////////
+namespace xrt::shim_int {
 
-unsigned xclProbe()
+xclDeviceHandle
+open_by_bdf(const std::string& bdf)
 {
-  PROBE_CB;
+  return xclOpen(xrt_core::pci::get_device_id_from_bdf(bdf), nullptr, XCL_QUIET);
+}
 
-    return pcidev::get_dev_ready();
+std::unique_ptr<xrt_core::hwctx_handle>
+create_hw_context(xclDeviceHandle handle,
+                  const xrt::uuid& xclbin_uuid,
+                  const xrt::hw_context::cfg_param_type& cfg_param,
+                  const xrt::hw_context::access_mode mode)
+{
+  auto shim = get_shim_object(handle);
+  return shim->create_hw_context(xclbin_uuid, cfg_param, mode);
+}
+
+void
+register_xclbin(xclDeviceHandle handle, const xrt::xclbin& xclbin)
+{
+  auto shim = get_shim_object(handle);
+  shim->register_xclbin(xclbin);
+}
+
+std::unique_ptr<xrt_core::buffer_handle>
+alloc_bo(xclDeviceHandle handle, size_t size, unsigned int flags)
+{
+  auto shim = get_shim_object(handle);
+  return shim->xclAllocBO(size, flags);
+}
+
+// alloc_userptr_bo()
+std::unique_ptr<xrt_core::buffer_handle>
+alloc_bo(xclDeviceHandle handle, void* userptr, size_t size, unsigned int flags)
+{
+  auto shim = get_shim_object(handle);
+  return shim->xclAllocUserPtrBO(userptr, size, flags);
+}
+
+std::unique_ptr<xrt_core::buffer_handle>
+import_bo(xclDeviceHandle handle, xrt_core::shared_handle::export_handle ehdl)
+{
+  auto shim = get_shim_object(handle);
+  return shim->xclImportBO(ehdl, 0);
+}
+
+} // xrt::shim_int
+////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////
+// Implementation of user exposed SHIM APIs
+// This are C level functions
+////////////////////////////////////////////////////////////////
+unsigned int
+xclProbe()
+{
+  return xdp::hal::profiling_wrapper("xclProbe", [] {
+    return xrt_core::pci::get_dev_ready();
+  }) ;
 }
 
 xclDeviceHandle
 xclOpen(unsigned int deviceIndex, const char*, xclVerbosityLevel)
 {
+  return xdp::hal::profiling_wrapper("xclOpen", [deviceIndex] {
   try {
-    if(pcidev::get_dev_total() <= deviceIndex) {
+    if(xrt_core::pci::get_dev_total() <= deviceIndex) {
       xrt_core::message::send(xrt_core::message::severity_level::info, "XRT",
         std::string("Cannot find index " + std::to_string(deviceIndex) + " \n"));
-      return nullptr;
+      return static_cast<xclDeviceHandle>(nullptr);
     }
-
-  OPEN_CB;
 
     xocl::shim *handle = new xocl::shim(deviceIndex);
 
     if (handle->handleCheck(handle) == 0) {
       xrt_core::send_exception_message(strerror(errno) +
         std::string(" Device index ") + std::to_string(deviceIndex));
-      return nullptr;
+      return static_cast<xclDeviceHandle>(nullptr);
     }
 
     return static_cast<xclDeviceHandle>(handle);
@@ -2362,83 +2761,40 @@ xclOpen(unsigned int deviceIndex, const char*, xclVerbosityLevel)
     xrt_core::send_exception_message(ex.what());
   }
 
-  return nullptr;
-}
-
-xclDeviceHandle
-xclOpenByBDF(const char *bdf)
-{
-  try {
-    return xclOpen(xrt_core::pcie_linux::get_device_id_from_bdf(bdf), nullptr, XCL_QUIET);
-  }
-  catch (const xrt_core::error& ex) {
-    xrt_core::send_exception_message(ex.what());
-  }
-  catch (const std::exception& ex) {
-    xrt_core::send_exception_message(ex.what());
-  }
-
-  return nullptr;
+  return static_cast<xclDeviceHandle>(nullptr);
+  }) ;
 }
 
 void xclClose(xclDeviceHandle handle)
 {
-  CLOSE_CB;
-
+  xdp::hal::profiling_wrapper("xclClose", [handle] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     if (drv) {
         delete drv;
         return;
     }
+  }) ;
 }
 
 int xclLoadXclBin(xclDeviceHandle handle, const xclBin *buffer)
 {
-  LOAD_XCLBIN_CB ;
-
-  try {
-    xocl::shim *drv = xocl::shim::handleCheck(handle);
-    if (!drv) {
+  return xdp::hal::profiling_wrapper("xclLoadXclBin", [handle, buffer] {
+    try {
+      auto drv = xocl::shim::handleCheck(handle);
+      if (!drv)
         return -EINVAL;
+
+      return drv->xclLoadXclBin(buffer);
     }
-
-    xdp::hal::flush_device(handle) ;
-    xdp::aie::flush_device(handle) ;
-
-#ifdef DISABLE_DOWNLOAD_XCLBIN
-    int ret = 0;
-#else
-    auto ret = drv ? drv->xclLoadXclBin(buffer) : -ENODEV;
-#endif
-
-    if (!ret) {
-      auto core_device = xrt_core::get_userpf_device(drv);
-      core_device->register_axlf(buffer);
-
-      xdp::hal::update_device(handle) ;
-      xdp::aie::update_device(handle);
-
-#ifndef DISABLE_DOWNLOAD_XCLBIN
-      //scheduler::init can not be skipped even for same_xclbin
-      //as in multiple process stress tests it fails as
-      //below init step is without a lock with above driver load xclbin step.
-      //New KDS fixes this by ensuring that scheduler init is done by driver itself
-      //along with icap download in single command call and then below init step in user space
-      //is ignored
-      ret = xrt_core::scheduler::init(handle, buffer);
-      START_DEVICE_PROFILING_CB(handle);
-#endif
+    catch (const xrt_core::error& ex) {
+      xrt_core::send_exception_message(ex.what());
+      return ex.get_code();
     }
-    return ret;
-  }
-  catch (const xrt_core::error& ex) {
-    xrt_core::send_exception_message(ex.what());
-    return ex.get_code();
-  }
-  catch (const std::exception& ex) {
-    xrt_core::send_exception_message(ex.what());
-    return -EINVAL;
-  }
+    catch (const std::exception& ex) {
+      xrt_core::send_exception_message(ex.what());
+      return -EINVAL;
+    }
+  });
 }
 
 int xclLogMsg(xclDeviceHandle, xrtLogMsgLevel level, const char* tag, const char* format, ...)
@@ -2456,34 +2812,38 @@ int xclLogMsg(xclDeviceHandle, xrtLogMsgLevel level, const char* tag, const char
 
 size_t xclWrite(xclDeviceHandle handle, xclAddressSpace space, uint64_t offset, const void *hostBuf, size_t size)
 {
-  WRITE_CB;
-
+  return xdp::hal::profiling_wrapper("xclWrite",
+  [handle, space, offset, hostBuf, size] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclWrite(space, offset, hostBuf, size) : -ENODEV;
+  }) ;
 }
 
 size_t xclRead(xclDeviceHandle handle, xclAddressSpace space, uint64_t offset, void *hostBuf, size_t size)
 {
-  READ_CB;
-
+  return xdp::hal::profiling_wrapper("xclRead",
+  [handle, space, offset, hostBuf, size] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclRead(space, offset, hostBuf, size) : -ENODEV;
+  }) ;
 }
 
 int xclRegWrite(xclDeviceHandle handle, uint32_t ipIndex, uint32_t offset, uint32_t data)
 {
-  REG_WRITE_CB;
-
+  return xdp::hal::profiling_wrapper("xclRegWrite",
+  [handle, ipIndex, offset, data] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclRegWrite(ipIndex, offset, data) : -ENODEV;
+  }) ;
 }
 
 int xclRegRead(xclDeviceHandle handle, uint32_t ipIndex, uint32_t offset, uint32_t *datap)
 {
-  REG_READ_CB;
-
+  return xdp::hal::profiling_wrapper("xclRegRead",
+  [handle, ipIndex, offset, datap] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclRegRead(ipIndex, offset, datap) : -ENODEV;
+  }) ;
 }
 
 int xclGetErrorStatus(xclDeviceHandle handle, xclErrorStatus *info)
@@ -2506,55 +2866,85 @@ unsigned int xclVersion ()
     return 2;
 }
 
-unsigned int xclAllocBO(xclDeviceHandle handle, size_t size, int unused, unsigned flags)
+unsigned int
+xclAllocBO(xclDeviceHandle handle, size_t size, int, unsigned flags)
 {
-  ALLOC_BO_CB;
+  return xdp::hal::profiling_wrapper("xclAllocBO",
+    [handle, size, flags] {
+      try {
+        auto shim = xocl::shim::handleCheck(handle);
+        if (!shim)
+          return static_cast<unsigned int>(-ENODEV);
 
-    xocl::shim *drv = xocl::shim::handleCheck(handle);
-    return drv ? drv->xclAllocBO(size, unused, flags) : -ENODEV;
+        auto bo = shim->xclAllocBO(size, flags);
+        auto ptr = static_cast<xrt_shim::buffer_object*>(bo.get());
+        return ptr->detach_handle();
+      }
+      catch (const xrt_core::error& ex) {
+        xrt_core::send_exception_message(ex.what());
+        return static_cast<unsigned int>(ex.get_code());
+      }
+    });
 }
 
-unsigned int xclAllocUserPtrBO(xclDeviceHandle handle, void *userptr, size_t size, unsigned flags)
+unsigned int
+xclAllocUserPtrBO(xclDeviceHandle handle, void* userptr, size_t size, unsigned flags)
 {
-  ALLOC_USERPTR_BO_CB;
+  return xdp::hal::profiling_wrapper("xclAllocUserPtrBO",
+    [handle, userptr, size, flags] {
+      try {
+        auto shim = xocl::shim::handleCheck(handle);
+        if (!shim)
+          return static_cast<unsigned int>(-ENODEV); // argh ...
 
-    xocl::shim *drv = xocl::shim::handleCheck(handle);
-    return drv ? drv->xclAllocUserPtrBO(userptr, size, flags) : -ENODEV;
+        auto bo = shim->xclAllocUserPtrBO(userptr, size, flags);
+        auto ptr = static_cast<xrt_shim::buffer_object*>(bo.get());
+        return ptr->detach_handle();
+      }
+      catch (const xrt_core::error& ex) {
+        xrt_core::send_exception_message(ex.what());
+        return static_cast<unsigned int>(ex.get_code());
+      }
+    });
 }
 
 void xclFreeBO(xclDeviceHandle handle, unsigned int boHandle) {
 
-  FREE_BO_CB;
-
-    xocl::shim *drv = xocl::shim::handleCheck(handle);
-    if (!drv) {
-        return;
-    }
-    drv->xclFreeBO(boHandle);
+  xdp::hal::profiling_wrapper("xclFreeBO",
+    [handle, boHandle] {
+      xocl::shim *drv = xocl::shim::handleCheck(handle);
+      if (!drv) {
+          return;
+      }
+      drv->xclFreeBO(boHandle);
+    }) ;
 }
 
 size_t xclWriteBO(xclDeviceHandle handle, unsigned int boHandle, const void *src, size_t size, size_t seek)
 {
-  WRITE_BO_CB;
-
+  return xdp::hal::buffer_transfer_profiling_wrapper("xclWriteBO", size, true,
+  [handle, boHandle, src, size, seek] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclWriteBO(boHandle, src, size, seek) : -ENODEV;
+  });
 }
 
 size_t xclReadBO(xclDeviceHandle handle, unsigned int boHandle, void *dst, size_t size, size_t skip)
 {
-  READ_BO_CB;
-
+  return xdp::hal::buffer_transfer_profiling_wrapper("xclReadBO", size, false,
+  [handle, boHandle, dst, size, skip] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclReadBO(boHandle, dst, size, skip) : -ENODEV;
+  });
 }
 
 void *xclMapBO(xclDeviceHandle handle, unsigned int boHandle, bool write)
 {
-  MAP_BO_CB;
 
+  return xdp::hal::profiling_wrapper("xclMapBO", [handle, boHandle, write] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclMapBO(boHandle, write) : nullptr;
+  }) ;
 }
 
 int xclUnmapBO(xclDeviceHandle handle, unsigned int boHandle, void* addr)
@@ -2565,7 +2955,9 @@ int xclUnmapBO(xclDeviceHandle handle, unsigned int boHandle, void* addr)
 
 int xclSyncBO(xclDeviceHandle handle, unsigned int boHandle, xclBOSyncDirection dir, size_t size, size_t offset)
 {
-  SYNC_BO_CB ;
+  return xdp::hal::buffer_transfer_profiling_wrapper("xclSyncBO", size,
+                                              (dir == XCL_BO_SYNC_BO_TO_DEVICE),
+  [handle, boHandle, dir, size, offset] {
 
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     if (size == 0) {
@@ -2573,16 +2965,19 @@ int xclSyncBO(xclDeviceHandle handle, unsigned int boHandle, xclBOSyncDirection 
       return 0;
     }
     return drv ? drv->xclSyncBO(boHandle, dir, size, offset) : -ENODEV;
+   }) ;
 }
 
 int xclCopyBO(xclDeviceHandle handle, unsigned int dst_boHandle,
             unsigned int src_boHandle, size_t size, size_t dst_offset, size_t src_offset)
 {
-  COPY_BO_CB ;
 
+  return xdp::hal::profiling_wrapper("xclCopyBO",
+  [handle, dst_boHandle, src_boHandle, size, dst_offset, src_offset] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ?
       drv->xclCopyBO(dst_boHandle, src_boHandle, size, dst_offset, src_offset) : -ENODEV;
+  }) ;
 }
 
 int xclReClock2(xclDeviceHandle handle, unsigned short region, const unsigned short *targetFreqMHz)
@@ -2593,22 +2988,22 @@ int xclReClock2(xclDeviceHandle handle, unsigned short region, const unsigned sh
 
 int xclLockDevice(xclDeviceHandle handle)
 {
-  LOCK_DEVICE_CB;
-
+  return xdp::hal::profiling_wrapper("xclLockDevice", [handle] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     if (!drv)
         return -ENODEV;
     return drv->xclLockDevice() ? 0 : 1;
+  });
 }
 
 int xclUnlockDevice(xclDeviceHandle handle)
 {
-  UNLOCK_DEVICE_CB;
-
+  return xdp::hal::profiling_wrapper("xclUnlockDevice", [handle] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     if (!drv)
         return -ENODEV;
     return drv->xclUnlockDevice() ? 0 : 1;
+  }) ;
 }
 
 int xclResetDevice(xclDeviceHandle handle, xclResetKind kind)
@@ -2648,43 +3043,67 @@ int xclBootFPGA(xclDeviceHandle handle)
     return -EOPNOTSUPP;
 }
 
-int xclExportBO(xclDeviceHandle handle, unsigned int boHandle)
+int
+xclExportBO(xclDeviceHandle handle, unsigned int boHandle)
 {
-    xocl::shim *drv = xocl::shim::handleCheck(handle);
-    return drv ? drv->xclExportBO(boHandle) : -ENODEV;
+  try {
+    auto shim = xocl::shim::handleCheck(handle);
+    if (!shim)
+      return -ENODEV;
+
+    auto shared = shim->xclExportBO(boHandle);
+    auto ptr = static_cast<xrt_shim::shared_object*>(shared.get());
+    return ptr->detach_handle();
+  }
+  catch (const xrt_core::error& ex) {
+    xrt_core::send_exception_message(ex.what());
+    return ex.get_code();
+  }
 }
 
-unsigned int xclImportBO(xclDeviceHandle handle, int fd, unsigned flags)
+unsigned int
+xclImportBO(xclDeviceHandle handle, int fd, unsigned flags)
 {
-    xocl::shim *drv = xocl::shim::handleCheck(handle);
-    if (!drv) {
-        std::cout << __func__ << ", " << std::this_thread::get_id() << ", handle & XOCL Device are bad" << std::endl;
-    }
-    return drv ? drv->xclImportBO(fd, flags) : -ENODEV;
+  try {
+    auto shim = xocl::shim::handleCheck(handle);
+    if (!shim)
+      return static_cast<unsigned int>(-ENODEV); // argh ...
+
+    auto bo = shim->xclImportBO(fd, flags);
+    auto ptr = static_cast<xrt_shim::buffer_object*>(bo.get());
+    return ptr->detach_handle();
+  }
+  catch (const xrt_core::error& ex) {
+    xrt_core::send_exception_message(ex.what());
+    return static_cast<unsigned int>(ex.get_code());
+  }
 }
 
 ssize_t xclUnmgdPwrite(xclDeviceHandle handle, unsigned flags, const void *buf, size_t count, uint64_t offset)
 {
-  UNMGD_PWRITE_CB;
-
+  return xdp::hal::profiling_wrapper("xclUnmgdPwrite",
+  [handle, flags, buf, count, offset] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclUnmgdPwrite(flags, buf, count, offset) : -ENODEV;
+  }) ;
 }
 
 ssize_t xclUnmgdPread(xclDeviceHandle handle, unsigned flags, void *buf, size_t count, uint64_t offset)
 {
-  UNMGD_PREAD_CB;
-
+  return xdp::hal::profiling_wrapper("xclUnmgdPread",
+  [handle, flags, buf, count, offset] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclUnmgdPread(flags, buf, count, offset) : -ENODEV;
+  }) ;
 }
 
 int xclGetBOProperties(xclDeviceHandle handle, unsigned int boHandle, xclBOProperties *properties)
 {
-  GET_BO_PROP_CB;
-
+  return xdp::hal::profiling_wrapper("xclGetBOProperties",
+  [handle, boHandle, properties] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclGetBOProperties(boHandle, properties) : -ENODEV;
+  }) ;
 }
 
 int xclGetUsageInfo(xclDeviceHandle handle, xclDeviceUsage *info)
@@ -2702,10 +3121,11 @@ int xclGetSectionInfo(xclDeviceHandle handle, void* section_info, size_t * secti
 
 int xclExecBuf(xclDeviceHandle handle, unsigned int cmdBO)
 {
-  EXEC_BUF_CB;
-
+  return xdp::hal::profiling_wrapper("xclExecBuf",
+  [handle, cmdBO] {
     xocl::shim *drv = xocl::shim::handleCheck(handle);
     return drv ? drv->xclExecBuf(cmdBO) : -ENODEV;
+  }) ;
 }
 
 int xclExecBufWithWaitList(xclDeviceHandle handle, unsigned int cmdBO, size_t num_bo_in_wait_list, unsigned int *bo_wait_list)
@@ -2720,108 +3140,49 @@ int xclRegisterEventNotify(xclDeviceHandle handle, unsigned int userInterrupt, i
     return drv ? drv->xclRegisterEventNotify(userInterrupt, fd) : -ENODEV;
 }
 
-int xclExecWait(xclDeviceHandle handle, int timeoutMilliSec)
+int xclIPSetReadRange(xclDeviceHandle handle, uint32_t ipIndex, uint32_t start, uint32_t size)
 {
-  EXEC_WAIT_CB;
-
-  xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclExecWait(timeoutMilliSec) : -ENODEV;
+    xocl::shim *drv = xocl::shim::handleCheck(handle);
+    return drv ? drv->xclIPSetReadRange(ipIndex, start, size) : -ENODEV;
 }
 
-int xclOpenContext(xclDeviceHandle handle, const uuid_t xclbinId, unsigned int ipIndex, bool shared)
+int xclExecWait(xclDeviceHandle handle, int timeoutMilliSec)
 {
-#ifdef DISABLE_DOWNLOAD_XCLBIN
-  return 0;
-#endif
+  return xdp::hal::profiling_wrapper("xclExecWait",
+  [handle, timeoutMilliSec] {
+    xocl::shim *drv = xocl::shim::handleCheck(handle);
+    return drv ? drv->xclExecWait(timeoutMilliSec) : -ENODEV;
+  });
+}
 
-  OPEN_CONTEXT_CB;
-
-  xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclOpenContext(xclbinId, ipIndex, shared) : -ENODEV;
+int
+xclOpenContext(xclDeviceHandle handle, const uuid_t xclbinId, unsigned int ipIndex, bool shared)
+{
+  return xdp::hal::profiling_wrapper("xclOpenContext",
+  [handle, xclbinId, ipIndex, shared] {
+    try {
+      xocl::shim *drv = xocl::shim::handleCheck(handle);
+      return drv ? drv->xclOpenContext(xclbinId, ipIndex, shared) : -ENODEV;
+    }
+    catch (const xrt_core::error& ex) {
+      xrt_core::send_exception_message(ex.what());
+      return ex.get_code();
+    }
+  }) ;
 }
 
 int xclCloseContext(xclDeviceHandle handle, const uuid_t xclbinId, unsigned ipIndex)
 {
-#ifdef DISABLE_DOWNLOAD_XCLBIN
-  return 0;
-#endif
-
-  CLOSE_CONTEXT_CB;
-
-  xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclCloseContext(xclbinId, ipIndex) : -ENODEV;
+  return xdp::hal::profiling_wrapper("xclCloseContext",
+  [handle, xclbinId, ipIndex] {
+    xocl::shim *drv = xocl::shim::handleCheck(handle);
+    return drv ? drv->xclCloseContext(xclbinId, ipIndex) : -ENODEV;
+  });
 }
 
 const axlf_section_header* wrap_get_axlf_section(const axlf* top, axlf_section_kind kind)
 {
     return xclbin::get_axlf_section(top, kind);
-}
-
-// QDMA streaming APIs
-int xclCreateWriteQueue(xclDeviceHandle handle, xclQueueContext *q_ctx, uint64_t *q_hdl)
-{
-  xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclCreateWriteQueue(q_ctx, q_hdl) : -ENODEV;
-}
-
-int xclCreateReadQueue(xclDeviceHandle handle, xclQueueContext *q_ctx, uint64_t *q_hdl)
-{
-  xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclCreateReadQueue(q_ctx, q_hdl) : -ENODEV;
-}
-
-int xclDestroyQueue(xclDeviceHandle handle, uint64_t q_hdl)
-{
-  xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclDestroyQueue(q_hdl) : -ENODEV;
-}
-
-void *xclAllocQDMABuf(xclDeviceHandle handle, size_t size, uint64_t *buf_hdl)
-{
-  xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclAllocQDMABuf(size, buf_hdl) : NULL;
-}
-
-int xclFreeQDMABuf(xclDeviceHandle handle, uint64_t buf_hdl)
-{
-  xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclFreeQDMABuf(buf_hdl) : -ENODEV;
-}
-
-ssize_t xclWriteQueue(xclDeviceHandle handle, uint64_t q_hdl, xclQueueRequest *wr)
-{
-    xocl::shim *drv = xocl::shim::handleCheck(handle);
-    return drv ? drv->xclWriteQueue(q_hdl, wr) : -ENODEV;
-}
-
-ssize_t xclReadQueue(xclDeviceHandle handle, uint64_t q_hdl, xclQueueRequest *wr)
-{
-    xocl::shim *drv = xocl::shim::handleCheck(handle);
-    return drv ? drv->xclReadQueue(q_hdl, wr) : -ENODEV;
-}
-
-int xclSetQueueOpt(xclDeviceHandle handle, uint64_t q_hdl, int type, uint32_t val)
-{
-    xocl::shim *drv = xocl::shim::handleCheck(handle);
-    return drv ? drv->xclSetQueueOpt(q_hdl, type, val) : -ENODEV;
-}
-
-int xclPollQueue(xclDeviceHandle handle, uint64_t q_hdl, int min_compl, int max_compl, xclReqCompletion *comps, int* actual, int timeout)
-{
-        xocl::shim *drv = xocl::shim::handleCheck(handle);
-        return drv ? drv->xclPollQueue(q_hdl, min_compl, max_compl, comps, actual, timeout) : -ENODEV;
-}
-
-int xclPollCompletion(xclDeviceHandle handle, int min_compl, int max_compl, xclReqCompletion *comps, int* actual, int timeout)
-{
-  try {
-    xocl::shim *drv = xocl::shim::handleCheck(handle);
-    return drv ? drv->xclPollCompletion(min_compl, max_compl, comps, actual, timeout) : -ENODEV;
-  }
-  catch (const std::exception& ex) {
-    xrt_core::send_exception_message(ex.what());
-    return -ENODEV;
-  }
 }
 
 size_t xclGetDeviceTimestamp(xclDeviceHandle handle)
@@ -2892,17 +3253,28 @@ double xclGetDeviceClockFreqMHz(xclDeviceHandle handle)
   return drv ? drv->xclGetDeviceClockFreqMHz() : 0.0;
 }
 
-double xclGetReadMaxBandwidthMBps(xclDeviceHandle handle)
+double xclGetHostReadMaxBandwidthMBps(xclDeviceHandle handle)
 {
   xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclGetReadMaxBandwidthMBps() : 0.0;
+  return drv ? drv->xclGetHostReadMaxBandwidthMBps() : 0.0;
 }
 
-
-double xclGetWriteMaxBandwidthMBps(xclDeviceHandle handle)
+double xclGetHostWriteMaxBandwidthMBps(xclDeviceHandle handle)
 {
   xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclGetWriteMaxBandwidthMBps() : 0.0;
+  return drv ? drv->xclGetHostWriteMaxBandwidthMBps() : 0.0;
+}
+
+double xclGetKernelReadMaxBandwidthMBps(xclDeviceHandle handle)
+{
+  xocl::shim *drv = xocl::shim::handleCheck(handle);
+  return drv ? drv->xclGetKernelReadMaxBandwidthMBps() : 0.0;
+}
+
+double xclGetKernelWriteMaxBandwidthMBps(xclDeviceHandle handle)
+{
+  xocl::shim *drv = xocl::shim::handleCheck(handle);
+  return drv ? drv->xclGetKernelWriteMaxBandwidthMBps() : 0.0;
 }
 
 int xclGetSysfsPath(xclDeviceHandle handle, const char* subdev,
@@ -2912,12 +3284,6 @@ int xclGetSysfsPath(xclDeviceHandle handle, const char* subdev,
   if (!drv)
     return -1;
   return drv->xclGetSysfsPath(subdev, entry, sysfsPath, size);
-}
-
-int xclGetDebugProfileDeviceInfo(xclDeviceHandle handle, xclDebugProfileDeviceInfo* info)
-{
-  xocl::shim *drv = xocl::shim::handleCheck(handle);
-  return drv ? drv->xclGetDebugProfileDeviceInfo(info) : -ENODEV;
 }
 
 int xclIPName2Index(xclDeviceHandle handle, const char *name)

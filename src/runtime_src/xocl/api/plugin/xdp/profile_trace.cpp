@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2021 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -25,6 +26,7 @@
 #include "core/common/dlfcn.h"
 #include "core/common/config_reader.h"
 #include "core/common/message.h"
+#include "core/common/api/xclbin_int.h"
 
 #include "xocl/core/command_queue.h"
 #include "xocl/core/program.h"
@@ -50,17 +52,13 @@ namespace opencl_trace {
 		      unsigned long long int, 
 		      const char*, 
 		      size_t, 
-		      bool, 
-		      unsigned long long int*, 
-		      unsigned long long int)> read_cb ;
+		      bool)> read_cb ;
   std::function<void (unsigned long long int,
 		      bool,
 		      unsigned long long int,
 		      const char*,
 		      size_t,
-		      bool,
-		      unsigned long long int*,
-		      unsigned long long int)> write_cb ;
+		      bool)> write_cb ;
   std::function<void (unsigned long long int,
 		      bool,
 		      unsigned long long int,
@@ -68,9 +66,7 @@ namespace opencl_trace {
 		      unsigned long long int,
 		      const char*,
 		      size_t,
-		      bool,
-		      unsigned long long int*,
-		      unsigned long long int)> copy_cb ;
+		      bool)> copy_cb ;
   std::function<void (unsigned long long int,
 		      bool,
 		      const char*,
@@ -79,65 +75,52 @@ namespace opencl_trace {
 		      size_t,
 		      size_t,
 		      size_t,
-		      size_t,
-		      unsigned long long int*,
-		      unsigned long long int)> ndrange_cb ;
+		      size_t)> ndrange_cb ;
 
   void register_opencl_trace_functions(void* handle)
   {
-    typedef void (*ftype)(const char*, unsigned long long int, unsigned long long int) ;
-    function_start_cb = (ftype)(xrt_core::dlsym(handle, "function_start")) ;
+    using func_type     = void (*)(const char*, unsigned long long int,
+                                   unsigned long long int) ;
+    using dep_type      = void (*)(unsigned long long int,
+                                   unsigned long long int) ;
+    using transfer_type = void (*)(unsigned long long int, bool,
+                                   unsigned long long int, const char*, size_t,
+                                   bool) ;
+    using copy_type     = void (*)(unsigned long long int, bool,
+                                   unsigned long long int, const char*,
+                                   unsigned long long int, const char*,
+                                   size_t, bool) ;
+    using ndrange_type  = void (*)(unsigned long long int, bool,
+                                   const char*, const char*, const char*,
+                                   size_t, size_t, size_t, size_t) ;
+
+    function_start_cb =
+      reinterpret_cast<func_type>(xrt_core::dlsym(handle, "function_start")) ;
     if (xrt_core::dlerror() != NULL) function_start_cb = nullptr ;
 
-    function_end_cb = (ftype)(xrt_core::dlsym(handle, "function_end")) ;
+    function_end_cb =
+      reinterpret_cast<func_type>(xrt_core::dlsym(handle, "function_end")) ;
     if (xrt_core::dlerror() != NULL) function_end_cb = nullptr ;
 
-    typedef void (*dtype)(unsigned long long int, unsigned long long int) ;
-    dependency_cb = (dtype)(xrt_core::dlsym(handle, "add_dependency")) ;
+    dependency_cb =
+      reinterpret_cast<dep_type>(xrt_core::dlsym(handle, "add_dependency")) ;
     if (xrt_core::dlerror() != NULL) dependency_cb = nullptr ;
 
-    typedef void (*ttype)(unsigned long long int,
-			  bool,
-			  unsigned long long int,
-			  const char*,
-			  size_t,
-			  bool,
-			  unsigned long long int*,
-			  unsigned long long int) ;
-
-    read_cb = (ttype)(xrt_core::dlsym(handle, "action_read")) ;
+    read_cb =
+      reinterpret_cast<transfer_type>(xrt_core::dlsym(handle, "action_read")) ;
     if (xrt_core::dlerror() != NULL) read_cb = nullptr ;
 
-    write_cb = (ttype)(xrt_core::dlsym(handle, "action_write")) ;
+    write_cb =
+      reinterpret_cast<transfer_type>(xrt_core::dlsym(handle, "action_write")) ;
     if (xrt_core::dlerror() != NULL) write_cb = nullptr ;
 
-    typedef void (*ctype)(unsigned long long int,
-			  bool,
-			  unsigned long long int,
-			  const char*,
-			  unsigned long long int,
-			  const char*,
-			  size_t,
-			  bool,
-			  unsigned long long int*,
-			  unsigned long long int) ;
-
-    copy_cb = (ctype)(xrt_core::dlsym(handle, "action_copy")) ;
+    copy_cb =
+      reinterpret_cast<copy_type>(xrt_core::dlsym(handle, "action_copy")) ;
     if (xrt_core::dlerror() != NULL) copy_cb = nullptr ;
 
-    typedef void (*ntype)(unsigned long long int,
-			  bool,
-			  const char*,
-			  const char*,
-			  const char*,
-			  size_t,
-			  size_t,
-			  size_t,
-			  size_t,
-			  unsigned long long int*,
-			  unsigned long long int) ;
-    
-    ndrange_cb = (ntype)(xrt_core::dlsym(handle, "action_ndrange")) ;
+
+    ndrange_cb =
+      reinterpret_cast<ndrange_type>(xrt_core::dlsym(handle, "action_ndrange"));
     if (xrt_core::dlerror() != NULL) ndrange_cb = nullptr ;
   }
 
@@ -164,11 +147,14 @@ namespace device_offload {
 
   void register_device_offload_functions(void* handle) 
   {
-    typedef void (*ftype)(void*) ;
-    update_device_cb = (ftype)(xrt_core::dlsym(handle, "updateDeviceOpenCL")) ;
+    using cb_type = void (*)(void*) ;
+
+    update_device_cb =
+      reinterpret_cast<cb_type>(xrt_core::dlsym(handle, "updateDeviceOpenCL"));
     if (xrt_core::dlerror() != NULL) update_device_cb = nullptr ;
 
-    flush_device_cb = (ftype)(xrt_core::dlsym(handle, "flushDeviceOpenCL")) ;
+    flush_device_cb =
+      reinterpret_cast<cb_type>(xrt_core::dlsym(handle, "flushDeviceOpenCL")) ;
     if (xrt_core::dlerror() != NULL) flush_device_cb = nullptr ;
   }
 
@@ -187,38 +173,6 @@ namespace device_offload {
 
 } // end namespace device_offload
 } // end namespace xdp
-
-// Ths anonymous namespace is for helper functions used in this file
-namespace {
-
-  static void get_dependency_information(unsigned long long int*& dependencies,
-					 uint64_t& numDependencies,
-					 xocl::event* e)
-  {
-    try {
-      xocl::range_lock<xocl::event::event_iterator_type>&& currRange = 
-	e->try_get_chain() ;
-
-      if (currRange.size() != 0)
-      {
-	numDependencies = currRange.size() ;
-	dependencies = new unsigned long long int[numDependencies] ;
-
-	int i = 0 ;
-	for (auto it = currRange.begin() ; it != currRange.end() ; ++it)
-	{
-	  dependencies[i] = (*it)->get_uid() ;
-	  ++i ;
-	}
-      }
-    }
-    catch (const xocl::error& /*e*/)
-    {
-      return ;
-    } 
-  }
-
-} // end anonymous namespace
 
 namespace xocl {
   namespace profile {
@@ -277,10 +231,10 @@ namespace xocl {
 
     //static std::map<uint64_t, uint64_t> XRTIdToXDPId ;
 
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
     action_read(cl_mem buffer)
     {
-      return [buffer](xocl::event* e, cl_int status, const std::string&) 
+      return [buffer](xocl::event* e, cl_int status)
              {
 	       if (!xdp::opencl_trace::read_cb) return ;
 	       if (status != CL_RUNNING && status != CL_COMPLETE) return ;
@@ -290,9 +244,6 @@ namespace xocl {
 	       auto xmem = xocl::xocl(buffer) ;
 	       auto ext_flags = xmem->get_ext_flags() ;
 	       bool isP2P = ((ext_flags & XCL_MEM_EXT_P2P_BUFFER) != 0) ;
-	       
-	       unsigned long long int* dependencies = nullptr ;
-	       uint64_t numDependencies = 0 ;
 
 	       // For start events, dig in and find all the information
 	       //  necessary to show the tooltip and send it.
@@ -310,20 +261,13 @@ namespace xocl {
 		 {
 		 }
 
-		 // Get dependency information
-		 get_dependency_information(dependencies, numDependencies, e) ;
-
 		 // Perform the callback
 		 xdp::opencl_trace::read_cb(static_cast<unsigned long long int>(e->get_uid()),
 			 true,
 			 static_cast<unsigned long long int>(address),
 			 bank.c_str(),
 			 xmem->get_size(),
-			 isP2P,
-			 dependencies,
-			 numDependencies) ;
-		 // Clean up memory
-		 if (dependencies != nullptr) delete [] dependencies ;
+                         isP2P) ;
 	       }
 	       // For end events, just send the minimal information
 	       else if (status == CL_COMPLETE)
@@ -333,17 +277,15 @@ namespace xocl {
 			 0,
 			 nullptr,
 			 0,
-			 isP2P,
-			 dependencies,
-			 numDependencies) ;
+                         isP2P) ;
 	       }
              } ; 
     }
 
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
     action_write(cl_mem buffer)
     {
-      return [buffer](xocl::event* e, cl_int status, const std::string&)
+      return [buffer](xocl::event* e, cl_int status)
 	     {
 	       if (!xdp::opencl_trace::write_cb) return ;
 	       if (status != CL_RUNNING && status != CL_COMPLETE) return ;
@@ -353,9 +295,6 @@ namespace xocl {
 	       auto xmem = xocl::xocl(buffer) ;
 	       auto ext_flags = xmem->get_ext_flags() ;
 	       bool isP2P = ((ext_flags & XCL_MEM_EXT_P2P_BUFFER) != 0) ;
-	       
-	       unsigned long long int* dependencies = nullptr ;
-	       uint64_t numDependencies = 0 ;
 
 	       // For start events, dig in and find all the information
 	       //  necessary to show the tooltip and send it.
@@ -373,20 +312,13 @@ namespace xocl {
 		 {
 		 }
 
-		 // Get dependency information
-		 get_dependency_information(dependencies, numDependencies, e) ;
-
 		 // Perform the callback
 		 xdp::opencl_trace::write_cb(static_cast<unsigned long long int>(e->get_uid()),
 			  true,
 			  static_cast<unsigned long long int>(address),
 			  bank.c_str(),
 			  xmem->get_size(),
-			  isP2P,
-			  dependencies,
-			  numDependencies) ;
-		 // Clean up memory
-		 if (dependencies != nullptr) delete [] dependencies ;
+			  isP2P) ;
 	       }
 	       // For end events, just send the minimal information
 	       else if (status == CL_COMPLETE)
@@ -396,18 +328,16 @@ namespace xocl {
 			  0,
 			  nullptr,
 			  0,
-			  isP2P,
-			  dependencies,
-			  numDependencies) ;
+			  isP2P) ;
 	       }
 
 	     } ;
     }
 
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
     action_map(cl_mem buffer, cl_map_flags flags)
     {
-      return [buffer, flags](xocl::event* e, cl_int status, const std::string&)
+      return [buffer, flags](xocl::event* e, cl_int status)
 	     {
 	       if (!xdp::opencl_trace::read_cb) return ;
 	       if (status != CL_RUNNING && status != CL_COMPLETE) return ;
@@ -422,9 +352,6 @@ namespace xocl {
 	       // Ignore if the buffer is *not* resident on the device
 	       if (!(xmem->is_resident(device))) return ;
 
-	       unsigned long long int* dependencies = nullptr ;
-	       uint64_t numDependencies = 0 ;
-
 	       if (status == CL_RUNNING)
 	       {
 		 //XRTIdToXDPId[e->get_uid()] = xrt_core::utils::issue_id() ;
@@ -438,20 +365,13 @@ namespace xocl {
 		 {
 		 }
 
-		 // Get dependency information
-		 get_dependency_information(dependencies, numDependencies, e) ;
-
 		 // Perform the callback
 		 xdp::opencl_trace::read_cb(static_cast<unsigned long long int>(e->get_uid()),
 			 true,
 			 static_cast<unsigned long long int>(address),
 			 bank.c_str(),
 			 xmem->get_size(),
-			 false, // isP2P
-			 dependencies,
-			 numDependencies) ;
-		 // Clean up memory
-		 if (dependencies != nullptr) delete [] dependencies ;
+                         false) ; // isP2P
 	       }
 	       else if (status == CL_COMPLETE)
 	       {
@@ -460,27 +380,25 @@ namespace xocl {
 			 0,
 			 nullptr,
 			 0,
-			 false, // isP2P
-			 dependencies,
-			 numDependencies) ;
+			 false) ; // isP2P
 	       }
 	     } ;
     }
 
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
     action_migrate(cl_mem mem0, cl_mem_migration_flags flags)
     {
       // Don't do anything for this migration
       if (flags & CL_MIGRATE_MEM_OBJECT_CONTENT_UNDEFINED)
       {
-	return [](xocl::event*, cl_int, const std::string&) { } ;
+	return [](xocl::event*, cl_int) { } ;
       }
 
       // Migrate actions could be either a read or a write.
       if (flags & CL_MIGRATE_MEM_OBJECT_HOST)
       {
 	// Read
-	return [mem0](xocl::event* e, cl_int status, const std::string&)
+	return [mem0](xocl::event* e, cl_int status)
 	       {
 		 if (!xdp::opencl_trace::read_cb) return ;
 		 if (status != CL_RUNNING && status != CL_COMPLETE) return ;
@@ -488,9 +406,6 @@ namespace xocl {
 		 // Before we cross over to XDP, collect all the 
 		 //  information we need from the event
 		 auto xmem = xocl::xocl(mem0) ;
-	       
-		 unsigned long long int* dependencies = nullptr ;
-		 uint64_t numDependencies = 0 ;
 
 		 // For start events, dig in and find all the information
 		 //  necessary to show the tooltip and send it.
@@ -507,20 +422,13 @@ namespace xocl {
 		   {
 		   }
 
-		   // Get dependency information
-		   get_dependency_information(dependencies, numDependencies, e);
-
 		   // Perform the callback
 		   xdp::opencl_trace::read_cb(static_cast<unsigned long long int>(e->get_uid()),
 			   true,
 			   static_cast<unsigned long long int>(address),
 			   bank.c_str(),
 			   xmem->get_size(),
-			   false, // isP2P
-			   dependencies,
-			   numDependencies) ;
-		   // Clean up memory
-		   if (dependencies != nullptr) delete [] dependencies ;
+			   false) ; // isP2P
 		 }
 		 // For end events, just send the minimal information
 		 else if (status == CL_COMPLETE)
@@ -530,16 +438,14 @@ namespace xocl {
 			   0,
 			   nullptr,
 			   0,
-			   false, // isP2P
-			   dependencies,
-			   numDependencies) ;
+			   false) ; // isP2P
 		 }
 	       } ;
       }
       else
       {
 	// Write
-	return [mem0](xocl::event* e, cl_int status, const std::string&)
+	return [mem0](xocl::event* e, cl_int status)
 	       {
 		 if (!xdp::opencl_trace::write_cb) return ;
 		 if (status != CL_RUNNING && status != CL_COMPLETE) return ;
@@ -547,9 +453,6 @@ namespace xocl {
 		 // Before we cross over to XDP, collect all the 
 		 //  information we need from the event
 		 auto xmem = xocl::xocl(mem0) ;
-	       
-		 unsigned long long int* dependencies = nullptr ;
-		 uint64_t numDependencies = 0 ;
 
 		 // For start events, dig in and find all the information
 		 //  necessary to show the tooltip and send it.
@@ -566,20 +469,13 @@ namespace xocl {
 		   {
 		   }
 		   
-		   // Get dependency information
-		   get_dependency_information(dependencies, numDependencies, e);
-		   
 		   // Perform the callback
 		   xdp::opencl_trace::write_cb(static_cast<unsigned long long int>(e->get_uid()),
 			    true,
 			    static_cast<unsigned long long int>(address),
 			    bank.c_str(),
 			    xmem->get_size(),
-			    false, // isP2P
-			    dependencies,
-			    numDependencies) ;
-		   // Clean up memory
-		   if (dependencies != nullptr) delete [] dependencies ;
+			    false) ; // isP2P
 		 }
 		 // For end events, just send the minimal information
 		 else if (status == CL_COMPLETE)
@@ -589,15 +485,13 @@ namespace xocl {
 			    0,
 			    nullptr,
 			    0,
-			    false, // isP2P
-			    dependencies,
-			    numDependencies) ;
+			    false) ; // isP2P
 		 }
 	       } ;
       }
     }
 
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
     action_ndrange_migrate(cl_event event, cl_kernel kernel)
     {
       auto xevent = xocl::xocl(event) ;
@@ -632,12 +526,12 @@ namespace xocl {
       
       if (mem0 == nullptr)
       {
-	return [](xocl::event*, cl_int, const std::string&)
+	return [](xocl::event*, cl_int)
 	       {
 	       } ;
       }
 
-      return [mem0](xocl::event* e, cl_int status, const std::string&)
+      return [mem0](xocl::event* e, cl_int status)
 	     {
 	       if (!xdp::opencl_trace::write_cb) return ;
 	       if (status != CL_RUNNING && status != CL_COMPLETE) return ;
@@ -645,9 +539,6 @@ namespace xocl {
 		 // Before we cross over to XDP, collect all the 
 		 //  information we need from the event
 		 auto xmem = xocl::xocl(mem0) ;
-	       
-		 unsigned long long int* dependencies = nullptr ;
-		 uint64_t numDependencies = 0 ;
 
 		 // For start events, dig in and find all the information
 		 //  necessary to show the tooltip and send it.
@@ -664,20 +555,13 @@ namespace xocl {
 		   {
 		   }
 		   
-		   // Get dependency information
-		   get_dependency_information(dependencies, numDependencies, e);
-		   
 		   // Perform the callback
 		   xdp::opencl_trace::write_cb(static_cast<unsigned long long int>(e->get_uid()),
 			    true,
 			    static_cast<unsigned long long int>(address),
 			    bank.c_str(),
 			    xmem->get_size(),
-			    false, // isP2P
-			    dependencies,
-			    numDependencies) ;
-		   // Clean up memory
-		   if (dependencies != nullptr) delete [] dependencies ;
+			    false) ; // isP2P
 		 }
 		 // For end events, just send the minimal information
 		 else if (status == CL_COMPLETE)
@@ -687,14 +571,12 @@ namespace xocl {
 			    0,
 			    nullptr,
 			    0,
-			    false, // isP2P
-			    dependencies,
-			    numDependencies) ;
+			    false) ; // isP2P
 		 }
 	     } ;
     }
 
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
     action_ndrange(cl_event event, cl_kernel kernel)
     {
       auto xevent  = xocl::xocl(event) ;
@@ -703,11 +585,11 @@ namespace xocl {
       auto xcontext = xevent->get_execution_context() ;
       auto workGroupSize = xkernel->get_wg_size() ;
       auto device = xevent->get_command_queue()->get_device() ;
-      auto xclbin = xkernel->get_program()->get_xclbin(device) ;
+      auto xclbin = device->get_xrt_xclbin();
       
       std::string deviceName = device->get_name() ;
       std::string kernelName = xkernel->get_name() ;
-      std::string binaryName = xclbin.project_name() ;
+      std::string binaryName = xrt_core::xclbin_int::get_project_name(xclbin);
 
       size_t localWorkDim[3] = {0, 0, 0} ;
       range_copy(xkernel->get_compile_wg_size_range(), localWorkDim) ;
@@ -720,7 +602,7 @@ namespace xocl {
 		  localWorkDim) ;
       }
 
-      return [workGroupSize, deviceName, kernelName, binaryName, localWorkDim](xocl::event* e, cl_int status, const std::string&) 
+      return [workGroupSize, deviceName, kernelName, binaryName, &localWorkDim](xocl::event* e, cl_int status) 
 	     {
 	       if (!xdp::opencl_trace::ndrange_cb) return ;
 	       if (status != CL_RUNNING && status != CL_COMPLETE) return ;
@@ -728,9 +610,6 @@ namespace xocl {
 	       if (status == CL_RUNNING)
 	       {
 		 //XRTIdToXDPId[e->get_uid()] = xrt_core::utils::issue_id() ;
-		 unsigned long long int* dependencies = nullptr ;
-		 uint64_t numDependencies = 0 ;
-		 get_dependency_information(dependencies, numDependencies, e);
 
 		 xdp::opencl_trace::ndrange_cb(static_cast<unsigned long long int>(e->get_uid()),
 			    true,
@@ -740,10 +619,7 @@ namespace xocl {
 			    localWorkDim[0],
 			    localWorkDim[1],
 			    localWorkDim[2],
-			    workGroupSize,
-			    dependencies,
-			    numDependencies) ;
-		 if (dependencies != nullptr) delete [] dependencies ;
+			    workGroupSize) ;
 	       }
 	       else if (status == CL_COMPLETE)
 	       {
@@ -755,18 +631,16 @@ namespace xocl {
 			    0,
 			    0,
 			    0,
-			    0,
-			    nullptr,
 			    0) ;
 	       }
 
 	     } ;
     }
 
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
     action_unmap(cl_mem buffer)
     {
-      return [buffer](xocl::event* e, cl_int status, const std::string&)
+      return [buffer](xocl::event* e, cl_int status)
 	     {
 	       if (!xdp::opencl_trace::write_cb) return ;
 	       if (status != CL_RUNNING && status != CL_COMPLETE) return ;
@@ -781,8 +655,6 @@ namespace xocl {
 	       auto device = queue->get_device() ;
 	       if (!(xmem->is_resident(device))) return ;
 
-	       unsigned long long int* dependencies = nullptr ;
-	       uint64_t numDependencies = 0 ;
 	       if (status == CL_RUNNING)
 	       {
 		 //XRTIdToXDPId[e->get_uid()] = xrt_core::utils::issue_id() ;
@@ -796,20 +668,13 @@ namespace xocl {
 		 {
 		 }
 
-		 // Get dependency information
-		 get_dependency_information(dependencies, numDependencies, e) ;
-
 		 // Perform the callback
 		 xdp::opencl_trace::write_cb(static_cast<unsigned long long int>(e->get_uid()),
 			  true,
 			  static_cast<unsigned long long int>(address),
 			  bank.c_str(),
 			  xmem->get_size(),
-			  false, // isP2P
-			  dependencies,
-			  numDependencies) ;
-		 // Clean up memory
-		 if (dependencies != nullptr) delete [] dependencies ;
+			  false) ; // isP2P
 	       }
 	       else if (status == CL_COMPLETE)
 	       {
@@ -818,17 +683,15 @@ namespace xocl {
 			  0,
 			  nullptr,
 			  0,
-			  false, // isP2P
-			  dependencies,
-			  numDependencies) ;
+			  false) ; // isP2P
 	       }
 	     } ;
     }
 
-    std::function<void (xocl::event*, cl_int, const std::string&)>
+    std::function<void (xocl::event*, cl_int)>
     action_copy(cl_mem src_buffer, cl_mem dst_buffer)
     {      
-      return [src_buffer, dst_buffer](xocl::event* e, cl_int status, const std::string&) 
+      return [src_buffer, dst_buffer](xocl::event* e, cl_int status)
 	     {
 	       if (!xdp::opencl_trace::copy_cb) return ;
 	       if (status != CL_RUNNING && status != CL_COMPLETE) return ;
@@ -865,11 +728,6 @@ namespace xocl {
 		 {
 		 }
 
-		 unsigned long long int* dependencies = nullptr ;
-		 uint64_t numDependencies = 0 ;
-		 // Get dependency information
-		 get_dependency_information(dependencies, numDependencies, e) ;
-
 		 xdp::opencl_trace::copy_cb(static_cast<unsigned long long int>(e->get_uid()),
 			 true,
 			 static_cast<unsigned long long int>(srcAddress),
@@ -877,11 +735,7 @@ namespace xocl {
 			 static_cast<unsigned long long int>(dstAddress),
 			 dstBank.c_str(),
 			 xSrcMem->get_size(),
-			 isP2P,
-			 dependencies,
-			 numDependencies);
-		 // Clean up memory
-		 if (dependencies != nullptr) delete [] dependencies ;
+			 isP2P);
 	       }
 	       else if (status == CL_COMPLETE)
 	       {
@@ -892,9 +746,7 @@ namespace xocl {
 			 0,
 			 nullptr,
 			 0,
-			 isP2P,
-			 nullptr, // dependencies
-			 0) ; // numDependencies
+                         isP2P) ;
 	       }
 	     } ;
     }

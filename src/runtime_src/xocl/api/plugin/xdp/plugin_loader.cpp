@@ -1,5 +1,5 @@
 /**
- * Copyright (C) 2016-2021 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc and AMD, Inc
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -21,6 +21,7 @@
 
 #include "core/common/config_reader.h"
 #include "core/common/message.h"
+#include "core/common/utils.h"
 
 namespace xdp {
 namespace plugins {
@@ -34,42 +35,19 @@ namespace plugins {
       xocl::appdebug::load_xdp_app_debug() ;
     }
 
-    if (xrt_core::config::get_data_transfer_trace() != "off" ||
-        xrt_core::config::get_opencl_device_counter()) {
-      xdp::device_offload::load() ;
-    }
-
-    if (xrt_core::config::get_profile() ||
-        xrt_core::config::get_opencl_summary()) {
+    if (xrt_core::config::get_opencl_trace() ||
+        xrt_core::utils::load_host_trace()) {
+      xdp::opencl_trace::load() ;
       xocl::profile::load_xdp_opencl_counters() ;
     }
 
-    if (xrt_core::config::get_timeline_trace() ||
-        xrt_core::config::get_opencl_trace()) {
-      xdp::opencl_trace::load() ;
+    if (xrt_core::config::get_device_trace() != "off" ||
+        xrt_core::config::get_device_counters()) {
+      xdp::device_offload::load() ;
     }
 
     if (xrt_core::config::get_lop_trace()) {
       xdp::lop::load() ;
-    }
-
-    // Deprecation warnings specific to the .ini flags
-    if (xrt_core::config::get_profile()) {
-      std::string message = "\"profile\" configuration in xrt.ini will be deprecated in the next release.  Please use \"opencl_summary=true\" to enable OpenCL profiling and \"opencl_device_counter=true\" for device counter data in OpenCL profile summary." ;
-      xrt_core::message::send(xrt_core::message::severity_level::warning, "XRT",
-                              message) ;
-    }
-
-    if (xrt_core::config::get_timeline_trace()) {
-      std::string message = "\"timeline_trace\" configuration in xrt.ini will be deprecated in the next release.  Please use \"opencl_trace=true\" to enable OpenCL trace." ;
-      xrt_core::message::send(xrt_core::message::severity_level::warning, "XRT",
-                              message) ;
-    }
-
-    if (xrt_core::config::get_continuous_trace_interval_ms() != 10) {
-      std::string message = "\"continuous_trace_interval_ms\" configuration in xrt.ini will be deprecated in the next release.  Please use \"trace_buffer_offload_interval_ms\" to control trace offload interval." ;
-      xrt_core::message::send(xrt_core::message::severity_level::warning, "XRT",
-                              message) ;
     }
 
     return true ;

@@ -7,15 +7,17 @@
 #  % run.sh -dbg emacs
 XRTBUILD=$(readlink -f $(dirname ${BASH_SOURCE[0]}))
 
-# Set to location of your preferred Vitis install
-vitis=/proj/xbuilds/2021.1_released/installs/lin64/Vitis/2021.1
+# Preserve XILINX_VITIS or set to default location
+vitis=${XILINX_VITIS:=/proj/xbuilds/2021.2_released/installs/lin64/Vitis/2021.2}
+
+# Preserve XILINX_XRT if set
+xrt=${XILINX_XRT}
 
 ext=.o
 rel="Release"
 cmd=""
 em=""
 conf=""
-xrt=""
 
 usage()
 {
@@ -86,8 +88,8 @@ while [ $# -gt 0 ]; do
 done
 
 if [ "X$ini" != "X" ] ; then
- echo "SDACCEL_INI_PATH=$ini"
- export SDACCEL_INI_PATH=$ini
+ echo "XRT_INI_PATH=$ini"
+ export XRT_INI_PATH=$ini
 fi
 
 if [ "X$em" != "X" ] ; then
@@ -95,13 +97,8 @@ if [ "X$em" != "X" ] ; then
  export XCL_EMULATION_MODE=$em
 fi
 
-if [ "X$conf" != "X" ] ; then
- echo "XCL_CONFORMANCE=1"
- export XCL_CONFORMANCE=1
-fi
-
 if [ "X$xrt" == "X" ] ; then
- xrt=$XRTBUILD/$rel/opt/xilinx/xrt
+ xrt=$XRTBUILD/$rel$/opt/xilinx/xrt
 fi
 
 if [[ "X$xrt" != "X" && -d "$xrt" ]] ; then
@@ -121,10 +118,10 @@ if [ "X$ldp" != "X" ] ; then
  export LD_LIBRARY_PATH=$ldp:${LD_LIBRARY_PATH}
 fi
 
-echo "XILINX_XRT=$XILINX_XRT"
-echo "XILINX_VITIS=$XILINX_VITIS"
-echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
-echo "OCL_ICD_VENDORS=$OCL_ICD_VENDORS"
-echo "PATH=$PATH"
+echo "XILINX_XRT      = $XILINX_XRT"
+echo "XILINX_VITIS    = $XILINX_VITIS"
+echo "LD_LIBRARY_PATH = $LD_LIBRARY_PATH"
+echo "OCL_ICD_VENDORS = $OCL_ICD_VENDORS"
+echo "PATH            = $PATH"
 
 $cmd

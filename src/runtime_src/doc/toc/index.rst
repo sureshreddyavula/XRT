@@ -1,6 +1,7 @@
 ..
    comment:: SPDX-License-Identifier: Apache-2.0
    comment:: Copyright (C) 2019-2021 Xilinx, Inc. All rights reserved.
+   comment:: Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
 
 ==================================
 Xilinx® Runtime (XRT) Architecture
@@ -66,7 +67,6 @@ FPGA. The key user APIs are defined in ``xrt.h`` header file.
    platforms_partitions.rst
    sysfs.rst
    formats.rst
-   xrt.main.rst
    ert.main.rst
    mgmt-ioctl.main.rst
    xocl_ioctl.main.rst
@@ -81,9 +81,11 @@ FPGA. The key user APIs are defined in ``xrt.h`` header file.
    xclbintools.rst
    xbutil.rst
    xbmgmt.rst
-   xbutil2.rst
-   xbmgmt2.rst
+   xbflash2.rst
+   xball.rst
+   xbtop.rst
    xbtools_map.rst
+   nagios_plugin.rst
 
 
 .. toctree::
@@ -111,6 +113,11 @@ FPGA. The key user APIs are defined in ``xrt.h`` header file.
 
    security.rst
 
+.. toctree::
+   :caption: Python binding
+   :maxdepth: 1
+
+   pyxrt.rst
 
 .. toctree::
    :caption: Debug and Faqs

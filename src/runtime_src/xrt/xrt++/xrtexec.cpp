@@ -1,23 +1,13 @@
-/**
- * Copyright (C) 2019-2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2019-2022 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2022-2023 Advanced Micro Devices, Inc. All rights reserved.
 #include "xrtexec.hpp"
 #include "xrt/device/device.h"
 #include "core/common/bo_cache.h"
 #include "core/common/api/command.h"
-#include "core/common/api/exec.h"
+#include "core/common/api/hw_queue.h"
+#include "core/common/shim/buffer_handle.h"
+#include "core/common/shim/hwctx_handle.h"
 
 #include <functional>
 
@@ -39,7 +29,7 @@ static void
 add_cu(ert_start_kernel_cmd* skcmd, index_type cuidx)
 {
   auto maskidx = mask_idx(cuidx);
-  if (maskidx > 3) 
+  if (maskidx > 3)
     throw std::runtime_error("Bad CU idx : " + std::to_string(cuidx));
 
   // Shift payload down if necessary to make room for extra cu mask(s).
@@ -94,24 +84,24 @@ create_exec_buf(xrt_xocl::device* device)
     auto at_close = [] (const xrt_xocl::device* device) {
       s_ebocache.erase(device);
     };
-    xrt_core::exec::init(device->get_core_device().get());
     device->add_close_callback(std::bind(at_close, device));
     s_ebocache.emplace(device, std::make_unique<xrt_core::bo_cache>(device->get_xcl_handle(), 128));
   }
-  
+
   return s_ebocache[device]->alloc<ert_packet>();
 }
 
 static void
-release_exec_buf(const xrt_xocl::device* device, execbuf_type& ebo)
+release_exec_buf(const xrt_xocl::device* device, execbuf_type&& ebo)
 {
-  s_ebocache[device]->release(ebo);
+  s_ebocache[device]->release(std::move(ebo));
 }
-  
+
 struct command::impl : xrt_core::command
 {
   impl(xrt_xocl::device* device, ert_cmd_opcode opcode)
     : m_device(device)
+    , m_hwqueue(device->get_core_device().get())
     , m_execbuf(create_exec_buf(m_device))
     , ert_pkt(reinterpret_cast<ert_packet*>(m_execbuf.second))
   {
@@ -121,10 +111,11 @@ struct command::impl : xrt_core::command
 
   ~impl()
   {
-    release_exec_buf(m_device, m_execbuf);
+    release_exec_buf(m_device, std::move(m_execbuf));
   }
 
   xrt_xocl::device* m_device;
+  xrt_core::hw_queue m_hwqueue;
   execbuf_type m_execbuf;      // underlying execution buffer
   mutable bool m_done = true;
 
@@ -159,13 +150,13 @@ struct command::impl : xrt_core::command
       m_done = false;
     }
 
-    xrt_core::exec::unmanaged_start(this);
+    m_hwqueue.unmanaged_start(this);
   }
 
   ert_cmd_state
   wait() const
   {
-    xrt_core::exec::unmanaged_wait(this);
+    m_hwqueue.wait(this);
     return static_cast<ert_cmd_state>(ert_pkt->state);
   }
 
@@ -194,22 +185,28 @@ struct command::impl : xrt_core::command
     return m_device->get_core_device().get();
   }
 
-  virtual xclBufferHandle
+  virtual xrt_core::buffer_handle*
   get_exec_bo() const
   {
-    return m_execbuf.first;
+    return m_execbuf.first.get();
+  }
+
+  virtual xrt_core::hwctx_handle*
+  get_hwctx_handle() const
+  {
+    return nullptr;
   }
 
   virtual void
-  notify(ert_cmd_state s)
+  notify(ert_cmd_state s) const
   {
-    if (s< ERT_CMD_STATE_COMPLETED)
+    if (s < ERT_CMD_STATE_COMPLETED)
       return;
 
     std::lock_guard<std::mutex> lk(m_mutex);
     m_done = true;
   }
-  
+
 };
 
 command::
@@ -306,7 +303,7 @@ add_ctx(uint32_t ctx)
 {
   if (ctx >= 32)
     throw std::runtime_error("write_exec supports at most 32 contexts numbered 0 through 31");
-  
+
   auto skcmd = m_impl->ert_cu;
   skcmd->data[0x10 >> 2] = ctx;
 }
@@ -327,7 +324,7 @@ clear()
   auto skcmd = m_impl->ert_cu;
   skcmd->cu_mask = 0;
 
-  m_impl->ert_pkt->count = 1; 
+  m_impl->ert_pkt->count = 1;
 }
 
 }} // exec,xrt

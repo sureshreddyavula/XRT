@@ -3,9 +3,12 @@
  * Xilinx Kernel Driver XCLBIN parser
  *
  * Copyright (C) 2020-2021 Xilinx, Inc.
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
  *
  * Authors: David Zhang <davidzha@xilinx.com>
  */
+
+#include "xocl_xclbin.h"
 
 #include "xrt_xclbin.h"
 #include "xocl_drv.h"
@@ -21,6 +24,7 @@ struct xclbin_arg {
 	struct axlf 		*xclbin;
 	struct xocl_subdev 	*urpdevs;
 	int 			num_dev;
+	uint32_t 		slot_id;
 };
 
 static int versal_xclbin_pre_download(xdev_handle_t xdev, void *args)
@@ -123,6 +127,39 @@ static int mpsoc_xclbin_post_download(xdev_handle_t xdev, void *args)
 	return 0;
 }
 
+static int xgq_xclbin_pre_download(xdev_handle_t xdev, void *args)
+{
+	return 0;
+}
+
+static int xgq_xclbin_download(xdev_handle_t xdev, void *args)
+{
+	struct xclbin_arg *arg = (struct xclbin_arg *)args;
+	int ret;
+
+	ret = xocl_xgq_download_axlf_slot(xdev, arg->xclbin, arg->slot_id);
+
+	return ret;
+}
+
+static int xgq_xclbin_post_download(xdev_handle_t xdev, void *args)
+{
+	struct xclbin_arg *arg = (struct xclbin_arg *)args;
+	const struct axlf_section_header *hdr =
+	    xrt_xclbin_get_section_hdr(arg->xclbin, CLOCK_FREQ_TOPOLOGY);
+	struct clock_freq_topology *topo;
+	int ret = 0;
+
+	if (hdr) {
+		/* after download, update clock freq */
+		topo = (struct clock_freq_topology *)
+		    (((char *)(arg->xclbin)) + hdr->m_sectionOffset);
+		ret = xocl_xgq_clk_scaling_by_topo(xdev, topo, 1);
+	}
+
+	return ret;
+}
+
 static struct xocl_xclbin_ops versal_ops = {
 	.xclbin_pre_download 	= versal_xclbin_pre_download,
 	.xclbin_download 	= versal_xclbin_download,
@@ -133,6 +170,12 @@ static struct xocl_xclbin_ops mpsoc_ops = {
 	.xclbin_pre_download 	= mpsoc_xclbin_pre_download,
 	.xclbin_download 	= mpsoc_xclbin_download,
 	.xclbin_post_download 	= mpsoc_xclbin_post_download,
+};
+
+static struct xocl_xclbin_ops xgq_ops = {
+	.xclbin_pre_download 	= xgq_xclbin_pre_download,
+	.xclbin_download 	= xgq_xclbin_download,
+	.xclbin_post_download 	= xgq_xclbin_post_download,
 };
 
 #if 0
@@ -164,13 +207,14 @@ static const struct xocl_xclbin_info versal_info = {
 #endif
 
 static int xocl_xclbin_download_impl(xdev_handle_t xdev, const void *xclbin,
-	struct xocl_xclbin_ops *ops)
+	uint32_t slot_id, struct xocl_xclbin_ops *ops)
 {
 	/* args are simular, thus using the same pattern among all ops*/
 	struct xclbin_arg args = {
 		.xdev = xdev,
 		.xclbin = (struct axlf *)xclbin,
 		.num_dev = 0,
+		.slot_id = slot_id,
 	};
 	int ret = 0;
 
@@ -199,23 +243,52 @@ done:
 	return ret;
 }
 
-int xocl_xclbin_download(xdev_handle_t xdev, const void *xclbin)
+int xocl_xclbin_download(xdev_handle_t xdev, const void *xclbin, uint32_t slot_id)
 {
-	if (XOCL_DSA_IS_VERSAL(xdev))
-		return xocl_xclbin_download_impl(xdev, xclbin, &versal_ops);
-	else {
+	int rval = 0;
+
+	xocl_info(&XDEV(xdev)->pdev->dev,"slot_id = %d", slot_id);
+	if (XOCL_DSA_IS_VERSAL(xdev)) {
+		rval = xocl_xclbin_download_impl(xdev, xclbin, slot_id, &xgq_ops);
+		/* Legacy shell doesn't have xgq resources */
+		if (rval == -ENODEV)
+			return xocl_xclbin_download_impl(xdev, xclbin, slot_id,
+					&versal_ops);
+	} else {
 		/*
 		 * TODO:
 		 * return xocl_xclbin_download_impl(xdev, xclbin, &icap_ops);
 		 */
-		int rval = 0;
-		rval = xocl_icap_download_axlf(xdev, xclbin);
+		rval = xocl_icap_download_axlf(xdev, xclbin, slot_id);
 		if (!rval && XOCL_DSA_IS_MPSOC(xdev))
-			rval = xocl_xclbin_download_impl(xdev, xclbin, &mpsoc_ops);
+			rval = xocl_xclbin_download_impl(xdev, xclbin, slot_id,
+					&mpsoc_ops);
 
 		if (rval)
-			xocl_icap_clean_bitstream(xdev);
-
-		return rval;
+			xocl_icap_clean_bitstream(xdev, slot_id);
 	}
+
+	return rval;
+}
+
+enum MEM_TAG convert_mem_tag(const char *name)
+{
+	/* Don't trust m_type in xclbin, convert name to m_type instead.
+	 * m_tag[i] = "HBM[0]" -> m_type = MEM_TAG_HBM
+	 * m_tag[i] = "DDR[1]" -> m_type = MEM_TAG_DRAM
+	 */
+	enum MEM_TAG mem_tag = MEM_TAG_INVALID;
+
+	if (!strncasecmp(name, "DDR", 3))
+		mem_tag = MEM_TAG_DDR;
+	else if (!strncasecmp(name, "PLRAM", 5))
+		mem_tag = MEM_TAG_PLRAM;
+	else if (!strncasecmp(name, "HBM", 3))
+		mem_tag = MEM_TAG_HBM;
+	else if (!strncasecmp(name, "bank", 4))
+		mem_tag = MEM_TAG_DDR;
+	else if (!strncasecmp(name, "HOST[0]", 7))
+		mem_tag = MEM_TAG_HOST;
+
+	return mem_tag;
 }

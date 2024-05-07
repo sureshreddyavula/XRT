@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2020 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,7 +15,7 @@
  * under the License.
  */
 
-#define XDP_SOURCE
+#define XDP_CORE_SOURCE
 
 #include "xdp/profile/database/events/creator/aie_trace_data_logger.h"
 
@@ -31,12 +32,12 @@ AIETraceDataLogger::~AIETraceDataLogger()
 {
 }
 
-void AIETraceDataLogger::addAIETraceData(uint64_t strmIndex, void* buffer, uint64_t bufferSz)
+void AIETraceDataLogger::addAIETraceData(uint64_t strmIndex, void* buffer, uint64_t bufferSz, bool copy)
 {
   if(!VPDatabase::alive()) {
     return;
   }
-  db->getDynamicInfo().addAIETraceData(deviceId, strmIndex, buffer, bufferSz);
+  db->getDynamicInfo().addAIETraceData(deviceId, strmIndex, buffer, bufferSz, copy);
 }
 
 }

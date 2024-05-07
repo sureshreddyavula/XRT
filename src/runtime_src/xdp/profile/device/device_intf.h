@@ -2,8 +2,8 @@
 #define _XDP_DEVICE_INTF_H_
 
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
-
+ * Copyright (C) 2016-2022 Xilinx, Inc
+ * Copyright (C) 2022-2024 Advanced Micro Devices, Inc. - All rights reserved
  * Author(s): Paul Schumacher
  *          : Anurag Dubey
  *          : Tianhao Zhou
@@ -22,35 +22,36 @@
  * under the License.
  */
 
-#include "xclhal2.h"
-
-#include "xdp/config.h"
-
-#include "profile_ip_access.h"
-#include "aim.h"
-#include "am.h"
-#include "asm.h"
-#include "noc.h"
-#include "traceFifoLite.h"
-#include "traceFifoFull.h"
-#include "traceFunnel.h"
-#include "traceS2MM.h"
-
+#include <cassert>
 #include <fstream>
 #include <list>
 #include <map>
-#include <cassert>
-#include <vector>
 #include <mutex>
+#include <vector>
+
+#include "core/include/xclhal2.h"
+#include "core/include/xdp/common.h"
+#include "core/include/xdp/trace.h"
+
+#include "xdp/config.h"
+#include "xdp/profile/database/static_info/pl_constructs.h"
+#include "xdp/profile/device/add.h"
+#include "xdp/profile/device/aim.h"
+#include "xdp/profile/device/am.h"
+#include "xdp/profile/device/asm.h"
+#include "xdp/profile/device/noc.h"
+#include "xdp/profile/device/profile_ip_access.h"
+#include "xdp/profile/device/traceFifoFull.h"
+#include "xdp/profile/device/traceFifoLite.h"
+#include "xdp/profile/device/traceFunnel.h"
+#include "xdp/profile/device/traceS2MM.h"
+#include "xdp/profile/plugin/vp_base/utility.h"
 
 namespace xdp {
 
 // Helper methods
 
-XDP_EXPORT
-uint32_t GetDeviceTraceBufferSize(uint32_t property);
-
-XDP_EXPORT
+XDP_CORE_EXPORT
 uint64_t GetTS2MMBufSize(bool isAIETrace = false);
 
 
@@ -59,115 +60,153 @@ class DeviceIntf {
 
     DeviceIntf() {}
 
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     ~DeviceIntf();
 
   public:
     // Set device handle
     // NOTE: this is used by write, read, & traceRead
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     void setDevice(xdp::Device* );
 
     // Debug IP layout
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     void readDebugIPlayout();
 
-    XDP_EXPORT
-    uint32_t getNumMonitors(xclPerfMonType type);
-    XDP_EXPORT
-    uint32_t getMonitorProperties(xclPerfMonType type, uint32_t index);
-    XDP_EXPORT
-    void getMonitorName(xclPerfMonType type, uint32_t index, char* name, uint32_t length);
-    XDP_EXPORT
-    std::string getMonitorName(xclPerfMonType type, uint32_t index);
-    XDP_EXPORT
-    std::string getTraceMonName(xclPerfMonType type, uint32_t index);
-    XDP_EXPORT
-    uint32_t getTraceMonProperty(xclPerfMonType type, uint32_t index);
+    XDP_CORE_EXPORT
+    uint32_t getNumMonitors(xdp::MonitorType type);
+    XDP_CORE_EXPORT
+    std::string getMonitorName(xdp::MonitorType type, uint32_t index);
+    XDP_CORE_EXPORT
+    uint64_t getFifoSize();
 
+    // Axi Interface Monitor
     bool isHostAIM(uint32_t index) {
       return mAimList[index]->isHostMonitor();
     }
-    
+    // Turn off coarse mode if any of the kernel AIMs can't support it
+    bool supportsCoarseModeAIM() {
+      for (auto mon : mAimList) {
+        if (!mon->isHostMonitor() && !mon->hasCoarseMode()  )
+          return false;
+      }
+      return true;
+    }
+
     // Counters
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     size_t startCounters();
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     size_t stopCounters();
-    XDP_EXPORT
-    size_t readCounters(xclCounterResults& counterResults);
+    XDP_CORE_EXPORT
+    size_t readCounters(xdp::CounterResults& counterResults);
 
     // Accelerator Monitor
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     void configureDataflow(bool* ipConfig);
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     void configureFa(bool* ipConfig);
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     void configAmContext(const std::string& ctx_info);
 
     // Underlying Device APIs
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     size_t allocTraceBuf(uint64_t sz ,uint8_t memIdx);
-    XDP_EXPORT
-    void freeTraceBuf(size_t bufHandle);
-    XDP_EXPORT
-    void* syncTraceBuf(size_t bufHandle ,uint64_t offset, uint64_t bytes);
-    XDP_EXPORT
-    uint64_t getDeviceAddr(size_t bufHandle);
+    XDP_CORE_EXPORT
+    void freeTraceBuf(size_t id);
+    XDP_CORE_EXPORT
+    void* syncTraceBuf(size_t id ,uint64_t offset, uint64_t bytes);
+    XDP_CORE_EXPORT
+    xclBufferExportHandle exportTraceBuf(size_t id);
+    XDP_CORE_EXPORT
+    uint64_t getTraceBufDeviceAddr(size_t id);
+    XDP_CORE_EXPORT
+    uint64_t getAlignedTraceBufSize(uint64_t total_bytes, unsigned int num_chunks);
 
     // Trace FIFO Management
     bool hasFIFO() {return (mFifoCtrl != nullptr);};
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     uint32_t getTraceCount();
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     size_t startTrace(uint32_t startTrigger);
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     void clockTraining(bool force = true);
-    XDP_EXPORT
+    XDP_CORE_EXPORT
     size_t stopTrace();
-    XDP_EXPORT
-    size_t readTrace(std::vector<xclTraceResults>& traceVector);
+    XDP_CORE_EXPORT
+    size_t readTrace(uint32_t*& traceData) ;
 
     /** Trace S2MM Management
      */
     bool hasTs2mm() {
-      return (mPlTraceDma != nullptr);
+      return (!mPlTraceDmaList.empty());
     };
     size_t getNumberTS2MM() {
-      return (mPlTraceDma != nullptr) ? 1 : 0;
+      return mPlTraceDmaList.size();
     };
 
-    XDP_EXPORT
-    void resetTS2MM();
-    TraceS2MM* getTs2mm() {return mPlTraceDma;};
-    XDP_EXPORT
-    void initTS2MM(uint64_t bufferSz, uint64_t bufferAddr, bool circular); 
+    // All datamovers support circular buffer for PL Trace
+    bool supportsCircBufPL() {
+      if (mPlTraceDmaList.size() > 0)
+        return mPlTraceDmaList[0]->supportsCircBuf();
+      return false;
+    }
 
-    XDP_EXPORT
-    uint64_t getWordCountTs2mm();
-    XDP_EXPORT
-    uint8_t  getTS2MmMemIndex();
-    XDP_EXPORT
-    void parseTraceData(void* traceData, uint64_t bytes, std::vector<xclTraceResults>& traceVector);
+    // Only version 2 Datamover supports circular buffer/flush for AIE Trace
+    bool supportsCircBufAIE() {
+      if (mAieTraceDmaList.size() > 0)
+        return mAieTraceDmaList[0]->isVersion2();
+      return false;
+    }
+    bool supportsflushAIE() {
+      if (mAieTraceDmaList.size() > 0)
+        return mAieTraceDmaList[0]->isVersion2();
+      return false;
+    }
 
-    XDP_EXPORT
+    XDP_CORE_EXPORT
+    void resetTS2MM(uint64_t index);
+    XDP_CORE_EXPORT
+    void initTS2MM(uint64_t index, uint64_t bufferSz, uint64_t bufferAddr, bool circular); 
+
+    XDP_CORE_EXPORT
+    uint64_t getWordCountTs2mm(uint64_t index, bool final);
+    XDP_CORE_EXPORT
+    uint8_t  getTS2MmMemIndex(uint64_t index);
+    XDP_CORE_EXPORT
+      void parseTraceData(uint64_t index, void* traceData, uint64_t bytes, std::vector<xdp::TraceEvent>& traceVector);
+
+    XDP_CORE_EXPORT
     void resetAIETs2mm(uint64_t index);
-    XDP_EXPORT
-    void initAIETs2mm(uint64_t bufferSz, uint64_t bufferAddr, uint64_t index);
+    XDP_CORE_EXPORT
+    void initAIETs2mm(uint64_t bufferSz, uint64_t bufferAddr, uint64_t index, bool circular);
 
-    XDP_EXPORT
-    uint64_t getWordCountAIETs2mm(uint64_t index);
-    XDP_EXPORT
+    XDP_CORE_EXPORT
+    uint64_t getWordCountAIETs2mm(uint64_t index, bool final);
+    XDP_CORE_EXPORT
     uint8_t  getAIETs2mmMemIndex(uint64_t index);
     
-    double getMaxBwRead() const {return mMaxReadBW;}
-    double getMaxBwWrite() const {return mMaxWriteBW;}
-    XDP_EXPORT
-    void setMaxBwRead();
-    XDP_EXPORT
-    void setMaxBwWrite();
+    double getHostMaxBwRead() const {return mHostMaxReadBW;}
+    double getHostMaxBwWrite() const {return mHostMaxWriteBW;}
+    double getKernelMaxBwRead() const {return mKernelMaxReadBW;}
+    double getKernelMaxBwWrite() const {return mKernelMaxWriteBW;}
+    XDP_CORE_EXPORT
+    void setHostMaxBwRead();
+    XDP_CORE_EXPORT
+    void setHostMaxBwWrite();
+    XDP_CORE_EXPORT
+    void setKernelMaxBwRead();
+    XDP_CORE_EXPORT
+    void setKernelMaxBwWrite();
+
+    XDP_CORE_EXPORT
+    uint32_t getDeadlockStatus();
 
     inline xdp::Device* getAbstractDevice() {return mDevice;}
+
+    bool hasDeadlockDetector() {return mDeadlockDetector != nullptr;}
+
+    bool hasHSDPforPL() { return mHSDPforPL; }
 
   private:
     // Turn on/off debug messages to stdout
@@ -176,6 +215,9 @@ class DeviceIntf {
     bool mIsDeviceProfiling = true;
     // Debug IP Layout has been read or not
     bool mIsDebugIPlayoutRead = false;
+
+    // HSDP Trace IP is used for PL Trace offload
+    bool mHSDPforPL = false;
 
     std::mutex traceLock ;
 
@@ -189,22 +231,27 @@ class DeviceIntf {
 
     TraceFifoLite* mFifoCtrl    = nullptr;
     TraceFifoFull* mFifoRead    = nullptr;
-    TraceFunnel*   mTraceFunnel = nullptr;
 
-    TraceS2MM*     mPlTraceDma  = nullptr;
+    std::vector<TraceFunnel*> mTraceFunnelList;
+
+    std::vector<TraceS2MM*> mPlTraceDmaList;
     std::vector<TraceS2MM*> mAieTraceDmaList;
 
+    // Deadlock Detection and Diagnosis
+    DeadlockDetector*     mDeadlockDetector  = nullptr;
+
     /*
-     * Set bandwidth number to a reasonable default
+     * Set max bandwidths to reasonable defaults
      * For PCIE Device:
-     *   bw_per_lane = 985 MB/s (Wikipedia on PCIE 3.0)
-     *   num_lanes = 16/8/4 depending on host system
-     *   total bw = bw_per_lane * num_lanes
+     *   configuration: gen 3x16, gen 4x8 
+     *   encoding: 128b/130b
      * For Edge Device:
-     *  total bw = DDR4 memory bandwidth
+     *  total BW: DDR4 memory bandwidth
      */
-    double mMaxReadBW  = 9600.0;
-    double mMaxWriteBW = 9600.0;
+    double mHostMaxReadBW    = hw_constants::pcie_gen3x16_bandwidth;
+    double mHostMaxWriteBW   = hw_constants::pcie_gen3x16_bandwidth;
+    double mKernelMaxReadBW  = hw_constants::ddr4_2400_bandwidth;
+    double mKernelMaxWriteBW = hw_constants::ddr4_2400_bandwidth;
 
 }; /* DeviceIntf */
 

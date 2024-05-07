@@ -7,11 +7,8 @@
 if( NOT WIN32)
 
 if(${CMAKE_BUILD_TYPE} STREQUAL "Release" AND ${XRT_NATIVE_BUILD} STREQUAL "yes")
-  add_subdirectory(doc)
+  xrt_add_subdirectory(doc)
 endif()
-
-# Default include search path starts at runtime_src
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 option(XOCL_VERBOSE "Enable xocl verbosity" OFF)
 option(XRT_VERBOSE "Enable xrt verbosity" OFF)
@@ -26,32 +23,40 @@ endif()
 
 add_compile_options("-fPIC")
 
-# TODO CL_TARGET_OPENCL_VERSION is not defined..
-if (${XRT_NATIVE_BUILD} STREQUAL "yes")
-  add_compile_options("-Wall" "-Werror")
-endif()
-add_subdirectory(xdp)
+if (XRT_ENABLE_WERROR)
+  list(APPEND XRT_WARN_OPTS "-Werror")
+endif(XRT_ENABLE_WERROR)
 
-# TODO version.h was included.
-# Remove this limitation once we can generate version.h for mpsoc.
 if (${XRT_NATIVE_BUILD} STREQUAL "yes")
-  add_subdirectory(tools/xclbinutil)
+  add_compile_options( ${XRT_WARN_OPTS} )
 endif()
-add_subdirectory(xocl)
-add_subdirectory(xrt)
-add_subdirectory(ert)
+xrt_add_subdirectory(xdp)
+
+xrt_add_subdirectory(tools/xclbinutil)
+xrt_add_subdirectory(xocl)
+xrt_add_subdirectory(xrt)
+
+if (XRT_DKMS_ALVEO STREQUAL "ON")
+  xrt_add_subdirectory(ert)
+endif()
+
+# --- Optional HIP bindings ---
+if (XRT_ENABLE_HIP)
+  xrt_add_subdirectory(hip)
+endif(XRT_ENABLE_HIP)
+
 if (${XRT_NATIVE_BUILD} STREQUAL "yes")
   # Only for host native build.
   # For embedded, headers and libraries are installed in /usr
   # Not requeired setup.sh/.csh
-  add_subdirectory(tools/scripts)
+  xrt_add_subdirectory(tools/scripts)
 endif()
 
 # Attach to the user's linker flags
 set (CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-Bsymbolic")
 set (CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-z,defs")
 
-add_subdirectory(core)
+xrt_add_subdirectory(core)
 
 else()
 # = WINDOWS ===================================================================
@@ -67,15 +72,19 @@ else()
   else()
     # lots of warnings and all warnings as errors
     # add_compile_options(-Wall -Wextra -pedantic -Werror)
-    add_compile_options("-Wall" "-Werror")
+    add_compile_options( ${XRT_WARN_OPTS} )
   endif()
 
   # Build Subdirectories
-  add_subdirectory(xocl)
-  add_subdirectory(xrt)
-  add_subdirectory(tools/xclbinutil)
-  add_subdirectory(tools/scripts)
-  add_subdirectory(core)
-  add_subdirectory(xdp)
-endif()
+  xrt_add_subdirectory(xocl)
+  xrt_add_subdirectory(xrt)
+  xrt_add_subdirectory(tools/xclbinutil)
+  xrt_add_subdirectory(xdp)
+  xrt_add_subdirectory(tools/scripts)
+  xrt_add_subdirectory(core)
 
+  # --- Optional HIP bindings ---
+  if (XRT_ENABLE_HIP)
+    xrt_add_subdirectory(hip)
+  endif(XRT_ENABLE_HIP)
+endif()

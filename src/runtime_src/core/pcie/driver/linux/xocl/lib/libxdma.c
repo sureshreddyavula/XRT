@@ -197,30 +197,30 @@ static void check_nonzero_interrupt_status(struct xdma_dev *xdev)
 
 	w = read_register(&reg->user_int_enable);
 	if (w)
-		xocl_pr_info("%s xdma%d user_int_enable = 0x%08x\n",
+		pr_info("%s xdma%d user_int_enable = 0x%08x\n",
 			dev_name(&xdev->pdev->dev), xdev->idx, w);
 
 	w = read_register(&reg->channel_int_enable);
 	if (w)
-	xocl_pr_info("%s xdma%d channel_int_enable = 0x%08x\n",
+		pr_info("%s xdma%d channel_int_enable = 0x%08x\n",
 			dev_name(&xdev->pdev->dev), xdev->idx, w);
 
 	w = read_register(&reg->user_int_request);
 	if (w)
-		xocl_pr_info("%s xdma%d user_int_request = 0x%08x\n",
+		pr_info("%s xdma%d user_int_request = 0x%08x\n",
 			dev_name(&xdev->pdev->dev), xdev->idx, w);
 	w = read_register(&reg->channel_int_request);
 	if (w)
-		xocl_pr_info("%s xdma%d channel_int_request = 0x%08x\n",
+		pr_info("%s xdma%d channel_int_request = 0x%08x\n",
 			dev_name(&xdev->pdev->dev), xdev->idx, w);
 
 	w = read_register(&reg->user_int_pending);
 	if (w)
-		xocl_pr_info("%s xdma%d user_int_pending = 0x%08x\n",
+		pr_info("%s xdma%d user_int_pending = 0x%08x\n",
 			dev_name(&xdev->pdev->dev), xdev->idx, w);
 	w = read_register(&reg->channel_int_pending);
 	if (w)
-		xocl_pr_info("%s xdma%d channel_int_pending = 0x%08x\n",
+		pr_info("%s xdma%d channel_int_pending = 0x%08x\n",
 			dev_name(&xdev->pdev->dev), xdev->idx, w);
 }
 
@@ -332,35 +332,35 @@ static void engine_reg_dump(struct xdma_engine *engine)
 	BUG_ON(!engine);
 
 	w = read_register(&engine->regs->identifier);
-	xocl_pr_info("%s: ioread32(0x%p) = 0x%08x (id).\n",
+	pr_info("%s: ioread32(0x%p) = 0x%08x (id).\n",
 		engine->name, &engine->regs->identifier, w);
 	w &= BLOCK_ID_MASK;
 	if (w != BLOCK_ID_HEAD) {
-		xocl_pr_info("%s: engine id missing, 0x%08x exp. & 0x%x = 0x%x\n",
+		pr_info("%s: engine id missing, 0x%08x exp. & 0x%x = 0x%x\n",
 			 engine->name, w, BLOCK_ID_MASK, BLOCK_ID_HEAD);
 		return;
 	}
 	/* extra debugging; inspect complete engine set of registers */
 	w = read_register(&engine->regs->status);
-	xocl_pr_info("%s: ioread32(0x%p) = 0x%08x (status).\n",
+	pr_info("%s: ioread32(0x%p) = 0x%08x (status).\n",
 		engine->name, &engine->regs->status, w);
 	w = read_register(&engine->regs->control);
-	xocl_pr_info("%s: ioread32(0x%p) = 0x%08x (control)\n",
+	pr_info("%s: ioread32(0x%p) = 0x%08x (control)\n",
 		engine->name, &engine->regs->control, w);
 	w = read_register(&engine->sgdma_regs->first_desc_lo);
-	xocl_pr_info("%s: ioread32(0x%p) = 0x%08x (first_desc_lo)\n",
+	pr_info("%s: ioread32(0x%p) = 0x%08x (first_desc_lo)\n",
 		engine->name, &engine->sgdma_regs->first_desc_lo, w);
 	w = read_register(&engine->sgdma_regs->first_desc_hi);
-	xocl_pr_info("%s: ioread32(0x%p) = 0x%08x (first_desc_hi)\n",
+	pr_info("%s: ioread32(0x%p) = 0x%08x (first_desc_hi)\n",
 		engine->name, &engine->sgdma_regs->first_desc_hi, w);
 	w = read_register(&engine->sgdma_regs->first_desc_adjacent);
-	xocl_pr_info("%s: ioread32(0x%p) = 0x%08x (first_desc_adjacent).\n",
+	pr_info("%s: ioread32(0x%p) = 0x%08x (first_desc_adjacent).\n",
 		engine->name, &engine->sgdma_regs->first_desc_adjacent, w);
 	w = read_register(&engine->regs->completed_desc_count);
-	xocl_pr_info("%s: ioread32(0x%p) = 0x%08x (completed_desc_count).\n",
+	pr_info("%s: ioread32(0x%p) = 0x%08x (completed_desc_count).\n",
 		engine->name, &engine->regs->completed_desc_count, w);
 	w = read_register(&engine->regs->interrupt_enable_mask);
-	xocl_pr_info("%s: ioread32(0x%p) = 0x%08x (interrupt_enable_mask)\n",
+	pr_info("%s: ioread32(0x%p) = 0x%08x (interrupt_enable_mask)\n",
 		engine->name, &engine->regs->interrupt_enable_mask, w);
 }
 
@@ -455,7 +455,7 @@ static void engine_status_dump(struct xdma_engine *engine)
 	}
 
 	buf[len - 1] = '\0';
-	xocl_pr_info("%s\n", buffer);
+	pr_info("%s\n", buffer);
 }
 
 static u32 engine_status_read(struct xdma_engine *engine, bool clear, bool dump)
@@ -836,9 +836,8 @@ static void xdma_request_release(struct xdma_dev *xdev,
 {
 	struct sg_table *sgt = req->sgt;
 	if (!req->dma_mapped) {
-		pci_unmap_sg(xdev->pdev, sgt->sgl, sgt->orig_nents,
+		dma_unmap_sg(&xdev->pdev->dev, sgt->sgl, sgt->orig_nents,
 			     req->dir);
-		sgt->nents = 0;
 	}
 
 	xdma_request_free(req);
@@ -1374,8 +1373,7 @@ submit_req:
 		s = &engine->sets[cidx_submit];
 		desc_cnt_submit = s->desc_set_offset;
 		engine->sets_ready--;
-		engine->sw_cidx = incr_ptr_idx(cidx_submit, 1,
-						       XDMA_DESC_SETS_MAX);
+		engine->sw_cidx = incr_ptr_idx(cidx_submit, 1, XDMA_DESC_SETS_MAX);
 		cidx_link = cidx_submit;
 		submit_cnt = desc_cnt_submit;
 
@@ -1409,9 +1407,8 @@ submit_req:
 		spin_unlock(&engine->desc_lock);
 
 		rv = queue_request(engine, engine->desc_bus +
-				   (cidx_submit * desc_set_depth *
-						   sizeof(struct xdma_desc)),
-						   desc_cnt_submit);
+				   ((u64)cidx_submit * desc_set_depth * sizeof(struct xdma_desc)),
+				   desc_cnt_submit);
 		desc_cnt_submit = 0;
 		spin_unlock(&engine->lock);
 		if (rv < 0) {
@@ -1429,6 +1426,7 @@ submit_req:
 
 	return 0;
 }
+
 static int xdma_process_requests(struct xdma_engine *engine,
 		struct xdma_request_cb *req)
 {
@@ -1459,6 +1457,7 @@ static int xdma_process_requests(struct xdma_engine *engine,
 		if (timeout == 0) {
 			pr_err("Request completion timeout\n");
 			engine_reg_dump(engine);
+			check_nonzero_interrupt_status(engine->xdev);
 			rv = -EIO;
 		}
 
@@ -1703,7 +1702,6 @@ static void engine_process_requests(struct work_struct *work)
 	rv = xdma_request_desc_init(engine, 0);
 	if (rv < 0)
 		pr_err("Failed to perform descriptor init\n");
-		return;
 }
 
 
@@ -2001,6 +1999,12 @@ static irqreturn_t xdma_channel_irq(int irq, void *dev_id)
 		WARN_ON(!xdev);
 		dbg_irq("%s(irq=%d) xdev=%p ??\n", __func__, irq, xdev);
 		return IRQ_NONE;
+	}
+
+	if (engine->f_fastpath) {
+		engine->f_fastpath = false;
+		complete(&engine->f_req_compl);
+		return IRQ_HANDLED;
 	}
 
 	irq_regs = (struct interrupt_regs *)(xdev->bar[xdev->config_bar_idx] +
@@ -2545,11 +2549,14 @@ static int irq_msix_user_setup(struct xdma_dev *xdev)
 	int i;
 	int j = xdev->h2c_channel_max + xdev->c2h_channel_max;
 	int rv = 0;
-	struct interrupt_regs *reg = (struct interrupt_regs *)
-		(xdev->bar[xdev->config_bar_idx] + XDMA_OFS_INT_CTRL);
 
-	if (xdev->no_dma)
-		j = read_register(&reg->user_msi_vector) & 0xf;
+	/*
+	 * hard-code the number of dma channels to 2 for no dma mode.
+	 * should not rely on the register to get the number of dma channels
+	 *
+	 * if (xdev->no_dma)
+	 *	j = read_register(&reg->user_msi_vector) & 0xf;
+	 */	
 
 	/* vectors set in probe_scan_for_msi() */
 	for (i = 0; i < xdev->user_max; i++, j++) {
@@ -2724,6 +2731,17 @@ static void engine_alignments(struct xdma_engine *engine)
 	}
 }
 
+static void engine_fastpath_cleanup(struct xdma_engine *engine)
+{
+	struct xdma_dev *xdev = engine->xdev;
+
+	if (!engine->f_descs || !engine->f_desc_dma_addr)
+		return;
+
+	dma_free_coherent(&xdev->pdev->dev, F_DESC_NUM * sizeof(struct xdma_desc),
+			  engine->f_descs, engine->f_desc_dma_addr);
+}
+
 static void engine_free_resource(struct xdma_engine *engine)
 {
 	struct xdma_dev *xdev = engine->xdev;
@@ -2808,6 +2826,9 @@ static int engine_destroy(struct xdma_dev *xdev, struct xdma_engine *engine)
 
 	/* Release memory use for descriptor writebacks */
 	engine_free_resource(engine);
+
+	/* release fast path resources */
+	engine_fastpath_cleanup(engine);
 
 	memset(engine, 0, sizeof(struct xdma_engine));
 	/* Decrement the number of engines available */
@@ -2951,6 +2972,37 @@ fail_wb:
 	return rv;
 }
 
+static int engine_fastpath_init(struct xdma_engine *engine)
+{
+	struct xdma_dev *xdev = engine->xdev;
+	struct xdma_desc *desc;
+	dma_addr_t dma_addr;
+	int i, j;
+
+	engine->f_descs = dma_alloc_coherent(&xdev->pdev->dev, F_DESC_NUM * sizeof(*desc),
+					     &engine->f_desc_dma_addr, GFP_KERNEL);
+	if (!engine->f_descs)
+		return -ENOMEM;
+
+	desc = engine->f_descs;
+	dma_addr = engine->f_desc_dma_addr;
+	for (i = 0; i < F_DESC_BLOCK_NUM; i++) {
+		for (j = 0; j < F_DESC_ADJACENT - 1; j++) {
+			desc->control = cpu_to_le32(F_DESC_CONTROL(1, 0));
+			desc++;
+		}
+		dma_addr += sizeof(*desc) * F_DESC_ADJACENT;
+		desc->control = cpu_to_le32(F_DESC_CONTROL(F_DESC_ADJACENT, 0));
+		desc->next_lo = cpu_to_le32(PCI_DMA_L(dma_addr));
+		desc->next_hi = cpu_to_le32(PCI_DMA_H(dma_addr));
+		desc++;
+	}
+
+	init_completion(&engine->f_req_compl);
+
+	return 0;
+}
+
 static int engine_alloc_resource(struct xdma_engine *engine)
 {
 	struct xdma_dev *xdev = engine->xdev;
@@ -3078,11 +3130,22 @@ static int engine_init(struct xdma_engine *engine, struct xdma_dev *xdev,
 	if (rv)
 		return rv;
 
+	rv = engine_fastpath_init(engine);
+	if (rv)
+		goto fastpath_init_fail;
+
 	rv = engine_init_regs(engine);
 	if (rv)
-		return rv;
+		goto init_regs_failed;
 
 	return 0;
+
+init_regs_failed:
+	engine_fastpath_cleanup(engine);
+fastpath_init_fail:
+	engine_free_resource(engine);
+
+	return rv;
 }
 
 
@@ -3116,6 +3179,191 @@ static void xdma_request_cb_dump(struct xdma_request_cb *req)
 }
 #endif
 
+static inline void fastpath_desc_set(struct xdma_engine *engine, struct xdma_desc *desc,
+				     dma_addr_t addr, u64 endpoint_addr, u32 len)
+{
+	desc->bytes = cpu_to_le32(len);
+	if (engine->dir == DMA_TO_DEVICE) {
+		desc->src_addr_lo = cpu_to_le32(PCI_DMA_L(addr));
+		desc->src_addr_hi = cpu_to_le32(PCI_DMA_H(addr));
+		desc->dst_addr_lo = cpu_to_le32(PCI_DMA_L(endpoint_addr));
+		desc->dst_addr_hi = cpu_to_le32(PCI_DMA_H(endpoint_addr));
+	} else {
+		desc->src_addr_lo = cpu_to_le32(PCI_DMA_L(endpoint_addr));
+		desc->src_addr_hi = cpu_to_le32(PCI_DMA_H(endpoint_addr));
+		desc->dst_addr_lo = cpu_to_le32(PCI_DMA_L(addr));
+		desc->dst_addr_hi = cpu_to_le32(PCI_DMA_H(addr));
+	}
+}
+
+static inline void fastpath_desc_set_last(struct xdma_engine *engine, u32 desc_num)
+{
+	struct xdma_desc *block_desc = NULL, *last_desc;
+	u32 adjacent;
+
+	adjacent = desc_num & (F_DESC_ADJACENT - 1);
+	if (desc_num > F_DESC_ADJACENT && adjacent > 0)
+		block_desc = engine->f_descs + (desc_num & (~(F_DESC_ADJACENT - 1))) - 1;
+
+	last_desc = engine->f_descs + desc_num - 1;
+	if (block_desc)
+		block_desc->control = cpu_to_le32(F_DESC_CONTROL(adjacent, 0));
+	last_desc->control |= cpu_to_le32(F_DESC_STOPPED | F_DESC_COMPLETED);
+}
+
+static inline void fastpath_desc_clear_last(struct xdma_engine *engine, u32 desc_num)
+{
+	struct xdma_desc *block_desc = NULL, *last_desc;
+	u32 adjacent;
+
+	adjacent = desc_num & (F_DESC_ADJACENT - 1);
+	if (desc_num > F_DESC_ADJACENT && adjacent > 0)
+		block_desc = engine->f_descs + (desc_num & (~(F_DESC_ADJACENT - 1))) - 1;
+
+	last_desc = engine->f_descs + desc_num - 1;
+	if (block_desc)
+		block_desc->control = cpu_to_le32(F_DESC_CONTROL(F_DESC_ADJACENT, 0));
+	last_desc->control &= cpu_to_le32(~(F_DESC_STOPPED | F_DESC_COMPLETED));
+}
+
+static ssize_t fastpath_start(struct xdma_engine *engine, u64 endpoint_addr,
+			      struct scatterlist **sg, u32 *sg_off, u32 *last_adj)
+{
+	dma_addr_t addr;
+	int i;
+	u32 len, rest, adj, desc_num = 0;
+	ssize_t total = 0;
+
+	for (i = 0; i < F_DESC_NUM && *sg; i++) {
+		addr = sg_dma_address(*sg) + *sg_off;
+		rest = sg_dma_len(*sg) - *sg_off;
+		if (XDMA_DESC_BLEN_MAX < rest) {
+			len = XDMA_DESC_BLEN_MAX;
+			*sg_off += XDMA_DESC_BLEN_MAX;
+		} else {
+			len = rest;
+			*sg_off = 0;
+			*sg = sg_next(*sg);
+		}
+
+		if (len) {
+			fastpath_desc_set(engine, engine->f_descs + desc_num, addr, endpoint_addr, len);
+			endpoint_addr += len;
+			total += len;
+			desc_num++;
+		}
+	}
+	if (!total)
+		return 0;
+	fastpath_desc_set_last(engine, desc_num);
+	engine->f_submitted_desc_cnt = desc_num;
+
+	enable_interrupts(engine);
+	if (desc_num >= F_DESC_ADJACENT)
+		adj = F_DESC_ADJACENT;
+	else
+		adj = desc_num;
+	if (adj != *last_adj) {
+		write_register(adj - 1, &engine->sgdma_regs->first_desc_adjacent,
+			       (unsigned long)(&engine->sgdma_regs->first_desc_adjacent) -
+			       (unsigned long)(&engine->sgdma_regs));
+		mmiowb();
+		*last_adj = adj;
+	}
+	engine_start_mode_config(engine);
+
+	return total;
+}
+
+ssize_t xdma_xfer_fastpath(void *dev_hndl, int channel, bool write, u64 ep_addr,
+			   struct sg_table *sgt, bool dma_mapped, int timeout_ms)
+{
+	struct xdma_dev *xdev = (struct xdma_dev *)dev_hndl;
+	struct scatterlist *sg = sgt->sgl;
+	struct xdma_engine *engine;
+	u32 val, sg_off = 0, last_adj = ~0;
+	u64 done_bytes = 0;
+	ssize_t ret = 0;
+	int nents;
+
+	if (poll_mode) {
+		return xdma_xfer_submit(dev_hndl, channel, write, ep_addr, sgt, dma_mapped,
+					timeout_ms, NULL);
+	}
+
+	if (write == 1)
+		engine = &xdev->engine_h2c[channel];
+	else
+		engine = &xdev->engine_c2h[channel];
+
+	if (!dma_mapped) {
+		nents = dma_map_sg(&xdev->pdev->dev, sg, sgt->orig_nents,
+				   engine->dir);
+		if (!nents) {
+			xocl_pr_info("map sgl failed, sgt 0x%p.\n", sgt);
+			return -EIO;
+		}
+		sgt->nents = nents;
+	}
+
+	if (!sgt->nents) {
+		pr_err("empty sg table");
+		return -EINVAL;
+	}
+
+	write_register(PCI_DMA_H(engine->f_desc_dma_addr), &engine->sgdma_regs->first_desc_hi,
+		       (unsigned long)(&engine->sgdma_regs->first_desc_hi) -
+		       (unsigned long)(&engine->sgdma_regs));
+	write_register(PCI_DMA_L(engine->f_desc_dma_addr), &engine->sgdma_regs->first_desc_lo,
+		       (unsigned long)(&engine->sgdma_regs->first_desc_lo) -
+		       (unsigned long)(&engine->sgdma_regs));
+	sg = sgt->sgl;
+	while (sg && ret >= 0) {
+		engine->f_fastpath = true;
+		ret = fastpath_start(engine, ep_addr + done_bytes,&sg, &sg_off, &last_adj);
+		if (!ret)
+			continue;
+
+		done_bytes += ret;
+		if (!wait_for_completion_timeout(&engine->f_req_compl,
+						 msecs_to_jiffies(10000))) {
+			pr_err("Wait for request timed out");
+			engine_reg_dump(engine);
+			check_nonzero_interrupt_status(engine->xdev);
+			ret = -EIO;
+		} else {
+			val = read_register(&engine->regs->completed_desc_count);
+			if (val != engine->f_submitted_desc_cnt) {
+				pr_err("Invalid completed count %d, expected %d",
+					    val, engine->f_submitted_desc_cnt);
+				ret = -EINVAL;
+			}
+		}
+		fastpath_desc_clear_last(engine, engine->f_submitted_desc_cnt);
+		val = read_register(&engine->regs->status_rc);
+		if (((engine->dir == DMA_FROM_DEVICE) &&
+		    (val & XDMA_STAT_C2H_ERR_MASK)) ||
+		    ((engine->dir == DMA_TO_DEVICE) &&
+		    (val & XDMA_STAT_H2C_ERR_MASK))) {
+			pr_err("engine %s, status error 0x%x.\n", engine->name,
+			        val);
+			engine_status_dump(engine);
+			engine_reg_dump(engine);
+		}
+		write_register(XDMA_CTRL_RUN_STOP, &engine->regs->control_w1c,
+			       (unsigned long)(&engine->regs->control_w1c) -
+			       (unsigned long)(&engine->regs));
+	}
+	if (!dma_mapped) {
+                dma_unmap_sg(&xdev->pdev->dev, sgt->sgl, sgt->orig_nents,
+			     engine->dir);
+        }
+
+	if (ret < 0)
+		return ret;
+
+	return (ssize_t)done_bytes;
+}
 
 ssize_t xdma_xfer_submit(void *dev_hndl, int channel, bool write, u64 ep_addr,
 			 struct sg_table *sgt, bool dma_mapped, int timeout_ms,
@@ -3135,7 +3383,6 @@ ssize_t xdma_xfer_submit(void *dev_hndl, int channel, bool write, u64 ep_addr,
 
 	if (debug_check_dev_hndl(__func__, xdev->pdev, dev_hndl) < 0)
 		return -EINVAL;
-
 
 	if (write == 1) {
 		if (channel >= xdev->h2c_channel_max) {
@@ -3178,7 +3425,7 @@ ssize_t xdma_xfer_submit(void *dev_hndl, int channel, bool write, u64 ep_addr,
 	}
 
 	if (!dma_mapped) {
-		nents = pci_map_sg(xdev->pdev, sg, sgt->orig_nents, dir);
+		nents = dma_map_sg(&xdev->pdev->dev, sg, sgt->orig_nents, dir);
 		if (!nents) {
 			xocl_pr_info("map sgl failed, sgt 0x%p.\n", sgt);
 			return -EIO;
@@ -3347,7 +3594,7 @@ int xdma_performance_submit(struct xdma_dev *xdev, struct xdma_engine *engine)
 		desc_virt = req->desc_virt + i;
 		desc_bus += sizeof(struct xdma_desc);
 		/* Actual Data to perform DMA */
-		rc_bus_addr = buffer_bus + size_in_desc * i;
+		rc_bus_addr = buffer_bus + (u64)size_in_desc * i;
 
 		/* fill in descriptor entry with transfer details */
 		xdma_desc_set(desc_virt, rc_bus_addr, ep_addr, size_in_desc,
@@ -3463,18 +3710,18 @@ static int set_dma_mask(struct pci_dev *pdev)
 
 	dbg_init("sizeof(dma_addr_t) == %ld\n", sizeof(dma_addr_t));
 	/* 64-bit addressing capability for XDMA? */
-	if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(64))) {
+	if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(64))) {
 		/* query for DMA transfer */
 		/* @see Documentation/DMA-mapping.txt */
 		dbg_init("pci_set_dma_mask()\n");
 		/* use 64-bit DMA */
 		dbg_init("Using a 64-bit DMA mask.\n");
 		/* use 32-bit DMA for descriptors */
-		pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
+		dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
 		/* use 64-bit DMA, 32-bit for consistent */
-	} else if (!pci_set_dma_mask(pdev, DMA_BIT_MASK(32))) {
+	} else if (!dma_set_mask(&pdev->dev, DMA_BIT_MASK(32))) {
 		dbg_init("Could not set 64-bit DMA mask.\n");
-		pci_set_consistent_dma_mask(pdev, DMA_BIT_MASK(32));
+		dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(32));
 		/* use 32-bit DMA */
 		dbg_init("Using a 32-bit DMA mask.\n");
 	} else {
@@ -4097,6 +4344,9 @@ MODULE_AUTHOR("Xilinx, Inc.");
 MODULE_DESCRIPTION(DRV_MODULE_DESC);
 MODULE_VERSION(DRV_MODULE_VERSION);
 MODULE_LICENSE("GPL v2");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0) || defined(RHEL_9_0_GE)
+MODULE_IMPORT_NS(DMA_BUF);
+#endif
 
 static int __init xdma_base_init(void)
 {

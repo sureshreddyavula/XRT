@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2020 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -22,7 +23,6 @@
 #include <thread>
 
 #include "xdp/profile/plugin/vp_base/vp_base_plugin.h"
-#include "xdp/config.h"
 
 namespace xdp {
 
@@ -33,7 +33,7 @@ namespace xdp {
     static const char* powerFiles[] ;
 
   private:
-    std::vector<std::vector<std::string>> filePaths ;
+    std::vector<std::unique_ptr<xrt::device>> xrtDevices;
 
     // Power profiling requires its own thread
     bool keepPolling ;
@@ -44,7 +44,7 @@ namespace xdp {
     PowerProfilingPlugin() ;
     ~PowerProfilingPlugin() ;
 
-    XDP_EXPORT void addDevice(void* handle) ;
+    void addDevice(void* handle) ;
   } ;
 
 } // end namespace xdp

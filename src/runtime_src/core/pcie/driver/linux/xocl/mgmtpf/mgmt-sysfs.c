@@ -86,8 +86,15 @@ static ssize_t mfg_ver_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
 	struct xclmgmt_dev *lro = dev_get_drvdata(dev);
+	struct VmrStatus vmr_header = {};
 
-	return sprintf(buf, "%d\n", MGMT_READ_REG32(lro, _GOLDEN_VER));
+	/*
+	 * Non-Versal Platform:	ret is ENODEV and continue Reg read from PCIE Bar
+	 * Versal Platform:	ret is 0 or any other and return EINVAL.
+	 */
+	if(xocl_vmr_status(lro, &vmr_header) == -ENODEV)
+		return sprintf(buf, "%d\n", MGMT_READ_REG32(lro, _GOLDEN_VER));
+	return -EINVAL;
 }
 static DEVICE_ATTR_RO(mfg_ver);
 
@@ -347,6 +354,9 @@ static ssize_t interface_uuids_show(struct device *dev,
 	const void *uuid;
 	int node = -1, off = 0;
 
+	if (!lro->ready)
+		return -EINVAL;
+
 	if (!lro->core.fdt_blob && xocl_get_timestamp(lro) == 0)
 		xclmgmt_load_fdt(lro);
 
@@ -378,6 +388,9 @@ static ssize_t logic_uuids_show(struct device *dev,
         struct xclmgmt_dev *lro = dev_get_drvdata(dev);
 	const void *uuid = NULL, *blp_uuid = NULL;
 	int node = -1, off = 0;
+
+	if (!lro->ready)
+		return -EINVAL;
 
 	if (!lro->core.fdt_blob && xocl_get_timestamp(lro) == 0)
 		xclmgmt_load_fdt(lro);
@@ -493,6 +506,48 @@ static DEVICE_ATTR(cache_xclbin, 0644,
 	cache_xclbin_show,
 	cache_xclbin_store);
 
+static ssize_t config_xclbin_change_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct xclmgmt_dev *lro = dev_get_drvdata(dev);
+
+	return sprintf(buf, "%d\n", atomic_read(&lro->config_xclbin_change));
+}
+
+static ssize_t config_xclbin_change_store(struct device *dev,
+	struct device_attribute *da, const char *buf, size_t count)
+{
+	struct xclmgmt_dev *lro = dev_get_drvdata(dev);
+	u32 val;
+
+	if (kstrtou32(buf, 10, &val) == -EINVAL)
+		return -EINVAL;
+
+	if (val)
+		atomic_set(&lro->config_xclbin_change, 1);
+	else
+		atomic_set(&lro->config_xclbin_change, 0);
+
+	return count;
+}
+static DEVICE_ATTR(config_xclbin_change, 0644,
+	config_xclbin_change_show,
+	config_xclbin_change_store);
+
+static ssize_t versal_show(struct device *dev,
+	struct device_attribute *attr, char *buf)
+{
+	struct xclmgmt_dev *lro = dev_get_drvdata(dev);
+	int val = 0;
+
+	if ((lro->core.priv.flags & XOCL_DSAFLAG_VERSAL) ||
+	        (lro->core.priv.flags & XOCL_DSAFLAG_VERSAL_ES3))
+		val = 1;
+
+	return sprintf(buf, "%d\n", val);
+}
+static DEVICE_ATTR_RO(versal);
+
 static struct attribute *mgmt_attrs[] = {
 	&dev_attr_instance.attr,
 	&dev_attr_error.attr,
@@ -522,6 +577,8 @@ static struct attribute *mgmt_attrs[] = {
 	&dev_attr_mgmt_reset.attr,
 	&dev_attr_sbr_toggle.attr,
 	&dev_attr_cache_xclbin.attr,
+	&dev_attr_config_xclbin_change.attr,
+	&dev_attr_versal.attr,
 	NULL,
 };
 

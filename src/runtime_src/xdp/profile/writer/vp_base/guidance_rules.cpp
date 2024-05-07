@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2016-2021 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
+ * Copyright (C) 2022-2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -14,11 +15,14 @@
  * under the License.
  */
 
-#define XDP_SOURCE
+#define XDP_CORE_SOURCE
 
 #include <memory>
 #include <map>
 
+#include "xdp/profile/database/static_info/device_info.h"
+#include "xdp/profile/database/static_info/pl_constructs.h"
+#include "xdp/profile/database/static_info/xclbin_info.h"
 #include "xdp/profile/writer/vp_base/guidance_rules.h"
 #include "xdp/profile/plugin/vp_base/utility.h"
 #include "xdp/profile/plugin/vp_base/info.h"
@@ -31,6 +35,8 @@ namespace {
 
   static void deviceExecTime(xdp::VPDatabase* db, std::ofstream& fout)
   {
+    if (!db->infoAvailable(xdp::info::opencl_counters)) return ;
+
     if (xdp::getFlowMode() == xdp::SW_EMU) {
       std::string deviceName =
         db->getStaticInfo().getSoftwareEmulationDeviceName();
@@ -59,7 +65,7 @@ namespace {
                xdp::TimeStatistics> cuStats =
         db->getStats().getComputeUnitExecutionStats();
 
-      for (auto iter : cuStats) {
+      for (const auto& iter : cuStats) {
         fout << "CU_CALLS,"
              << db->getStaticInfo().getSoftwareEmulationDeviceName()
              << "|" << std::get<0>(iter.first) << ","
@@ -70,21 +76,21 @@ namespace {
       auto deviceInfos = db->getStaticInfo().getDeviceInfos();
       for (auto device : deviceInfos) {
         for (auto xclbin : device->loadedXclbins) {
-          for (auto cu : xclbin->cus) {
-	    std::string cuName = cu.second->getName();
-	    std::vector<std::pair<std::string, xdp::TimeStatistics>> cuCalls =
+          for (const auto& cu : xclbin->pl.cus) {
+            std::string cuName = cu.second->getName();
+            std::vector<std::pair<std::string, xdp::TimeStatistics>> cuCalls =
               db->getStats().getComputeUnitExecutionStats(cuName);
             uint64_t execCount = 0;
-            for (auto cuCall : cuCalls) {
+            for (const auto& cuCall : cuCalls) {
               execCount += cuCall.second.numExecutions;
-	    }
+            }
             if (execCount != 0) {
               fout << "CU_CALLS," << device->getUniqueDeviceName() << "|"
                    << cu.second->getName() << ","
                    << execCount << ",\n";
-	    }
-	  }
-	}
+            }
+          }
+        }
       }
     }
   }
@@ -114,14 +120,23 @@ namespace {
     auto deviceInfos = db->getStaticInfo().getDeviceInfos();
     for (auto device : deviceInfos) {
       for (auto xclbin : device->loadedXclbins) {
-        monitors[ACCEL_MONITOR]->numTotal += xclbin->amList.size();
-        monitors[ACCEL_MONITOR]->numTraceEnabled += xclbin->amMap.size();
+        monitors[ACCEL_MONITOR]->numTotal += xclbin->pl.ams.size();
+        for (auto am : xclbin->pl.ams) {
+          if (am->traceEnabled)
+            monitors[ACCEL_MONITOR]->numTraceEnabled++ ;
+        }
 
-        monitors[AXI_MM_MONITOR]->numTotal += xclbin->aimList.size();
-        monitors[AXI_MM_MONITOR]->numTraceEnabled += xclbin->aimMap.size();
+        monitors[AXI_MM_MONITOR]->numTotal += xclbin->pl.aims.size();
+        for (auto aim : xclbin->pl.aims) {
+          if (aim->traceEnabled)
+            monitors[AXI_MM_MONITOR]->numTraceEnabled++ ;
+        }
 
-        monitors[AXI_STREAM_MONITOR]->numTotal += xclbin->asmList.size();
-        monitors[AXI_STREAM_MONITOR]->numTraceEnabled += xclbin->asmMap.size();
+        monitors[AXI_STREAM_MONITOR]->numTotal += xclbin->pl.asms.size();
+        for (auto mon : xclbin->pl.asms) {
+          if (mon->traceEnabled)
+            monitors[AXI_STREAM_MONITOR]->numTraceEnabled++ ;
+        }
       }
       for (auto& mon : monitors) {
         fout << "NUM_MONITORS,"
@@ -151,7 +166,7 @@ namespace {
     if (xdp::getFlowMode() == xdp::SW_EMU) {
       std::map<std::string, bool> memUsage =
         db->getStaticInfo().getSoftwareEmulationMemUsage();
-      for (auto iter : memUsage) {
+      for (const auto& iter : memUsage) {
         fout << "MEMORY_USAGE," << iter.first << "," << iter.second << ",\n";
       }
     }
@@ -160,14 +175,12 @@ namespace {
 
       for (auto device : deviceInfos) {
         for (auto xclbin : device->loadedXclbins) {
-          for (auto memory : xclbin->memoryInfo) {
-	    std::string memName = memory.second->name ;
-            if (memName.rfind("bank", 0) == 0)
-              memName = "DDR[" + memName.substr(4,4) + "]" ;
+          for (const auto& memory : xclbin->pl.memoryInfo) {
+            std::string memName = memory.second->spTag ;
 
             fout << "MEMORY_USAGE," << device->getUniqueDeviceName() << "|"
                  << memName << "," << memory.second->used << ",\n" ;
-	  }
+          }
         }
       }
     }
@@ -184,14 +197,14 @@ namespace {
       auto deviceInfos = db->getStaticInfo().getDeviceInfos();
       for (auto device : deviceInfos) {
         for (auto xclbin : device->loadedXclbins) {
-          for (auto memory : xclbin->memoryInfo) {
-            if (memory.second->name.find("PLRAM") != std::string::npos) {
+          for (const auto& memory : xclbin->pl.memoryInfo) {
+            if (memory.second->spTag.find("PLRAM") != std::string::npos) {
               hasPLRAM = true ;
               break ;
-	    }
-	  }
+            }
+          }
           if (hasPLRAM) break ;
-	}
+        }
         if (hasPLRAM) break ;
       }
     }
@@ -217,14 +230,14 @@ namespace {
       auto deviceInfos = db->getStaticInfo().getDeviceInfos() ;
       for (auto device : deviceInfos) {
         for (auto xclbin : device->loadedXclbins) {
-          for (auto memory : xclbin->memoryInfo) {
-            if (memory.second->name.find("HBM") != std::string::npos) {
+          for (const auto& memory : xclbin->pl.memoryInfo) {
+            if (memory.second->spTag.find("HBM") != std::string::npos) {
               hasHBM = true ;
               break ;
-	    }
-	  }
+            }
+          }
           if (hasHBM) break ;
-	}
+        }
         if (hasHBM) break ;
       }
     }
@@ -250,7 +263,7 @@ namespace {
     else {
       auto deviceInfos = db->getStaticInfo().getDeviceInfos() ;
       for (auto device : deviceInfos) {
-	std::string deviceName = device->deviceName ;
+        std::string deviceName = device->deviceName ;
         if (deviceName.find("xilinx_u200_xdma") != std::string::npos ||
             deviceName.find("xilinx_vcu1525_xdma") != std::string::npos) {
           hasKDMA = true ;
@@ -279,7 +292,7 @@ namespace {
     else {
       auto deviceInfos = db->getStaticInfo().getDeviceInfos() ;
       for (auto device : deviceInfos) {
-	std::string deviceName = device->deviceName ;
+        std::string deviceName = device->deviceName ;
         if (deviceName.find("xilinx_u200_xdma")    != std::string::npos ||
             deviceName.find("xilinx_u250_xdma")    != std::string::npos ||
             deviceName.find("samsung")             != std::string::npos ||
@@ -305,34 +318,41 @@ namespace {
   {
     if (xdp::getFlowMode() == xdp::SW_EMU) {
       std::vector<std::string> portBitWidths =
-        db->getStaticInfo().getSoftwareEmulationPortBitWidths() ;
-      for (auto width : portBitWidths) {
-        fout << "PORT_BIT_WIDTH," << width << ",\n" ;
-      }
+        db->getStaticInfo().getSoftwareEmulationPortBitWidths();
+      for (const auto& width : portBitWidths)
+        fout << "PORT_BIT_WIDTH," << width << ",\n";
+      return;
     }
-    else {
-      auto deviceInfos = db->getStaticInfo().getDeviceInfos() ;
-      for (auto device : deviceInfos) {
-        for (auto xclbin : device->loadedXclbins) {
-          for (auto cu : xclbin->cus) {
-	    std::vector<uint32_t>* aimIds = cu.second->getAIMs() ;
-	    std::vector<uint32_t>* asmIds = cu.second->getASMs() ;
 
-            for (auto aim : (*aimIds)) {
-	      xdp::Monitor* monitor =
-                db->getStaticInfo().getAIMonitor(device->deviceId, xclbin, aim);
-              fout << "PORT_BIT_WIDTH," << cu.second->getName() << "/"
-                   << monitor->port << "," << monitor->portWidth << ",\n" ;
-            }
+    // Hardware and HW-EMU
 
-            for (auto asmId : (*asmIds)) {
-	      xdp::Monitor* monitor =
-                db->getStaticInfo().getASMonitor(device->deviceId,xclbin,asmId);
+    auto deviceInfos = db->getStaticInfo().getDeviceInfos() ;
+    for (auto device : deviceInfos) {
+      for (auto xclbin : device->loadedXclbins) {
+        for (const auto& cu : xclbin->pl.cus) {
+          std::vector<uint32_t>* aimIds = cu.second->getAIMs() ;
+          std::vector<uint32_t>* asmIds = cu.second->getASMs() ;
+
+          for (auto aim : (*aimIds)) {
+            xdp::Monitor* monitor =
+              db->getStaticInfo().getAIMonitor(device->deviceId, xclbin, aim);
+            if (monitor->cuPort) {
               fout << "PORT_BIT_WIDTH," << cu.second->getName() << "/"
-                   << monitor->port << "," << monitor->portWidth << ",\n" ;
+                   << monitor->cuPort->name << ","
+                   << monitor->cuPort->bitWidth << ",\n";
             }
-	  }
-	}
+          }
+
+          for (auto asmId : (*asmIds)) {
+            xdp::Monitor* monitor =
+              db->getStaticInfo().getASMonitor(device->deviceId,xclbin,asmId);
+            if (monitor->cuPort) {
+              fout << "PORT_BIT_WIDTH," << cu.second->getName() << "/"
+                   << monitor->cuPort->name << ","
+                   << monitor->cuPort->bitWidth << ",\n" ;
+            }
+          }
+        }
       }
     }
   }
@@ -348,20 +368,20 @@ namespace {
       auto deviceInfos = db->getStaticInfo().getDeviceInfos() ;
       for (auto device : deviceInfos) {
         for (auto xclbin : device->loadedXclbins) {
-          for (auto cu : xclbin->cus) {
-	    std::string kernelName = cu.second->getKernelName() ;
+          for (const auto& cu : xclbin->pl.cus) {
+            std::string kernelName = cu.second->getKernelName() ;
             if (kernelCounts.find(kernelName) == kernelCounts.end()) {
               kernelCounts[kernelName] = 1 ;
-	    }
+            }
             else {
               kernelCounts[kernelName] += 1 ;
-	    }
-	  }
-	}
+            }
+          }
+        }
       }
     }
 
-    for (auto kernel : kernelCounts) {
+    for (const auto& kernel : kernelCounts) {
       fout << "KERNEL_COUNT," << kernel.first << "," << kernel.second << ",\n" ;
     }
   }
@@ -386,22 +406,22 @@ namespace {
 
   static void traceMemory(xdp::VPDatabase* db, std::ofstream& fout)
   {
-    std::string memType = "FIFO" ;
+    std::string memType = "N/A" ;
 
-    if (xdp::getFlowMode() == xdp::SW_EMU ||
-        xdp::getFlowMode() == xdp::HW_EMU) {
-      memType = "NA" ;
-    }
-    else {
+    if ((xdp::getFlowMode() != xdp::SW_EMU) &&
+        (xdp::getFlowMode() != xdp::HW_EMU)) {
       auto deviceInfos = db->getStaticInfo().getDeviceInfos() ;
 
       for (auto device : deviceInfos) {
         for (auto xclbin : device->loadedXclbins) {
-          if (xclbin->usesTs2mm) {
+          if (xclbin->pl.usesTs2mm) {
             memType = "TS2MM" ;
             break ;
-	  }
-	}
+          } else if (xclbin->pl.usesFifo) {
+            memType = "FIFO" ;
+            break ;
+          }
+        }
       }
     }
     fout << "TRACE_MEMORY,all," << memType << ",\n" ;
@@ -414,7 +434,7 @@ namespace {
 
     auto maxExecs = db->getStats().getAllMaxExecutions();
 
-    for (auto mExec : maxExecs) {
+    for (const auto& mExec : maxExecs) {
       fout << "MAX_PARALLEL_KERNEL_ENQUEUES," << mExec.first << ","
            << mExec.second << ",\n" ;
     }
@@ -426,7 +446,7 @@ namespace {
 
     auto commandQueueInfo = db->getStats().getCommandQueuesAreOOO() ;
 
-    for (auto cq : commandQueueInfo) {
+    for (const auto& cq : commandQueueInfo) {
       fout << "COMMAND_QUEUE_OOO," << cq.first << "," << cq.second << ",\n" ;
     }
   }
@@ -438,8 +458,8 @@ namespace {
 
     for (auto device : deviceInfos) {
       for (auto xclbin : device->loadedXclbins) {
-        for (auto memory : xclbin->memoryInfo) {
-          if (memory.second->name.find("PLRAM") != std::string::npos) {
+        for (const auto& memory : xclbin->pl.memoryInfo) {
+          if (memory.second->spTag.find("PLRAM") != std::string::npos) {
             fout << "PLRAM_SIZE_BYTES,"
                  << device->getUniqueDeviceName()
                  << "," << memory.second->size*1024 << ",\n" ;
@@ -447,8 +467,8 @@ namespace {
             // To match old flow and tools, print PLRAM_SIZE_BYTES for
             //  first match only.
             break ;
-	  }
-	}
+          }
+        }
         if (done) break ;
       }
       if (done) break ;
@@ -473,7 +493,7 @@ namespace {
   {
     auto deviceInfos = db->getStaticInfo().getDeviceInfos() ;
     for (auto device : deviceInfos) {
-      bool full = db->getDynamicInfo().isTraceBufferFull(device->deviceId);
+      bool full = db->getDynamicInfo().isPLTraceBufferFull(device->deviceId);
       fout << "TRACE_BUFFER_FULL,"
            << device->getUniqueDeviceName() << ","
            << (full ? "true" : "false")
@@ -547,14 +567,14 @@ namespace {
     uint64_t startTime = db->getStaticInfo().getApplicationStartTime() ;
     uint64_t endTime = xrt_core::time_ns() ; 
 
-    fout << "APPLICATON_RUN_TIME_MS,all," 
+    fout << "APPLICATION_RUN_TIME_MS,all," 
          << (double)(endTime - startTime) / 1e06
          << ",\n" ;
   }
 
   static void totalKernelRunTimeMs(xdp::VPDatabase* db, std::ofstream& fout)
   {
-    if (!db->infoAvailable(xdp::info::opencl_trace)) return ;
+    if (!db->infoAvailable(xdp::info::device_offload)) return ;
 
     double firstKernelStartTime = db->getStats().getFirstKernelStartTime() ;
     double lastKernelEndTime = db->getStats().getLastKernelEndTime() ;
@@ -565,21 +585,44 @@ namespace {
 
   static void aieCounterResources(xdp::VPDatabase* db, std::ofstream& fout)
   {
-    if (!db->infoAvailable(xdp::info::aie_profile)) return ;
+    if (!db->infoAvailable(xdp::info::aie_profile)) return;
 
-    auto deviceInfos = db->getStaticInfo().getDeviceInfos() ;
+    auto deviceInfos = db->getStaticInfo().getDeviceInfos();
     for (auto device : deviceInfos) {
-      auto& coreCounters =
-        db->getStaticInfo().getAIECoreCounterResources(device->deviceId) ;
-      for (auto const& counter : coreCounters) {
-        fout << "AIE_CORE_COUNTER_RESOURCES," << counter.first << ","
-             << counter.second << ",\n" ;
+      auto coreCounters =
+        db->getStaticInfo().getAIECoreCounterResources(device->deviceId);
+      if (coreCounters != nullptr) {
+        for (auto const& counter : *coreCounters) {
+          fout << "AIE_CORE_COUNTER_RESOURCES," << counter.first << ","
+               << counter.second << ",\n";
+        }
       }
-      auto& memoryCounters =
-        db->getStaticInfo().getAIEMemoryCounterResources(device->deviceId) ;
-      for (auto const& counter : memoryCounters) {
-        fout << "AIE_MEMORY_COUNTER_RESOURCES," << counter.first << ","
-             << counter.second << ",\n" ;
+
+      auto memoryCounters =
+        db->getStaticInfo().getAIEMemoryCounterResources(device->deviceId);
+      if (memoryCounters != nullptr) {
+        for (auto const& counter : *memoryCounters) {
+          fout << "AIE_MEMORY_COUNTER_RESOURCES," << counter.first << ","
+               << counter.second << ",\n";
+        }
+      }
+
+      auto interfaceCounters =
+        db->getStaticInfo().getAIEShimCounterResources(device->deviceId);
+      if (interfaceCounters != nullptr) {
+        for (auto const& counter : *interfaceCounters) {
+          fout << "AIE_INTERFACE_COUNTER_RESOURCES," << counter.first << ","
+               << counter.second << ",\n";
+        }
+      }
+      
+      auto memTileCounters =
+        db->getStaticInfo().getAIEMemTileCounterResources(device->deviceId);
+      if (memTileCounters != nullptr) {
+        for (auto const& counter : *memTileCounters) {
+          fout << "AIE_MEM_TILE_COUNTER_RESOURCES," << counter.first << ","
+               << counter.second << ",\n";
+        }
       }
     }
   }
@@ -590,17 +633,40 @@ namespace {
 
     auto deviceInfos = db->getStaticInfo().getDeviceInfos() ;
     for (auto device : deviceInfos) {
-      auto& coreEvents =
+      auto coreEvents =
         db->getStaticInfo().getAIECoreEventResources(device->deviceId) ;
-      for (auto const& coreEvent : coreEvents) {
-        fout << "AIE_CORE_EVENT_RESOURCES," << coreEvent.first << ","
-             << coreEvent.second << ",\n" ;
+      if (coreEvents != nullptr) {
+        for (auto const& coreEvent : *coreEvents) {
+          fout << "AIE_CORE_EVENT_RESOURCES," << coreEvent.first << ","
+               << coreEvent.second << ",\n" ;
+        }
       }
-      auto& memoryEvents =
+
+      auto memoryEvents =
         db->getStaticInfo().getAIEMemoryEventResources(device->deviceId) ;
-      for (auto const& memoryEvent : memoryEvents) {
-        fout << "AIE_MEMORY_EVENT_RESOURCES," << memoryEvent.first << ","
-             << memoryEvent.second << ",\n" ;
+      if (memoryEvents != nullptr) {
+        for (auto const& memoryEvent : *memoryEvents) {
+          fout << "AIE_MEMORY_EVENT_RESOURCES," << memoryEvent.first << ","
+               << memoryEvent.second << ",\n" ;
+        }
+      }
+
+      auto interfaceEvents =
+        db->getStaticInfo().getAIEShimEventResources(device->deviceId) ;
+      if (interfaceEvents != nullptr) {
+        for (auto const& interfaceEvent : *interfaceEvents) {
+          fout << "AIE_INTERFACE_EVENT_RESOURCES," << interfaceEvent.first << ","
+               << interfaceEvent.second << ",\n" ;
+        }
+      }
+
+      auto memTileEvents =
+        db->getStaticInfo().getAIEMemTileEventResources(device->deviceId) ;
+      if (memTileEvents != nullptr) {
+        for (auto const& memTileEvent : *memTileEvents) {
+          fout << "AIE_MEM_TILE_EVENT_RESOURCES," << memTileEvent.first << ","
+               << memTileEvent.second << ",\n" ;
+        }
       }
     }
   }

@@ -1,7 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (C) 2019-2021 Xilinx, Inc. All rights reserved.
+# Copyright (C) 2019-2024, Advanced Micro Devices, Inc. All rights Reserved.
 #
 # Signing xclbin images are currently only support on Linux
+
+# cmake 3.19 and after emits warning about this policy not being set
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.19)
+  cmake_policy(SET CMP0110 NEW)
+endif(CMAKE_VERSION VERSION_GREATER_EQUAL 3.19)
 
 if(NOT WIN32)
   find_package(OpenSSL REQUIRED)
@@ -16,18 +21,27 @@ endif()
 # Windows support coming soon
 if(NOT WIN32)
   # On Ubuntu 16.04 CMake support is limited
-  if ((${LINUX_FLAVOR} STREQUAL "Ubuntu") AND (${LINUX_VERSION} STREQUAL "16.04"))
+  if ((${LINUX_FLAVOR} STREQUAL "ubuntu") AND ("x${LINUX_VERSION}x" STREQUAL "x16.04x"))
     set(RapidJSON_VERSION_MAJOR 0)
   else()
     find_package(RapidJSON REQUIRED)
   endif()
 endif()
 
+# Need pthreads for the boost processes
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+
 # -----------------------------------------------------------------------------
 # Include the generated header files (e.g., version.h)
-include_directories(${CMAKE_BINARY_DIR}/gen)
+include_directories(${XRT_BINARY_DIR}/gen)
 
 # ==-- x c l b i n u t i l --==================================================
+
+# aie-pdi-transform only supports linux build currently
+if(NOT WIN32)
+  add_subdirectory(aie-pdi-transform)
+endif()
 
 set(XCLBINUTIL_NAME "xclbinutil")
 
@@ -44,6 +58,8 @@ file(GLOB XCLBINUTIL_FILES
   "FDT*.cxx"
   "CBOR.cxx"
   "RapidJsonUtilities.cxx"
+  "KernelUtilities.cxx"
+  "ElfUtilities.cxx"
   "FormattedOutput.cxx"
   "ParameterSectionData.cxx"
   "Section.cxx"     # Note: Due to linking dependency issue, this entry needs to be before the other sections
@@ -75,8 +91,12 @@ if(NOT WIN32)
    endif()
 endif()
 
+target_link_libraries(${XCLBINUTIL_NAME} PRIVATE ${Boost_LIBRARIES} Threads::Threads)
 
-target_link_libraries(${XCLBINUTIL_NAME} PRIVATE ${Boost_LIBRARIES})
+# link the aie-pdi-transform static library
+if(NOT WIN32)
+   target_link_libraries(${XCLBINUTIL_NAME} PRIVATE transformcdo)
+endif()
 
 install (TARGETS ${XCLBINUTIL_NAME} RUNTIME DESTINATION ${XRT_INSTALL_UNWRAPPED_DIR})
 install (PROGRAMS ${XRT_LOADER_SCRIPTS} DESTINATION ${XRT_INSTALL_BIN_DIR})
@@ -86,32 +106,65 @@ SET(TEST_SUITE_NAME "xclbinutil")
 
 # OpenSSL encryption is only supported on linux
 if(NOT WIN32)
-  # Python is currently not installed on Edge builds
-  if (${XRT_NATIVE_BUILD} STREQUAL "yes")
-    # -- Test Signing of the xclbin image using a CER formatted certificate
-    xrt_add_test("signing-xclbin_CER" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/signXclbinCER.py")
+  # -- Test Signing of the xclbin image using a CER formatted certificate
+  xrt_add_test("signing-xclbin_CER" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/signXclbinCER.py")
 
-    # -- Test Signing of the xclbin image using a DER formatted certificate
-    xrt_add_test("signing-xclbin_DER" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/signXclbinDER.py")
+  # -- Test Signing of the xclbin image using a DER formatted certificate
+  xrt_add_test("signing-xclbin_DER" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/signXclbinDER.py")
 
-    # -- Test SmartNic
-    # Test: SmartNic Syntax
-    set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/SmartNic")
-    xrt_add_test("smartnic-syntax" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/SmartNic/SectionSmartNicSyntax.py ${TEST_OPTIONS}")
+  # -- Test SmartNic
+  # Test: SmartNic Syntax
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/SmartNic")
+  xrt_add_test("smartnic-syntax" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/SmartNic/SectionSmartNicSyntax.py ${TEST_OPTIONS}")
 
-    # Test: SmartNic Schema
-    set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/SmartNic")
-    xrt_add_test("smartnic-format" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/SmartNic/SectionSmartNicFormat.py ${TEST_OPTIONS}")
+  # Test: SmartNic Schema
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/SmartNic")
+  xrt_add_test("smartnic-format" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/SmartNic/SectionSmartNicFormat.py ${TEST_OPTIONS}")
 
-    # -- SoftKernel
-    set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/SoftKernel")
-    xrt_add_test("softkernel" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/SoftKernel/SectionSoftKernel.py ${TEST_OPTIONS}")
+  # -- SoftKernel
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/SoftKernel")
+  xrt_add_test("soft-kernel" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/SoftKernel/SectionSoftKernel.py ${TEST_OPTIONS}")
 
-    # -- Partion Metadata
-    set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/PartitionMetadata")
-    xrt_add_test("partition_metadata" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/PartitionMetadata/SectionPartitionMetadata.py ${TEST_OPTIONS}")
+  # -- Partion Metadata
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/PartitionMetadata")
+  xrt_add_test("partition_metadata" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/PartitionMetadata/SectionPartitionMetadata.py ${TEST_OPTIONS}")
 
-    endif()
+  # -- Fixed Kernels
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/FixedKernel")
+  xrt_add_test("fixed-kernel" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/FixedKernel/FixedKernel.py ${TEST_OPTIONS}")
+
+  # -- PS Kernels
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/PSKernel")
+  xrt_add_test("ps-kernel" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/PSKernel/PSKernel.py ${TEST_OPTIONS}")
+
+  # -- Binary Images
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/BinaryImages")
+  xrt_add_test("binary-images" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/BinaryImages/BinaryImages.py ${TEST_OPTIONS}")
+
+  # -- Single Subsection
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/SingleSubsection")
+  xrt_add_test("single-subsection" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/SingleSubsection/SingleSubsection.py ${TEST_OPTIONS}")
+
+  # -- AIE Partition
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/AIEPartition")
+  xrt_add_test("aie-partition" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/AIEPartition/AIEPartition.py ${TEST_OPTIONS}")
+
+  # -- BMC Section
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/BMC")
+  xrt_add_test("bmc" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/BMC/BMCSection.py ${TEST_OPTIONS}")
+
+  # -- MCS Section
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/MCS")
+  xrt_add_test("mcs" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/MCS/MCSSection.py ${TEST_OPTIONS}")
+
+  # -- IP_MEDATADA Section
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/IPMetadata")
+  xrt_add_test("ip-metadata" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/IPMetadata/IPMetadata.py ${TEST_OPTIONS}")
+
+  # -- AIE RESOURCES BIN Section
+  set(TEST_OPTIONS " --resource-dir ${CMAKE_CURRENT_SOURCE_DIR}/unittests/AieResourcesBin")
+  xrt_add_test("AieResourcesBin" "${PYTHON_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/unittests/AieResourcesBin/SectionAieResourcesBin.py ${TEST_OPTIONS}")
+
 endif()
 
 
@@ -135,7 +188,7 @@ if (GTEST_FOUND)
   add_executable(${UNIT_TEST_NAME} ${XCLBINTEST_SRCS})
 
   if(WIN32)
-    target_link_libraries(${UNIT_TEST_NAME} PRIVATE Boost::filesystem Boost::program_options Boost::system )
+    target_link_libraries(${UNIT_TEST_NAME} PRIVATE Boost::program_options Boost::system )
     target_link_libraries(${UNIT_TEST_NAME} PRIVATE ${GTEST_BOTH_LIBRARIES})
   else()
     target_link_libraries(${UNIT_TEST_NAME} PRIVATE ${Boost_LIBRARIES} ${GTEST_BOTH_LIBRARIES} pthread crypto)
@@ -143,6 +196,11 @@ if (GTEST_FOUND)
     if(NOT (${RapidJSON_VERSION_MAJOR} EQUAL 0))
       target_compile_definitions(${UNIT_TEST_NAME} PRIVATE ENABLE_JSON_SCHEMA_VALIDATION)
     endif()
+  endif()
+
+  # link the aie-pdi-transform static library
+  if(NOT WIN32)
+     target_link_libraries(${UNIT_TEST_NAME} PRIVATE transformcdo)
   endif()
 
   # Add the test

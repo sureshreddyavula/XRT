@@ -1,43 +1,40 @@
-/**
- * Copyright (C) 2016-2021 Xilinx, Inc
- * Author(s): Hem C. Neema
- *          : Min Ma
- * ZNYQ XRT Library layered on top of ZYNQ zocl kernel driver
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2016-2022 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2022-2024 Advanced Micro Devices, Inc. All rights reserved.
 #include "shim.h"
 #include "system_linux.h"
-#include "core/common/message.h"
-#include "core/common/scheduler.h"
-#include "core/common/xclbin_parser.h"
-#include "core/common/config_reader.h"
-#include "core/include/xcl_perfmon_parameters.h"
+
+#include "core/include/shim_int.h"
+#include "core/include/xdp/aim.h"
+#include "core/include/xdp/am.h"
+#include "core/include/xdp/asm.h"
+#include "core/include/xdp/lapc.h"
+#include "core/include/xdp/spc.h"
+#include "core/include/xrt/xrt_uuid.h"
+
+#include "core/edge/common/aie_parser.h"
+
 #include "core/common/bo_cache.h"
 #include "core/common/config_reader.h"
-#include "core/common/query_requests.h"
+#include "core/common/config_reader.h"
 #include "core/common/error.h"
+#include "core/common/message.h"
+#include "core/common/query_requests.h"
+#include "core/common/scheduler.h"
+#include "core/common/xclbin_parser.h"
 
+#include <cassert>
 #include <cerrno>
+#include <chrono>
+#include <cstdarg>
+#include <cstring>
+#include <filesystem>
 #include <iostream>
 #include <iomanip>
-#include <cstring>
 #include <thread>
-#include <chrono>
 #include <vector>
-#include <cassert>
-#include <cstdarg>
+
+#include <regex>
 
 #include <fcntl.h>
 #include <poll.h>
@@ -45,13 +42,23 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
-#ifndef __HWEM__
 #include "plugin/xdp/hal_profile.h"
+#include "plugin/xdp/aie_profile.h"
+#include "plugin/xdp/aie_status.h"
+
+#ifndef __HWEM__
 #include "plugin/xdp/hal_api_interface.h"
 #include "plugin/xdp/hal_device_offload.h"
 
 #include "plugin/xdp/aie_trace.h"
-#include "plugin/xdp/aie_profile.h"
+#else
+#include "plugin/xdp/hw_emu_device_offload.h"
+#endif
+
+#if defined(XRT_ENABLE_LIBDFX)
+extern "C" {
+#include <libdfx.h>
+}
 #endif
 
 namespace {
@@ -68,6 +75,15 @@ constexpr size_t
 operator"" _gb(unsigned long long value)
 {
   return value << 30;
+}
+
+static ZYNQ::shim*
+get_shim_object(xclDeviceHandle handle)
+{
+  if (auto shim = ZYNQ::shim::handleCheck(handle))
+    return shim;
+
+  throw xrt_core::error("Invalid shim handle");
 }
 
 }
@@ -108,10 +124,10 @@ shim(unsigned index)
 {
   xclLog(XRT_INFO, "%s", __func__);
 
-  mKernelFD = open("/dev/dri/renderD128", O_RDWR);
-  if (mKernelFD < 0) {
-    xclLog(XRT_ERROR, "%s: Cannot open /dev/dri/renderD128", __func__);
-  }
+  const std::string zocl_drm_device = "/dev/dri/" + get_render_devname();
+  mKernelFD = open(zocl_drm_device.c_str(), O_RDWR);
+  // Validity of mKernelFD is checked using handleCheck in every shim function
+
   mCmdBOCache = std::make_unique<xrt_core::bo_cache>(this, xrt_core::config::get_cmdbo_cache());
   mDev = zynq_device::get_dev();
 }
@@ -122,10 +138,10 @@ shim::
   xclLog(XRT_INFO, "%s", __func__);
 
 #ifndef __HWEM__
-//  xdphal::finish_flush_device(handle) ;
-  xdp::aie::finish_flush_device(this) ;
-  xdp::aie::ctr::end_poll(this);
+  xdp::aie::finish_flush_device(this);
 #endif
+  xdp::aie::ctr::end_poll(this);
+  xdp::aie::sts::end_poll(this);
 
   // The BO cache unmaps and releases all execbo, but this must
   // be done before the device (mKernelFD) is closed.
@@ -272,20 +288,23 @@ xclRead(xclAddressSpace space, uint64_t offset, void *hostBuf, size_t size)
   return size;
 }
 
-unsigned int
+std::unique_ptr<xrt_core::buffer_handle>
 shim::
-xclAllocBO(size_t size, int unused, unsigned flags)
+xclAllocBO(size_t size, unsigned flags)
 {
   drm_zocl_create_bo info = { size, 0xffffffff, flags};
   int result = ioctl(mKernelFD, DRM_IOCTL_ZOCL_CREATE_BO, &info);
+ 
+  if (result)
+    throw std::bad_alloc();
 
   xclLog(XRT_DEBUG, "%s: size %ld, flags 0x%x", __func__, size, flags);
   xclLog(XRT_INFO, "%s: ioctl return %d, bo handle %d", __func__, result, info.handle);
 
-  return info.handle;
+  return std::make_unique<buffer_object>(this, info.handle);
 }
 
-unsigned int
+std::unique_ptr<xrt_core::buffer_handle>
 shim::
 xclAllocUserPtrBO(void *userptr, size_t size, unsigned flags)
 {
@@ -293,10 +312,13 @@ xclAllocUserPtrBO(void *userptr, size_t size, unsigned flags)
   drm_zocl_userptr_bo info = {reinterpret_cast<uint64_t>(userptr), size, 0xffffffff, flags};
   int result = ioctl(mKernelFD, DRM_IOCTL_ZOCL_USERPTR_BO, &info);
 
+  if (result)
+    throw std::bad_alloc();
+
   xclLog(XRT_DEBUG, "%s: userptr %p size %ld, flags 0x%x", __func__, userptr, size, flags);
   xclLog(XRT_INFO, "%s: ioctl return %d, bo handle %d", __func__, result, info.handle);
 
-  return info.handle;
+  return std::make_unique<buffer_object>(this, info.handle);
 }
 
 unsigned int
@@ -453,9 +475,10 @@ xclCopyBO(unsigned int dst_boHandle, unsigned int src_boHandle, size_t size,
   ert_fill_copybo_cmd(bo.second, src_boHandle, dst_boHandle,
                       src_offset, dst_offset, size);
 
-  ret = xclExecBuf(bo.first);
+  auto boh = static_cast<buffer_object*>(bo.first.get());
+  ret = xclExecBuf(boh->get_handle());
   if (ret) {
-    mCmdBOCache->release(bo);
+    mCmdBOCache->release(std::move(bo));
     return ret;
   }
 
@@ -469,7 +492,8 @@ xclCopyBO(unsigned int dst_boHandle, unsigned int src_boHandle, size_t size,
   ret = (ret == -1) ? -errno : 0;
   if (!ret && (bo.second->state != ERT_CMD_STATE_COMPLETED))
     ret = -EINVAL;
-  mCmdBOCache->release<ert_start_copybo_cmd>(bo);
+
+  mCmdBOCache->release(std::move(bo));
 #endif
   xclLog(XRT_INFO, "%s: return %d", __func__, ret);
   return ret;
@@ -490,6 +514,172 @@ xclLoadXclBin(const xclBin *buffer)
   return ret;
 }
 
+#if defined(XRT_ENABLE_LIBDFX)
+namespace libdfx {
+
+static void
+libdfxHelper(std::shared_ptr<xrt_core::device> core_dev, std::string& dtbo_path, int& fd)
+{
+  uint32_t slot_id = 0;
+  static const std::string dtbo_dir_path = "/configfs/device-tree/overlays/";
+
+  // root privileges are needed for loading and unloading dtbo and bitstream
+  if (getuid() && geteuid())
+    throw std::runtime_error("Root privileges required");
+
+  /*
+   * get dtbo_path of slot '0' for now, in future when we support multi slot we need
+   * info about which slot this xclbin needs to be loaded
+   * TODO: read slot id from xclbin or get it as an arg to this function
+   */
+  try {
+    dtbo_path = xrt_core::device_query<xrt_core::query::dtbo_path>(core_dev, slot_id);
+  }
+  catch(const std::exception &e) {
+    const std::string errmsg{"Query for dtbo path failed: "};
+    throw std::runtime_error(errmsg + e.what());
+  }
+  if (!dtbo_path.empty()) {
+    // remove existing libdfx node
+    rmdir((dtbo_dir_path + dtbo_path).c_str());
+    dtbo_path.clear();
+    // close drm fd as zocl driver will be reloaded
+    close(fd);
+  }
+  else {
+    // bitstream is loaded for first time
+    std::filesystem::directory_iterator end_itr;
+    static const std::regex filter{".*_image_[0-9]+"};
+    for (std::filesystem::directory_iterator itr( dtbo_dir_path ); itr != end_itr; ++itr) {
+      if (!std::regex_match(itr->path().filename().string(), filter))
+        continue;
+
+      // remove existing libdfx node loaded by libdfx daemon
+      rmdir((dtbo_dir_path + itr->path().filename().string()).c_str());
+    }
+  }
+}
+
+static void
+copyBufferToFile(const std::string& file_path, const char* buf, uint64_t size)
+{
+  std::ofstream file(file_path, std::ios::out | std::ios::binary);
+
+  if (!file)
+    throw std::runtime_error("Failed to open " + file_path + " for writing xclbin section");
+
+  file.write(buf, size);
+  file.close();
+}
+
+static void
+libdfxConfig(std::string& xclbin_dir_path, const axlf *top,
+	     const axlf_section_header *bit_header, const axlf_section_header *overlay_header)
+{
+  // create a temp directory to extract bitstream and dtbo
+  char dir[] = "/tmp/xclbin.XXXXXX";
+  char *tmpdir = mkdtemp(dir);
+  if (tmpdir == nullptr)
+    throw std::runtime_error("Failed to create tmp directory for xclbin files extraction");
+
+  xclbin_dir_path = tmpdir;
+  // create a file with BITSTREAM section
+  const std::string bit_file_path = xclbin_dir_path + "/xclbin.bit";
+  auto bit_buffer = reinterpret_cast<const char *>(top) + bit_header->m_sectionOffset;
+  copyBufferToFile(bit_file_path, bit_buffer, bit_header->m_sectionSize);
+
+  // create a file with OVERLAY(dtbo) section
+  const std::string overlay_file_path = xclbin_dir_path + "/xclbin.dtbo";
+  auto overlay_buffer = reinterpret_cast<const char *>(top) + overlay_header->m_sectionOffset;
+  copyBufferToFile(overlay_file_path, overlay_buffer, overlay_header->m_sectionSize);
+}
+
+// function for cleaning temp files
+static void
+libdfxClean(const std::string& file_path)
+{
+  try {
+    if (std::filesystem::exists(std::filesystem::path(file_path)))
+      std::filesystem::remove_all(std::filesystem::path(file_path));
+  }
+  catch(std::exception& ex) {
+    xclLog(XRT_WARNING, "%s: unable to remove '%s' folder",__func__,file_path);
+  }
+}
+
+static int
+libdfxLoadAxlf(std::shared_ptr<xrt_core::device> core_dev, const axlf *top,
+	       const axlf_section_header *overlay_header, int& fd, int flags, std::string& dtbo_path)
+{
+  static const std::string fpga_device = "/dev/fpga0";
+
+  // check BITSTREAM section
+  const axlf_section_header *bit_header = xclbin::get_axlf_section(top, axlf_section_kind::BITSTREAM);
+  if (!bit_header)
+    throw std::runtime_error("No BITSTREAM section in xclbin");
+
+  //check if xclbin is already loaded
+  try {
+    if (core_dev->get_xclbin_uuid() == xrt::uuid(top->m_header.uuid) && !(flags & DRM_ZOCL_FORCE_PROGRAM)) {
+      xclLog(XRT_WARNING, "%s: skipping as xclbin is already loaded", __func__);
+      return 1;
+    }
+  }
+  catch(const std::exception &e) {
+    // can happen when no bitstream is loaded and xclbinid sysfs is not created
+    // do nothing
+  }
+
+  libdfxHelper(core_dev, dtbo_path, fd);
+
+  std::string xclbin_dir_path;
+  libdfxConfig(xclbin_dir_path, top, bit_header, overlay_header);
+
+  // call libdfx api to load bitstream and dtbo
+  int dtbo_id = dfx_cfg_init(xclbin_dir_path.c_str(), fpga_device.c_str(), 0);
+  if (dtbo_id <= 0) {
+    libdfxClean(xclbin_dir_path);
+    throw std::runtime_error("Failed to initialize config with libdfx api");
+  }
+  if (dfx_cfg_load(dtbo_id)){
+    dfx_cfg_destroy(dtbo_id);
+    libdfxClean(xclbin_dir_path);
+    throw std::runtime_error("Failed to load bitstream, dtbo with libdfx api");
+  }
+
+  // save dtbo_path as load is successful
+  dtbo_path = std::filesystem::path(xclbin_dir_path).filename().string()
+			+ "_image_" + std::to_string(dtbo_id);
+
+  // clean tmp files of libdfx
+  dfx_cfg_destroy(dtbo_id);
+  libdfxClean(xclbin_dir_path);
+
+  // asynchronously check for drm device node
+  const static int timeout_sec = 10;
+  int count = 0;
+  const std::string render_dev_dir{"/dev/dri/"};
+  std::string zocl_drm_device;
+  while (count++ < timeout_sec) {
+    zocl_drm_device = render_dev_dir + get_render_devname();
+    if (std::filesystem::exists(std::filesystem::path(zocl_drm_device)))
+      break;
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+
+  // create drm fd
+  fd = open(zocl_drm_device.c_str(), O_RDWR);
+  if (fd < 0) {
+    dtbo_path.clear();
+    throw std::runtime_error("Cannot create file descriptor with device " + zocl_drm_device);
+  }
+
+  return 0;
+}
+
+}
+#endif
+
 int
 shim::
 xclLoadAxlf(const axlf *buffer)
@@ -497,41 +687,64 @@ xclLoadAxlf(const axlf *buffer)
   int ret = 0;
   unsigned int flags = DRM_ZOCL_PLATFORM_BASE;
   int off = 0;
+  std::string dtbo_path("");
 
-  /*
-   * If platform is a non-PR-platform, Following check will fail. Dont download
-   * the partial bitstream
-   *
-   * If Platform is a PR-platform, Following check passes as enable_pr value is
-   * true by default. Download the partial bitstream.
-   *
-   * If platform is a PR-platform, but v++ generated a full bitstream (using
-   * some v++ param).  User need to add enable_pr=false in xrt.ini.
-   */
 #ifndef __HWEM__
   auto is_pr_platform = (buffer->m_header.m_mode == XCLBIN_PR ) ? true : false;
-  auto is_flat_platform = (buffer->m_header.m_mode == XCLBIN_FLAT ) ? true : false;
-  auto is_pr_enabled = xrt_core::config::get_enable_pr(); //default value is true
   auto is_flat_enabled = xrt_core::config::get_enable_flat(); //default value is false
+  auto force_program = xrt_core::config::get_force_program_xclbin(); //default value is false
+  auto overlay_header = xclbin::get_axlf_section(buffer, axlf_section_kind::OVERLAY);
 
-  if (is_pr_platform && is_pr_enabled)
+  if (is_pr_platform)
     flags = DRM_ZOCL_PLATFORM_PR;
   /*
-   * If platform is a PR-platform, Following check will fail. Dont download the
-   * full bitstream
-   *
-   * If its non-PR-platform and enable_flat=true in xrt.ini. Download the full
-   * bitstream.
+   * If its non-PR-platform and enable_flat=true in xrt.ini, download the full
+   * bitstream. But if OVERLAY section is present in xclbin, userspace apis are
+   * used to download full bitstream
    */
-  else if (is_flat_platform && is_flat_enabled)
+  else if (is_flat_enabled && !overlay_header) {
+    if (!ZYNQ::shim::handleCheck(this)) {
+      xclLog(XRT_ERROR, "%s: No DRM render device found", __func__);
+      return -ENODEV;
+    }
     flags = DRM_ZOCL_PLATFORM_FLAT;
+  }
+
+  if (force_program) {
+    flags = flags | DRM_ZOCL_FORCE_PROGRAM;
+  }
+
+#if defined(XRT_ENABLE_LIBDFX)
+  // if OVERLAY section is present use libdfx apis to load bitstream and dtbo(overlay)
+  if(overlay_header) {
+    try {
+      // if xclbin is already loaded ret val is '1', dont call ioctl in this case
+      if (libdfx::libdfxLoadAxlf(this->mCoreDevice, buffer, overlay_header, mKernelFD, flags, dtbo_path))
+        return 0;
+    }
+    catch(const std::exception& e){
+      xclLog(XRT_ERROR, "%s: loading xclbin with OVERLAY section failed: %s", __func__,e.what());
+      return -EPERM;
+    }
+  }
 #endif
+
+#endif
+
+    /* Get the AIE_METADATA and get the hw_gen information */
+    uint8_t hw_gen = xrt_core::edge::aie::get_hw_gen(mCoreDevice.get());
+    uint32_t partition_id = xrt_core::edge::aie::get_partition_id(mCoreDevice.get());
 
     drm_zocl_axlf axlf_obj = {
       .za_xclbin_ptr = const_cast<axlf *>(buffer),
       .za_flags = flags,
       .za_ksize = 0,
       .za_kernels = NULL,
+      .za_slot_id = 0, // TODO Cleanup: Once uuid interface id available we need to remove this
+      .za_dtbo_path = const_cast<char *>(dtbo_path.c_str()),
+      .za_dtbo_path_len = static_cast<unsigned int>(dtbo_path.length()),
+      .hw_gen = hw_gen,
+      .partition_id = partition_id,
     };
 
   axlf_obj.kds_cfg.polling = xrt_core::config::get_ert_polling();
@@ -552,7 +765,12 @@ xclLoadAxlf(const axlf *buffer)
           return -EINVAL;
       std::strncpy(krnl->name, kernel.name.c_str(), sizeof(krnl->name)-1);
       krnl->name[sizeof(krnl->name)-1] = '\0';
+      krnl->range = kernel.range;
       krnl->anums = kernel.args.size();
+
+      krnl->features = 0;
+      if (kernel.sw_reset)
+        krnl->features |= KRNL_SW_RESET;
 
       int ai = 0;
       for (auto& arg : kernel.args) {
@@ -575,6 +793,12 @@ xclLoadAxlf(const axlf *buffer)
     }
   }
 
+  #ifdef __HWEM__
+    if (!secondXclbinLoadCheck(this->mCoreDevice, buffer)) {
+      return 0; // skipping to load the 2nd xclbin for hw_emu embedded designs
+    }
+  #endif
+
   ret = ioctl(mKernelFD, DRM_IOCTL_ZOCL_READ_AXLF, &axlf_obj);
 
   xclLog(XRT_INFO, "%s: flags 0x%x, return %d", __func__, flags, ret);
@@ -582,6 +806,29 @@ xclLoadAxlf(const axlf *buffer)
 }
 
 int
+shim::
+secondXclbinLoadCheck(std::shared_ptr<xrt_core::device> core_dev, const axlf *top) {
+  try {
+    static int xclbin_hw_emu_count = 0;
+
+    if (core_dev->get_xclbin_uuid() != xrt::uuid(top->m_header.uuid)) {
+      xclbin_hw_emu_count++;
+
+      if (xclbin_hw_emu_count > 1) {
+        xclLog(XRT_WARNING, "%s: Skipping as xclbin is already loaded. Only single XCLBIN load is supported for hw_emu embedded designs.", __func__);
+        return 0;
+      }
+    } else {
+      xclLog(XRT_INFO, "%s: Loading the XCLBIN", __func__);
+    }
+  }
+  catch(const std::exception &e) {
+    // do nothing
+  }
+  return 1;
+}
+
+std::unique_ptr<xrt_core::shared_handle>
 shim::
 xclExportBO(unsigned int boHandle)
 {
@@ -594,24 +841,26 @@ xclExportBO(unsigned int boHandle)
     result = ioctl(mKernelFD, DRM_IOCTL_PRIME_HANDLE_TO_FD, &info);
   }
 
+  if (result)
+    throw xrt_core::system_error(result, "failed to export bo");
+
   xclLog(XRT_INFO, "%s: boHandle %d, ioctl return %ld, fd %d", __func__, boHandle, result, info.fd);
 
-  return !result ? info.fd : result;
+  return std::make_unique<shared_object>(this, info.fd);
 }
 
-unsigned int
+std::unique_ptr<xrt_core::buffer_handle>
 shim::
 xclImportBO(int fd, unsigned flags)
 {
   drm_prime_handle info = {0xffffffff, flags, fd};
   int result = ioctl(mKernelFD, DRM_IOCTL_PRIME_FD_TO_HANDLE, &info);
-  if (result) {
-    xclLog(XRT_ERROR, "%s: FD to handle IOCTL failed", __func__);
-  }
+  if (result)
+    throw xrt_core::system_error(result, "ioctl failed to import bo");
 
   xclLog(XRT_INFO, "%s: fd %d, flags %x, ioctl return %d, bo handle %d", __func__, fd, flags, result, info.handle);
 
-  return !result ? info.handle : 0xffffffff;
+  return std::make_unique<buffer_object>(this, info.handle);
 }
 
 unsigned int
@@ -642,13 +891,13 @@ isGood() const
 
 shim *
 shim::
-handleCheck(void *handle)
+handleCheck(void *handle, bool checkDrmFd /*= true*/)
 {
   // Sanity checks
   if (!handle)
     return 0;
 
-  if (!((shim *) handle)->isGood()) {
+  if (checkDrmFd && !((shim *) handle)->isGood()) {
     return 0;
   }
 
@@ -726,22 +975,36 @@ xclReadTraceData(void* traceBuf, uint32_t traceBufSz, uint32_t numSamples, uint6
   return 0;
 }
 
-// Get the maximum bandwidth for host reads from the device (in MB/sec)
-// NOTE: for now, set to: (256/8 bytes) * 300 MHz = 9600 MBps
+// For DDR4: Typical Max BW = 19.25 GB/s
 double
 shim::
-xclGetReadMaxBandwidthMBps()
+xclGetHostReadMaxBandwidthMBps()
 {
-  return 9600.0;
+  return 19250.00;
 }
 
-// Get the maximum bandwidth for host writes to the device (in MB/sec)
-// NOTE: for now, set to: (256/8 bytes) * 300 MHz = 9600 MBps
+// For DDR4: Typical Max BW = 19.25 GB/s
 double
 shim::
-xclGetWriteMaxBandwidthMBps()
+xclGetHostWriteMaxBandwidthMBps()
 {
-  return 9600.0;
+  return 19250.00;
+}
+
+// For DDR4: Typical Max BW = 19.25 GB/s
+double
+shim::
+xclGetKernelReadMaxBandwidthMBps()
+{
+  return 19250.00;
+}
+
+// For DDR4: Typical Max BW = 19.25 GB/s
+double
+shim::
+xclGetKernelWriteMaxBandwidthMBps()
+{
+  return 19250.00;
 }
 
 int
@@ -757,7 +1020,10 @@ xclSKGetCmd(xclSKCmd *cmd)
     cmd->start_cuidx = scmd.start_cuidx;
     cmd->cu_nums = scmd.cu_nums;
     cmd->bohdl = scmd.bohdl;
+    cmd->meta_bohdl = scmd.meta_bohdl;
+    memcpy(cmd->uuid, &scmd.uuid, sizeof(cmd->uuid));
     snprintf(cmd->krnl_name, ZOCL_MAX_NAME_LENGTH, "%s", scmd.name);
+    cmd->slot_id = scmd.slot_id;
   }
 
   return ret ? -errno : ret;
@@ -796,12 +1062,15 @@ xclAIEPutCmd(xclAIECmd *cmd)
 
 int
 shim::
-xclSKCreate(unsigned int boHandle, uint32_t cu_idx)
+xclSKCreate(int *boHandle, uint32_t cu_idx)
 {
   int ret;
-  drm_zocl_sk_create scmd = {cu_idx, boHandle};
+  drm_zocl_sk_create scmd = {cu_idx, 0};
 
   ret = ioctl(mKernelFD, DRM_IOCTL_ZOCL_SK_CREATE, &scmd);
+  if(!ret) {
+    *boHandle = scmd.handle;
+  }
 
   return ret ? -errno : ret;
 }
@@ -816,6 +1085,15 @@ xclSKReport(uint32_t cu_idx, xrt_scu_state state)
   switch (state) {
   case XRT_SCU_STATE_DONE:
     scmd.cu_state = ZOCL_SCU_STATE_DONE;
+    break;
+  case XRT_SCU_STATE_READY:
+    scmd.cu_state = ZOCL_SCU_STATE_READY;
+    break;
+  case XRT_SCU_STATE_CRASH:
+    scmd.cu_state = ZOCL_SCU_STATE_CRASH;
+    break;
+  case XRT_SCU_STATE_FINI:
+    scmd.cu_state = ZOCL_SCU_STATE_FINI;
     break;
   default:
     return -EINVAL;
@@ -842,8 +1120,45 @@ xclOpenContext(const uuid_t xclbinId, unsigned int ipIndex, bool shared)
   ctx.flags = flags;
   ctx.op = ZOCL_CTX_OP_ALLOC_CTX;
 
-  ret = ioctl(mKernelFD, DRM_IOCTL_ZOCL_CTX, &ctx);
-  return ret ? -errno : ret;
+  if (ioctl(mKernelFD, DRM_IOCTL_ZOCL_CTX, &ctx))
+    throw xrt_core::system_error(errno, "failed to open ip context");
+
+  return 0;
+}
+
+// open_context() - aka xclOpenContextByName
+xrt_core::cuidx_type
+shim::
+open_cu_context(const xrt_core::hwctx_handle* hwctx_hdl, const std::string& cuname)
+{
+  // Edge does not yet support multiple xclbins.  Call
+  // regular flow.  Default access mode to shared unless explicitly
+  // exclusive.
+  auto hwctx = static_cast<const hwcontext*>(hwctx_hdl);
+  auto shared = (hwctx->get_mode() != xrt::hw_context::access_mode::exclusive);
+  auto cuidx = mCoreDevice->get_cuidx(hwctx->get_slotidx(), cuname);
+  xclOpenContext(hwctx->get_xclbin_uuid().get(), cuidx.index, shared);
+
+  return cuidx;
+}
+
+void
+shim::
+close_cu_context(const xrt_core::hwctx_handle* hwctx_hdl, xrt_core::cuidx_type cuidx)
+{
+  // To-be-implemented
+  auto hwctx = static_cast<const hwcontext*>(hwctx_hdl);
+  if (xclCloseContext(hwctx->get_xclbin_uuid().get(), cuidx.index))
+    throw xrt_core::system_error(errno, "failed to close cu context (" + std::to_string(cuidx.index) + ")");
+}
+
+std::unique_ptr<xrt_core::hwctx_handle>
+shim::
+create_hw_context(const xrt::uuid& xclbin_uuid,
+                  const xrt::hw_context::cfg_param_type&,
+                  xrt::hw_context::access_mode mode)
+{
+  return std::make_unique<hwcontext>(this, 0, xclbin_uuid, mode);
 }
 
 int
@@ -927,74 +1242,23 @@ int
 shim::
 xclIPName2Index(const char *name)
 {
-  //if kds_mode is enabled, use kds_cu_stat to get the ip index. 
-  //if kds_mode is disabled get cu index from get_cus function
+  for (auto& stat : xrt_core::device_query<xrt_core::query::kds_cu_info>(mCoreDevice))
+    if (stat.name == name)
+      return stat.index;
 
-  // In new kds, driver determines CU index
-  try {
-    if (xrt_core::device_query<xrt_core::query::kds_mode>(mCoreDevice)) {
-      for (auto& stat : xrt_core::device_query<xrt_core::query::kds_cu_stat>(mCoreDevice))
-        if (stat.name == name)
-          return stat.index;
+  xclLog(XRT_ERROR, "%s not found", name);
+  return -ENOENT;
+}
 
-      xclLog(XRT_ERROR, "%s not found", name);
-      return -ENOENT;
-    }
-  }
-  catch (const xrt_core::query::no_such_key&) {
-  }
+int
+shim::
+xclIPSetReadRange(uint32_t ipIndex, uint32_t start, uint32_t size)
+{
+    int ret = 0;
+    drm_zocl_set_cu_range range = {ipIndex, start, size};
 
-  // Old kds is enabled
-  std::string errmsg;
-  std::vector<char> buf;
-  const uint64_t bad_addr = 0xffffffffffffffff;
-
-  mDev->sysfs_get("ip_layout", errmsg, buf);
-  if (!errmsg.empty()) {
-    xclLog(XRT_ERROR, "can't read ip_layout sysfs node: %s",
-           errmsg.c_str());
-    return -EINVAL;
-  }
-  if (buf.empty())
-  {
-    xclLog(XRT_ERROR, "ip_layout sysfs node is empty");
-    return -ENOENT;
-  }
-
-  const ip_layout *map = (ip_layout *)buf.data();
-  if(map->m_count < 0) {
-    xclLog(XRT_ERROR, "invalid ip_layout sysfs node content");
-    return -EINVAL;
-  }
-
-  uint64_t addr = bad_addr;
-  int i;
-  for(i = 0; i < map->m_count; i++) {
-    if (strncmp((char *)map->m_ip_data[i].m_name, name,
-                sizeof(map->m_ip_data[i].m_name)) == 0) {
-      addr = map->m_ip_data[i].m_base_address;
-      break;
-    }
-  }
-
-  if (i == map->m_count)
-  {
-    xclLog(XRT_ERROR, "no ip with %s found in ip_layout", name);
-    return -ENOENT;
-  }
-
-  if (addr == bad_addr)
-    return -EINVAL;
-
-  auto cus = xrt_core::xclbin::get_cus(map);
-  auto itr = std::find(cus.begin(), cus.end(), addr);
-  if (itr == cus.end())
-  {
-    xclLog(XRT_ERROR, "no cu with 0x%lx found", addr);
-    return -ENOENT;
-  }
-  return std::distance(cus.begin(),itr);
-
+    ret = ioctl(mKernelFD, DRM_IOCTL_ZOCL_SET_CU_READONLY_RANGE, &range);
+    return ret ? -errno : ret;
 }
 
 int
@@ -1024,32 +1288,34 @@ xclCloseIPInterruptNotify(int fd)
 
 size_t
 shim::
-xclDebugReadCheckers(xclDebugCheckersResults* aCheckerResults)
+xclDebugReadCheckers(xdp::LAPCCounterResults* aCheckerResults)
 {
   size_t size = 0;
 
   uint64_t statusRegisters[] = {
-    LAPC_OVERALL_STATUS_OFFSET,
-
-    LAPC_CUMULATIVE_STATUS_0_OFFSET, LAPC_CUMULATIVE_STATUS_1_OFFSET,
-    LAPC_CUMULATIVE_STATUS_2_OFFSET, LAPC_CUMULATIVE_STATUS_3_OFFSET,
-
-    LAPC_SNAPSHOT_STATUS_0_OFFSET, LAPC_SNAPSHOT_STATUS_1_OFFSET,
-    LAPC_SNAPSHOT_STATUS_2_OFFSET, LAPC_SNAPSHOT_STATUS_3_OFFSET
+    xdp::IP::LAPC::AXI_LITE::STATUS,
+    xdp::IP::LAPC::AXI_LITE::CUMULATIVE_STATUS_0,
+    xdp::IP::LAPC::AXI_LITE::CUMULATIVE_STATUS_1,
+    xdp::IP::LAPC::AXI_LITE::CUMULATIVE_STATUS_2,
+    xdp::IP::LAPC::AXI_LITE::CUMULATIVE_STATUS_3,
+    xdp::IP::LAPC::AXI_LITE::SNAPSHOT_STATUS_0,
+    xdp::IP::LAPC::AXI_LITE::SNAPSHOT_STATUS_1,
+    xdp::IP::LAPC::AXI_LITE::SNAPSHOT_STATUS_2,
+    xdp::IP::LAPC::AXI_LITE::SNAPSHOT_STATUS_3
   };
 
-  uint64_t baseAddress[XLAPC_MAX_NUMBER_SLOTS];
-  uint32_t numSlots = getIPCountAddrNames(LAPC, baseAddress, nullptr, nullptr, nullptr, nullptr, XLAPC_MAX_NUMBER_SLOTS);
-  uint32_t temp[XLAPC_STATUS_PER_SLOT];
+  uint64_t baseAddress[xdp::MAX_NUM_LAPCS];
+  uint32_t numSlots = getIPCountAddrNames(LAPC, baseAddress, nullptr, nullptr, nullptr, nullptr, xdp::MAX_NUM_LAPCS);
+  uint32_t temp[xdp::IP::LAPC::NUM_COUNTERS];
   aCheckerResults->NumSlots = numSlots;
   snprintf(aCheckerResults->DevUserName, 256, "%s", " ");
   for (uint32_t s = 0; s < numSlots; ++s) {
-    for (int c=0; c < XLAPC_STATUS_PER_SLOT; c++)
+    for (int c=0; c < xdp::IP::LAPC::NUM_COUNTERS; c++)
       size += xclRead(XCL_ADDR_SPACE_DEVICE_CHECKER, baseAddress[s]+statusRegisters[c], &temp[c], 4);
 
-    aCheckerResults->OverallStatus[s]      = temp[XLAPC_OVERALL_STATUS];
-    std::copy(temp+XLAPC_CUMULATIVE_STATUS_0, temp+XLAPC_SNAPSHOT_STATUS_0, aCheckerResults->CumulativeStatus[s]);
-    std::copy(temp+XLAPC_SNAPSHOT_STATUS_0, temp+XLAPC_STATUS_PER_SLOT, aCheckerResults->SnapshotStatus[s]);
+    aCheckerResults->OverallStatus[s]      = temp[xdp::IP::LAPC::sysfs::STATUS];
+    std::copy(temp+xdp::IP::LAPC::sysfs::CUMULATIVE_STATUS_0, temp+xdp::IP::LAPC::sysfs::SNAPSHOT_STATUS_0, aCheckerResults->CumulativeStatus[s]);
+    std::copy(temp+xdp::IP::LAPC::sysfs::SNAPSHOT_STATUS_0, temp+xdp::IP::LAPC::NUM_COUNTERS, aCheckerResults->SnapshotStatus[s]);
   }
 
   return size;
@@ -1057,40 +1323,40 @@ xclDebugReadCheckers(xclDebugCheckersResults* aCheckerResults)
 
 size_t
 shim::
-xclDebugReadCounters(xclDebugCountersResults* aCounterResults)
+xclDebugReadCounters(xdp::AIMCounterResults* aCounterResults)
 {
   size_t size = 0;
 
-  uint64_t spm_offsets[] = {
-    XAIM_SAMPLE_WRITE_BYTES_OFFSET,
-    XAIM_SAMPLE_WRITE_TRANX_OFFSET,
-    XAIM_SAMPLE_READ_BYTES_OFFSET,
-    XAIM_SAMPLE_READ_TRANX_OFFSET,
-    XAIM_SAMPLE_OUTSTANDING_COUNTS_OFFSET,
-    XAIM_SAMPLE_LAST_WRITE_ADDRESS_OFFSET,
-    XAIM_SAMPLE_LAST_WRITE_DATA_OFFSET,
-    XAIM_SAMPLE_LAST_READ_ADDRESS_OFFSET,
-    XAIM_SAMPLE_LAST_READ_DATA_OFFSET
+  uint64_t aim_offsets[] = {
+    xdp::IP::AIM::AXI_LITE::WRITE_BYTES,
+    xdp::IP::AIM::AXI_LITE::WRITE_TRANX,
+    xdp::IP::AIM::AXI_LITE::READ_BYTES,
+    xdp::IP::AIM::AXI_LITE::READ_TRANX,
+    xdp::IP::AIM::AXI_LITE::OUTSTANDING_COUNTS,
+    xdp::IP::AIM::AXI_LITE::LAST_WRITE_ADDRESS,
+    xdp::IP::AIM::AXI_LITE::LAST_WRITE_DATA,
+    xdp::IP::AIM::AXI_LITE::LAST_READ_ADDRESS,
+    xdp::IP::AIM::AXI_LITE::LAST_READ_DATA
   };
 
-  uint64_t spm_upper_offsets[] = {
-    XAIM_SAMPLE_WRITE_BYTES_UPPER_OFFSET,
-    XAIM_SAMPLE_WRITE_TRANX_UPPER_OFFSET,
-    XAIM_SAMPLE_READ_BYTES_UPPER_OFFSET,
-    XAIM_SAMPLE_READ_TRANX_UPPER_OFFSET,
-    XAIM_SAMPLE_OUTSTANDING_COUNTS_UPPER_OFFSET,
-    XAIM_SAMPLE_LAST_WRITE_ADDRESS_UPPER_OFFSET,
-    XAIM_SAMPLE_LAST_WRITE_DATA_UPPER_OFFSET,
-    XAIM_SAMPLE_LAST_READ_ADDRESS_UPPER_OFFSET,
-    XAIM_SAMPLE_LAST_READ_DATA_UPPER_OFFSET
+  uint64_t aim_upper_offsets[] = {
+    xdp::IP::AIM::AXI_LITE::WRITE_BYTES_UPPER,
+    xdp::IP::AIM::AXI_LITE::WRITE_TRANX_UPPER,
+    xdp::IP::AIM::AXI_LITE::READ_BYTES_UPPER,
+    xdp::IP::AIM::AXI_LITE::READ_TRANX_UPPER,
+    xdp::IP::AIM::AXI_LITE::OUTSTANDING_COUNTS_UPPER,
+    xdp::IP::AIM::AXI_LITE::LAST_WRITE_ADDRESS_UPPER,
+    xdp::IP::AIM::AXI_LITE::LAST_WRITE_DATA_UPPER,
+    xdp::IP::AIM::AXI_LITE::LAST_READ_ADDRESS_UPPER,
+    xdp::IP::AIM::AXI_LITE::LAST_READ_DATA_UPPER
   };
 
   // Read all metric counters
-  uint64_t baseAddress[XAIM_MAX_NUMBER_SLOTS];
-  uint8_t mPerfmonProperties[XAIM_MAX_NUMBER_SLOTS] = {} ;
-  uint32_t numSlots = getIPCountAddrNames(AXI_MM_MONITOR, baseAddress, nullptr, mPerfmonProperties, nullptr, nullptr, XAIM_MAX_NUMBER_SLOTS);
+  uint64_t baseAddress[xdp::MAX_NUM_AIMS];
+  uint8_t mPerfmonProperties[xdp::MAX_NUM_AIMS] = {} ;
+  uint32_t numSlots = getIPCountAddrNames(AXI_MM_MONITOR, baseAddress, nullptr, mPerfmonProperties, nullptr, nullptr, xdp::MAX_NUM_AIMS);
 
-  uint32_t temp[XAIM_DEBUG_SAMPLE_COUNTERS_PER_SLOT];
+  uint32_t temp[xdp::IP::AIM::NUM_COUNTERS_REPORT];
 
   aCounterResults->NumSlots = numSlots;
   snprintf(aCounterResults->DevUserName, 256, "%s", " ");
@@ -1098,14 +1364,14 @@ xclDebugReadCounters(xclDebugCountersResults* aCounterResults)
     uint32_t sampleInterval;
     // Read sample interval register to latch the sampled metric counters
     size += xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON,
-                    baseAddress[s] + XAIM_SAMPLE_OFFSET,
+                    baseAddress[s] + xdp::IP::AIM::AXI_LITE::SAMPLE,
                     &sampleInterval, 4);
 
     // If applicable, read the upper 32-bits of the 64-bit debug counters
-    if (mPerfmonProperties[s] & XAIM_64BIT_PROPERTY_MASK) {
-      for (int c = 0 ; c < XAIM_DEBUG_SAMPLE_COUNTERS_PER_SLOT ; ++c) {
+    if (mPerfmonProperties[s] & xdp::IP::AIM::mask::PROPERTY_64BIT) {
+      for (int c = 0; c < xdp::IP::AIM::NUM_COUNTERS_REPORT; ++c) {
         xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON,
-                baseAddress[s] + spm_upper_offsets[c],
+                baseAddress[s] + aim_upper_offsets[c],
                 &temp[c], 4) ;
       }
       aCounterResults->WriteBytes[s]    = ((uint64_t)(temp[0])) << 32 ;
@@ -1119,8 +1385,8 @@ xclDebugReadCounters(xclDebugCountersResults* aCounterResults)
       aCounterResults->LastReadData[s]  = ((uint64_t)(temp[8])) << 32 ;
     }
 
-    for (int c=0; c < XAIM_DEBUG_SAMPLE_COUNTERS_PER_SLOT; c++)
-      size += xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s]+spm_offsets[c], &temp[c], 4);
+    for (int c=0; c < xdp::IP::AIM::NUM_COUNTERS_REPORT; c++)
+      size += xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s]+aim_offsets[c], &temp[c], 4);
 
     aCounterResults->WriteBytes[s]    |= temp[0];
     aCounterResults->WriteTranx[s]    |= temp[1];
@@ -1137,7 +1403,7 @@ xclDebugReadCounters(xclDebugCountersResults* aCounterResults)
 
 size_t
 shim::
-xclDebugReadAccelMonitorCounters(xclAccelMonitorCounterResults* samResult)
+xclDebugReadAccelMonitorCounters(xdp::AMCounterResults* samResult)
 {
   size_t size = 0;
 
@@ -1147,38 +1413,38 @@ xclDebugReadAccelMonitorCounters(xclAccelMonitorCounterResults* samResult)
     is not supported
   */
 
-  uint64_t sam_offsets[] = {
-    XAM_ACCEL_EXECUTION_COUNT_OFFSET,
-    XAM_ACCEL_EXECUTION_CYCLES_OFFSET,
-    XAM_ACCEL_STALL_INT_OFFSET,
-    XAM_ACCEL_STALL_STR_OFFSET,
-    XAM_ACCEL_STALL_EXT_OFFSET,
-    XAM_ACCEL_MIN_EXECUTION_CYCLES_OFFSET,
-    XAM_ACCEL_MAX_EXECUTION_CYCLES_OFFSET,
-    XAM_ACCEL_TOTAL_CU_START_OFFSET
+  uint64_t am_offsets[] = {
+    xdp::IP::AM::AXI_LITE::EXECUTION_COUNT,
+    xdp::IP::AM::AXI_LITE::EXECUTION_CYCLES,
+    xdp::IP::AM::AXI_LITE::STALL_INT,
+    xdp::IP::AM::AXI_LITE::STALL_STR,
+    xdp::IP::AM::AXI_LITE::STALL_EXT,
+    xdp::IP::AM::AXI_LITE::MIN_EXECUTION_CYCLES,
+    xdp::IP::AM::AXI_LITE::MAX_EXECUTION_CYCLES,
+    xdp::IP::AM::AXI_LITE::TOTAL_CU_START
   };
 
-  uint64_t sam_upper_offsets[] = {
-    XAM_ACCEL_EXECUTION_COUNT_UPPER_OFFSET,
-    XAM_ACCEL_EXECUTION_CYCLES_UPPER_OFFSET,
-    XAM_ACCEL_STALL_INT_UPPER_OFFSET,
-    XAM_ACCEL_STALL_STR_UPPER_OFFSET,
-    XAM_ACCEL_STALL_EXT_UPPER_OFFSET,
-    XAM_ACCEL_MIN_EXECUTION_CYCLES_UPPER_OFFSET,
-    XAM_ACCEL_MAX_EXECUTION_CYCLES_UPPER_OFFSET,
-    XAM_ACCEL_TOTAL_CU_START_UPPER_OFFSET
+  uint64_t am_upper_offsets[] = {
+    xdp::IP::AM::AXI_LITE::EXECUTION_COUNT_UPPER,
+    xdp::IP::AM::AXI_LITE::EXECUTION_CYCLES_UPPER,
+    xdp::IP::AM::AXI_LITE::STALL_INT_UPPER,
+    xdp::IP::AM::AXI_LITE::STALL_STR_UPPER,
+    xdp::IP::AM::AXI_LITE::STALL_EXT_UPPER,
+    xdp::IP::AM::AXI_LITE::MIN_EXECUTION_CYCLES_UPPER,
+    xdp::IP::AM::AXI_LITE::MAX_EXECUTION_CYCLES_UPPER,
+    xdp::IP::AM::AXI_LITE::TOTAL_CU_START_UPPER
   };
 
   // Read all metric counters
-  uint64_t baseAddress[XAM_MAX_NUMBER_SLOTS] = {0};
-  uint8_t  accelmonProperties[XAM_MAX_NUMBER_SLOTS] = {0};
-  uint8_t  accelmonMajorVersions[XAM_MAX_NUMBER_SLOTS] = {0};
-  uint8_t  accelmonMinorVersions[XAM_MAX_NUMBER_SLOTS] = {0};
+  uint64_t baseAddress[xdp::MAX_NUM_AMS] = {0};
+  uint8_t  accelmonProperties[xdp::MAX_NUM_AMS] = {0};
+  uint8_t  accelmonMajorVersions[xdp::MAX_NUM_AMS] = {0};
+  uint8_t  accelmonMinorVersions[xdp::MAX_NUM_AMS] = {0};
 
   uint32_t numSlots = getIPCountAddrNames(ACCEL_MONITOR, baseAddress, nullptr, accelmonProperties,
-                                          accelmonMajorVersions, accelmonMinorVersions, XAM_MAX_NUMBER_SLOTS);
+                                          accelmonMajorVersions, accelmonMinorVersions, xdp::MAX_NUM_AMS);
 
-  uint32_t temp[XAM_DEBUG_SAMPLE_COUNTERS_PER_SLOT] = {0};
+  uint32_t temp[xdp::IP::AM::NUM_COUNTERS_REPORT] = {0};
 
   samResult->NumSlots = numSlots;
   snprintf(samResult->DevUserName, 256, "%s", " ");
@@ -1186,16 +1452,16 @@ xclDebugReadAccelMonitorCounters(xclAccelMonitorCounterResults* samResult)
     uint32_t sampleInterval;
     // Read sample interval register to latch the sampled metric counters
     size += xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON,
-                    baseAddress[s] + XAM_SAMPLE_OFFSET,
+                    baseAddress[s] + xdp::IP::AM::AXI_LITE::SAMPLE,
                     &sampleInterval, 4);
 
     bool hasDataflow = (cmpMonVersions(accelmonMajorVersions[s],accelmonMinorVersions[s],1,1) < 0) ? true : false;
 
     // If applicable, read the upper 32-bits of the 64-bit debug counters
-    if (accelmonProperties[s] & XAM_64BIT_PROPERTY_MASK) {
-      for (int c = 0 ; c < XAM_DEBUG_SAMPLE_COUNTERS_PER_SLOT ; ++c) {
+    if (accelmonProperties[s] & xdp::IP::AM::mask::PROPERTY_64BIT) {
+      for (int c = 0; c < xdp::IP::AM::NUM_COUNTERS_REPORT; ++c) {
         xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON,
-                baseAddress[s] + sam_upper_offsets[c],
+                baseAddress[s] + am_upper_offsets[c],
                 &temp[c], 4) ;
       }
       samResult->CuExecCount[s]      = ((uint64_t)(temp[0])) << 32;
@@ -1209,16 +1475,16 @@ xclDebugReadAccelMonitorCounters(xclAccelMonitorCounterResults* samResult)
 
       if(hasDataflow) {
         uint64_t dfTmp[2] = {0};
-        xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s] + XAM_BUSY_CYCLES_UPPER_OFFSET, &dfTmp[0], 4);
-        xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s] + XAM_MAX_PARALLEL_ITER_UPPER_OFFSET, &dfTmp[1], 4);
+        xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s] + xdp::IP::AM::AXI_LITE::BUSY_CYCLES_UPPER, &dfTmp[0], 4);
+        xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s] + xdp::IP::AM::AXI_LITE::MAX_PARALLEL_ITER_UPPER, &dfTmp[1], 4);
 
         samResult->CuBusyCycles[s]      = dfTmp[0] << 32;
         samResult->CuMaxParallelIter[s] = dfTmp[1] << 32;
       }
     }
 
-    for (int c=0; c < XAM_DEBUG_SAMPLE_COUNTERS_PER_SLOT; c++)
-      size += xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s]+sam_offsets[c], &temp[c], 4);
+    for (int c=0; c < xdp::IP::AM::NUM_COUNTERS_REPORT; c++)
+      size += xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s]+am_offsets[c], &temp[c], 4);
 
     samResult->CuExecCount[s]      |= temp[0];
     samResult->CuExecCycles[s]     |= temp[1];
@@ -1231,8 +1497,8 @@ xclDebugReadAccelMonitorCounters(xclAccelMonitorCounterResults* samResult)
 
     if(hasDataflow) {
       uint64_t dfTmp[2] = {0};
-      xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s] + XAM_BUSY_CYCLES_OFFSET, &dfTmp[0], 4);
-      xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s] + XAM_MAX_PARALLEL_ITER_OFFSET, &dfTmp[1], 4);
+      xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s] + xdp::IP::AM::AXI_LITE::BUSY_CYCLES, &dfTmp[0], 4);
+      xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON, baseAddress[s] + xdp::IP::AM::AXI_LITE::MAX_PARALLEL_ITER, &dfTmp[1], 4);
 
       samResult->CuBusyCycles[s]      |= dfTmp[0] << 32;
       samResult->CuMaxParallelIter[s] |= dfTmp[1] << 32;
@@ -1247,28 +1513,28 @@ xclDebugReadAccelMonitorCounters(xclAccelMonitorCounterResults* samResult)
 
 size_t
 shim::
-xclDebugReadStreamingCounters(xclStreamingDebugCountersResults* aCounterResults)
+xclDebugReadStreamingCounters(xdp::ASMCounterResults* aCounterResults)
 {
   size_t size = 0; // The amount of data read from the hardware
 
-  // Get the base addresses of all the SSPM IPs in the debug IP layout
-  uint64_t baseAddress[XASM_MAX_NUMBER_SLOTS];
+  // Get the base addresses of all the ASM IPs in the debug IP layout
+  uint64_t baseAddress[xdp::MAX_NUM_ASMS];
   uint32_t numSlots = getIPCountAddrNames(AXI_STREAM_MONITOR,
                                           baseAddress,
                                           nullptr, nullptr, nullptr, nullptr,
-                                          XASM_MAX_NUMBER_SLOTS);
+                                          xdp::MAX_NUM_ASMS);
 
   // Fill up the portions of the return struct that are known by the runtime
   aCounterResults->NumSlots = numSlots ;
   snprintf(aCounterResults->DevUserName, 256, "%s", " ");
 
   // Fill up the return structure with the values read from the hardware
-  uint64_t sspm_offsets[] = {
-    XASM_NUM_TRANX_OFFSET,
-    XASM_DATA_BYTES_OFFSET,
-    XASM_BUSY_CYCLES_OFFSET,
-    XASM_STALL_CYCLES_OFFSET,
-    XASM_STARVE_CYCLES_OFFSET
+  uint64_t asm_offsets[] = {
+    xdp::IP::ASM::AXI_LITE::NUM_TRANX,
+    xdp::IP::ASM::AXI_LITE::DATA_BYTES,
+    xdp::IP::ASM::AXI_LITE::BUSY_CYCLES,
+    xdp::IP::ASM::AXI_LITE::STALL_CYCLES,
+    xdp::IP::ASM::AXI_LITE::STARVE_CYCLES
   };
 
   for (unsigned int i = 0 ; i < numSlots ; ++i)
@@ -1276,16 +1542,16 @@ xclDebugReadStreamingCounters(xclStreamingDebugCountersResults* aCounterResults)
       uint32_t sampleInterval ;
       // Read sample interval register to latch the sampled metric counters
       size += xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON,
-                      baseAddress[i] + XASM_SAMPLE_OFFSET,
+                      baseAddress[i] + xdp::IP::ASM::AXI_LITE::SAMPLE,
                       &sampleInterval, sizeof(uint32_t));
 
       // Then read all the individual 64-bit counters
-      unsigned long long int tmp[XASM_DEBUG_SAMPLE_COUNTERS_PER_SLOT] ;
+      unsigned long long int tmp[xdp::IP::ASM::NUM_COUNTERS] ;
 
-      for (unsigned int j = 0 ; j < XASM_DEBUG_SAMPLE_COUNTERS_PER_SLOT; ++j)
+      for (unsigned int j = 0 ; j < xdp::IP::ASM::NUM_COUNTERS; ++j)
         {
           size += xclRead(XCL_ADDR_SPACE_DEVICE_PERFMON,
-                          baseAddress[i] + sspm_offsets[j],
+                          baseAddress[i] + asm_offsets[j],
                           &tmp[j], sizeof(unsigned long long int));
         }
       aCounterResults->StrNumTranx[i] = tmp[0] ;
@@ -1299,36 +1565,35 @@ xclDebugReadStreamingCounters(xclStreamingDebugCountersResults* aCounterResults)
 
 size_t
 shim::
-xclDebugReadStreamingCheckers(xclDebugStreamingCheckersResults* aStreamingCheckerResults)
+xclDebugReadStreamingCheckers(xdp::SPCCounterResults* aStreamingCheckerResults)
 {
   size_t size = 0; // The amount of data read from the hardware
 
   // Get the base addresses of all the SPC IPs in the debug IP layout
-  uint64_t baseAddress[XSPC_MAX_NUMBER_SLOTS];
+  uint64_t baseAddress[xdp::MAX_NUM_SPCS];
   uint32_t numSlots = getIPCountAddrNames(AXI_STREAM_PROTOCOL_CHECKER,
                                           baseAddress,
                                           nullptr, nullptr, nullptr, nullptr,
-                                          XSPC_MAX_NUMBER_SLOTS);
+                                          xdp::MAX_NUM_SPCS);
 
   // Fill up the portions of the return struct that are known by the runtime
   aStreamingCheckerResults->NumSlots = numSlots ;
   snprintf(aStreamingCheckerResults->DevUserName, 256, "%s", " ");
 
   // Fill up the return structure with the values read from the hardware
-  for (unsigned int i = 0 ; i < numSlots ; ++i)
-    {
+  for (unsigned int i = 0 ; i < numSlots ; ++i) {
       uint32_t pc_asserted ;
       uint32_t current_pc ;
       uint32_t snapshot_pc ;
 
       size += xclRead(XCL_ADDR_SPACE_DEVICE_CHECKER,
-                      baseAddress[i] + XSPC_PC_ASSERTED_OFFSET,
+                      baseAddress[i] + xdp::IP::SPC::AXI_LITE::PC_ASSERTED,
                       &pc_asserted, sizeof(uint32_t));
       size += xclRead(XCL_ADDR_SPACE_DEVICE_CHECKER,
-                      baseAddress[i] + XSPC_CURRENT_PC_OFFSET,
+                      baseAddress[i] + xdp::IP::SPC::AXI_LITE::CURRENT_PC,
                       &current_pc, sizeof(uint32_t));
       size += xclRead(XCL_ADDR_SPACE_DEVICE_CHECKER,
-                      baseAddress[i] + XSPC_SNAPSHOT_PC_OFFSET,
+                      baseAddress[i] + xdp::IP::SPC::AXI_LITE::SNAPSHOT_PC,
                       &snapshot_pc, sizeof(uint32_t));
 
       aStreamingCheckerResults->PCAsserted[i] = pc_asserted;
@@ -1437,6 +1702,23 @@ xclErrorClear()
 
   ret = ioctl(mKernelFD, DRM_IOCTL_ZOCL_ERROR_INJECT, &ecmd);
   return ret ? -errno : ret;
+}
+
+int
+shim::
+resetDevice(xclResetKind kind)
+{
+  std::string errmsg{""};
+
+  if (kind == XCL_USER_RESET) {
+    mDev->sysfs_put("zocl_reset", errmsg, "1\n");
+    if (!errmsg.empty())
+      throw std::runtime_error("Failed to reset zocl, err : " + errmsg + "\n");
+  }
+  else
+    throw std::runtime_error("Invalid reset type\n"); // other kinds of reset are not supported
+
+  return 0;
 }
 
 #ifdef XRT_ENABLE_AIE
@@ -1585,17 +1867,78 @@ setAIEAccessMode(xrt::aie::access_mode am)
 
 } // end namespace ZYNQ
 
+////////////////////////////////////////////////////////////////
+// Implementation of internal SHIM APIs
+////////////////////////////////////////////////////////////////
+namespace xrt::shim_int {
+
+std::unique_ptr<xrt_core::hwctx_handle>
+create_hw_context(xclDeviceHandle handle,
+                  const xrt::uuid& xclbin_uuid,
+                  const xrt::hw_context::cfg_param_type& cfg_param,
+                  xrt::hw_context::access_mode mode)
+{
+  auto shim = get_shim_object(handle);
+  return shim->create_hw_context(xclbin_uuid, cfg_param, mode);
+}
+
+std::unique_ptr<xrt_core::buffer_handle>
+alloc_bo(xclDeviceHandle handle, size_t size, unsigned int flags)
+{
+  auto shim = get_shim_object(handle);
+  return shim->xclAllocBO(size, flags);
+}
+
+// alloc_userptr_bo()
+std::unique_ptr<xrt_core::buffer_handle>
+alloc_bo(xclDeviceHandle handle, void* userptr, size_t size, unsigned int flags)
+{
+  auto shim = get_shim_object(handle);
+  return shim->xclAllocUserPtrBO(userptr, size, flags);
+}
+
+std::unique_ptr<xrt_core::buffer_handle>
+import_bo(xclDeviceHandle handle, xrt_core::shared_handle::export_handle ehdl)
+{
+  auto shim = get_shim_object(handle);
+  return shim->xclImportBO(ehdl, 0);
+}
+
+// Function for converting raw buffer handle returned by some of the
+// shim functions into xrt_core::buffer_handle
+std::unique_ptr<xrt_core::buffer_handle>
+get_buffer_handle(xclDeviceHandle handle, unsigned int bhdl)
+{
+  auto shim = get_shim_object(handle);
+  return std::make_unique<ZYNQ::shim::buffer_object>(shim, bhdl);
+}
+} // xrt::shim_int
+////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////
+// Implementation of user exposed SHIM APIs
+// This are C level functions
+////////////////////////////////////////////////////////////////
 unsigned
 xclProbe()
 {
-#ifndef __HWEM__
-  PROBE_CB;
-#endif
+  return xdp::hal::profiling_wrapper("xclProbe", [] {
 
-  int fd = open("/dev/dri/renderD128", O_RDWR);
-  if (fd < 0) {
-    return 0;
+  const std::string zocl_drm_device = "/dev/dri/" + get_render_devname();
+  int fd;
+  if (std::filesystem::exists(zocl_drm_device)) {
+    fd = open(zocl_drm_device.c_str(), O_RDWR);
+    if (fd < 0)
+      return 0;
   }
+  /*
+   * Zocl node is not present in some platforms static dtb, it gets loaded
+   * using overlay dtb, drm device node is not created until zocl is present
+   * So if enable_flat is set return 1 valid device
+   */
+  else if (xrt_core::config::get_enable_flat())
+    return 1;
+
   std::vector<char> name(128,0);
   std::vector<char> desc(512,0);
   std::vector<char> date(128,0);
@@ -1617,29 +1960,30 @@ xclProbe()
   result = std::strncmp(version.name, "zocl", 4);
   close(fd);
   return (result == 0) ? 1 : 0;
+  });
 }
 
 xclDeviceHandle
 xclOpen(unsigned deviceIndex, const char*, xclVerbosityLevel)
 {
+  return xdp::hal::profiling_wrapper("xclOpen",
+  [deviceIndex] {
+
   try {
     //std::cout << "xclOpen called" << std::endl;
     if (deviceIndex >= xclProbe()) {
       xrt_core::message::send(xrt_core::message::severity_level::info, "XRT",
                        std::string("Cannot find index " + std::to_string(deviceIndex) + " \n"));
-      return nullptr;
+      return static_cast<xclDeviceHandle>(nullptr);
     }
 
-#ifndef __HWEM__
-    OPEN_CB;
-#endif
-
     auto handle = new ZYNQ::shim(deviceIndex);
-    if (!ZYNQ::shim::handleCheck(handle)) {
+    bool checkDrmFD = xrt_core::config::get_enable_flat() ? false : true;
+    if (!ZYNQ::shim::handleCheck(handle, checkDrmFD)) {
       delete handle;
       handle = XRT_NULL_HANDLE;
     }
-    return handle;
+    return static_cast<xclDeviceHandle>(handle);
   }
   catch (const xrt_core::error& ex) {
     xrt_core::send_exception_message(ex.what());
@@ -1648,51 +1992,61 @@ xclOpen(unsigned deviceIndex, const char*, xclVerbosityLevel)
     xrt_core::send_exception_message(ex.what());
   }
 
-  return XRT_NULL_HANDLE;
+  return static_cast<xclDeviceHandle>(XRT_NULL_HANDLE);
 
+  }) ;
 }
 
 void
 xclClose(xclDeviceHandle handle)
 {
-#ifndef __HWEM__
-  CLOSE_CB;
-#endif
-
+  xdp::hal::profiling_wrapper("xclClose", [handle] {
   //std::cout << "xclClose called" << std::endl;
   if (ZYNQ::shim::handleCheck(handle)) {
     delete ((ZYNQ::shim *) handle);
   }
+  }) ;
 }
 
 unsigned int
-xclAllocBO(xclDeviceHandle handle, size_t size, int unused, unsigned flags)
+xclAllocBO(xclDeviceHandle handle, size_t size, int, unsigned flags)
 {
-#ifndef __HWEM__
-  ALLOC_BO_CB;
-#endif
-  //std::cout << "xclAllocBO called " << std::endl;
-  //std::cout << "xclAllocBO size:  "  << size << std::endl;
-  //std::cout << "xclAllocBO handle " << handle << std::endl;
-  ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
-  if (!drv)
-    return -EINVAL;
-  //std::cout << "xclAllocBO handle check passed" << std::endl;
-  return drv->xclAllocBO(size, unused, flags);
+  return xdp::hal::profiling_wrapper("xclAllocBO", [handle, size, flags] {
+    try {
+      auto shim = ZYNQ::shim::handleCheck(handle);
+      if (!shim)
+        return static_cast<unsigned int>(-EINVAL);
+
+        auto bo = shim->xclAllocBO(size, flags);
+        auto ptr = static_cast<ZYNQ::shim::buffer_object*>(bo.get());
+        return ptr->detach_handle();
+      }
+      catch (const xrt_core::error& ex) {
+        xrt_core::send_exception_message(ex.what());
+        return static_cast<unsigned int>(ex.get_code());
+      }
+    });
 }
 
 unsigned int
 xclAllocUserPtrBO(xclDeviceHandle handle, void *userptr, size_t size, unsigned flags)
 {
-#ifndef __HWEM__
-  ALLOC_USERPTR_BO_CB;
-#endif
-  //std::cout << "xclAllocUserPtrBO called.. " << handle << std::endl;
-  ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
-  if (!drv)
-    return -EINVAL;
-  return drv->xclAllocUserPtrBO(userptr, size, flags);
-  //return 0xffffffff;
+  return xdp::hal::profiling_wrapper("xclAllocUserPtrBO",
+  [handle, userptr, size, flags] {
+    try {
+      auto shim = ZYNQ::shim::handleCheck(handle);
+      if (!shim)
+        return static_cast<unsigned int>(-EINVAL);
+
+      auto bo = shim->xclAllocUserPtrBO(userptr, size, flags);
+      auto ptr = static_cast<ZYNQ::shim::buffer_object*>(bo.get());
+      return ptr->detach_handle();
+    }
+    catch (const xrt_core::error& ex) {
+      xrt_core::send_exception_message(ex.what());
+      return static_cast<unsigned int>(ex.get_code());
+    }
+  });
 }
 
 unsigned int
@@ -1708,58 +2062,55 @@ xclGetHostBO(xclDeviceHandle handle, uint64_t paddr, size_t size)
 void
 xclFreeBO(xclDeviceHandle handle, unsigned int boHandle)
 {
-#ifndef __HWEM__
-  FREE_BO_CB;
-#endif
+  xdp::hal::profiling_wrapper("xclFreeBO", [handle, boHandle] {
   //std::cout << "xclFreeBO called" << std::endl;
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
     return;
   drv->xclFreeBO(boHandle);
+  }) ;
 }
 
 size_t
 xclWriteBO(xclDeviceHandle handle, unsigned int boHandle, const void *src,
            size_t size, size_t seek)
 {
-#ifndef __HWEM__
-  WRITE_BO_CB;
-#endif
+  return xdp::hal::buffer_transfer_profiling_wrapper("xclWriteBO", size, true,
+  [handle, boHandle, src, size, seek] {
 
   //std::cout << "xclWriteBO called" << std::endl;
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
     return -EINVAL;
   return drv->xclWriteBO(boHandle, src, size, seek);
+  }) ;
 }
 
 size_t
 xclReadBO(xclDeviceHandle handle, unsigned int boHandle, void *dst,
           size_t size, size_t skip)
 {
-#ifndef __HWEM__
-  READ_BO_CB;
-#endif
+  return xdp::hal::buffer_transfer_profiling_wrapper("xclReadBO", size, false,
+  [handle, boHandle, dst, size, skip] {
 
   //std::cout << "xclReadBO called" << std::endl;
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
     return -EINVAL;
   return drv->xclReadBO(boHandle, dst, size, skip);
+  }) ;
 }
 
 void *
 xclMapBO(xclDeviceHandle handle, unsigned int boHandle, bool write)
 {
-#ifndef __HWEM__
-  MAP_BO_CB;
-#endif
-
+  return xdp::hal::profiling_wrapper("xclMapBO", [handle, boHandle, write] {
   //std::cout << "xclMapBO called" << std::endl;
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
-    return NULL;
+    return static_cast<void*>(nullptr);
   return drv->xclMapBO(boHandle, write);
+  } );
 }
 
 int
@@ -1776,63 +2127,81 @@ int
 xclSyncBO(xclDeviceHandle handle, unsigned int boHandle, xclBOSyncDirection dir,
           size_t size, size_t offset)
 {
-#ifndef __HWEM__
-  SYNC_BO_CB;
-#endif
+  return xdp::hal::buffer_transfer_profiling_wrapper("xclSyncBO", size,
+						     (dir == XCL_BO_SYNC_BO_TO_DEVICE),
+  [handle, boHandle, dir, size, offset] {
 
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
     return -EINVAL;
   return drv->xclSyncBO(boHandle, dir, size, offset);
+  }) ;
 }
 
 int
 xclCopyBO(xclDeviceHandle handle, unsigned int dst_boHandle,
           unsigned int src_boHandle, size_t size, size_t dst_offset, size_t src_offset)
 {
-#ifndef __HWEM__
-  COPY_BO_CB;
-#endif
+  return xdp::hal::profiling_wrapper("xclCopyBO",
+  [handle, dst_boHandle, src_boHandle, size, dst_offset, src_offset] {
 
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
     return -EINVAL;
   return drv->xclCopyBO(dst_boHandle, src_boHandle, size, dst_offset, src_offset);
+  }) ;
 }
 
 int
 xclExportBO(xclDeviceHandle handle, unsigned int boHandle)
 {
-  //std::cout << "xclExportBO called.. " << handle << std::endl;
-  ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
-  if (!drv)
-    return -EINVAL;
-  return drv->xclExportBO(boHandle);
+  try {
+    auto shim = ZYNQ::shim::handleCheck(handle);
+    if (!shim)
+      return -EINVAL;
+
+    auto shared = shim->xclExportBO(boHandle);
+    auto ptr = static_cast<ZYNQ::shim::shared_object*>(shared.get());
+    return ptr->detach_handle();
+  }
+  catch (const xrt_core::error& ex) {
+    xrt_core::send_exception_message(ex.what());
+    return ex.get_code();
+  }
 }
 
 unsigned int
 xclImportBO(xclDeviceHandle handle, int fd, unsigned flags)
 {
-  //std::cout << "xclImportBO called.. " << handle << std::endl;
-  ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
-  if (!drv)
-    return -EINVAL;
-  return drv->xclImportBO(fd, flags);
+  try {
+    auto shim = ZYNQ::shim::handleCheck(handle);
+    if (!shim)
+      return static_cast<unsigned int>(-EINVAL); // argh ...
+
+    auto bo = shim->xclImportBO(fd, flags);
+    auto ptr = static_cast<ZYNQ::shim::buffer_object*>(bo.get());
+    return ptr->detach_handle();
+  }
+  catch (const xrt_core::error& ex) {
+    xrt_core::send_exception_message(ex.what());
+    return static_cast<unsigned int>(ex.get_code());
+  }
 }
 
 static int
 xclLoadXclBinImpl(xclDeviceHandle handle, const xclBin *buffer, bool meta)
 {
-#ifndef __HWEM__
-  LOAD_XCLBIN_CB ;
-#endif
+  return xdp::hal::profiling_wrapper("xclLoadXclbin", [handle, buffer, meta] {
 
   try {
-    ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
+    bool checkDrmFD = xrt_core::config::get_enable_flat() ? false : true;
+    ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle, checkDrmFD);
 
 #ifndef __HWEM__
-    xdp::hal::flush_device(handle) ;
-    xdp::aie::flush_device(handle) ;
+    xdp::hal::flush_device(handle);
+    xdp::aie::flush_device(handle);
+#else
+    xdp::hal::hw_emu::flush_device(handle);
 #endif
 
     int ret;
@@ -1858,29 +2227,37 @@ xclLoadXclBinImpl(xclDeviceHandle handle, const xclBin *buffer, bool meta)
     if (xrt_core::xclbin::is_pdi_only(buffer))
         return 0;
 
-    ret = xrt_core::scheduler::init(handle, buffer);
-    if (ret) {
-      printf("Scheduler init failed\n");
-      return ret;
-    }
-    ret = drv->mapKernelControl(xrt_core::xclbin::get_cus_pair(buffer));
-    if (ret) {
-      printf("Map CUs Failed\n");
-      return ret;
-    }
-    ret = drv->mapKernelControl(xrt_core::xclbin::get_dbg_ips_pair(buffer));
-    if (ret) {
-      printf("Map Debug IPs Failed\n");
-      return ret;
+    // Skipping if only loading xclbin metadata
+    if (!meta) {
+      ret = xrt_core::scheduler::init(handle, buffer);
+      if (ret) {
+	printf("Scheduler init failed\n");
+	return ret;
+      }
+      ret = drv->mapKernelControl(xrt_core::xclbin::get_cus_pair(buffer));
+      if (ret) {
+	printf("Map CUs Failed\n");
+	return ret;
+      }
+      ret = drv->mapKernelControl(xrt_core::xclbin::get_dbg_ips_pair(buffer));
+      if (ret) {
+	printf("Map Debug IPs Failed\n");
+	return ret;
+      }
     }
 
 #ifndef __HWEM__
-    xdp::hal::update_device(handle) ;
+    xdp::hal::update_device(handle);
     xdp::aie::update_device(handle);
-    xdp::aie::ctr::update_device(handle);
-
-    START_DEVICE_PROFILING_CB(handle);
 #endif
+    xdp::aie::ctr::update_device(handle);
+    xdp::aie::sts::update_device(handle);
+#ifndef __HWEM__
+    START_DEVICE_PROFILING_CB(handle);
+#else
+    xdp::hal::hw_emu::update_device(handle);
+#endif
+
     return 0;
   }
   catch (const xrt_core::error& ex) {
@@ -1891,6 +2268,8 @@ xclLoadXclBinImpl(xclDeviceHandle handle, const xclBin *buffer, bool meta)
     xrt_core::send_exception_message(ex.what());
     return 1;
   }
+
+  }) ;
 }
 
 int
@@ -1908,27 +2287,25 @@ xclLoadXclBin(xclDeviceHandle handle, const xclBin *buffer)
 size_t
 xclWrite(xclDeviceHandle handle, xclAddressSpace space, uint64_t offset, const void *hostBuf, size_t size)
 {
-#ifndef __HWEM__
-  WRITE_CB;
-#endif
-
+  return xdp::hal::profiling_wrapper("xclWrite",
+  [handle, space, offset, hostBuf, size] {
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
-    return -EINVAL;
+    return static_cast<size_t>(-EINVAL);
   return drv->xclWrite(space, offset, hostBuf, size);
+  }) ;
 }
 
 size_t
 xclRead(xclDeviceHandle handle, xclAddressSpace space, uint64_t offset, void *hostBuf, size_t size)
 {
-#ifndef __HWEM__
-  READ_CB;
-#endif
-
+  return xdp::hal::profiling_wrapper("xclRead",
+  [handle, space, offset, hostBuf, size] {
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
-    return -EINVAL;
+    return static_cast<size_t>(-EINVAL);
   return drv->xclRead(space, offset, hostBuf, size);
+  }) ;
 }
 
 int
@@ -1943,14 +2320,13 @@ xclGetDeviceInfo2(xclDeviceHandle handle, xclDeviceInfo2 *info)
 int
 xclGetBOProperties(xclDeviceHandle handle, unsigned int boHandle, xclBOProperties *properties)
 {
-#ifndef __HWEM__
-  GET_BO_PROP_CB;
-#endif
-
+  return xdp::hal::profiling_wrapper("xclGetBOProperties",
+  [handle, boHandle, properties] {
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
     return -EINVAL;
-  return drv->xclGetBOProperties(boHandle, properties);
+  return static_cast<int>(drv->xclGetBOProperties(boHandle, properties));
+  }) ;
 }
 
 unsigned int
@@ -1962,27 +2338,24 @@ xclVersion ()
 int
 xclExecBuf(xclDeviceHandle handle, unsigned int cmdBO)
 {
-#ifndef __HWEM__
-  EXEC_BUF_CB;
-#endif
-
+  return xdp::hal::profiling_wrapper("xclExecBuf", [handle, cmdBO] {
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
     return -EINVAL;
   return drv->xclExecBuf(cmdBO) ;
+  }) ;
 }
 
 int
 xclExecWait(xclDeviceHandle handle, int timeoutMilliSec)
 {
-#ifndef __HWEM__
-  EXEC_WAIT_CB;
-#endif
+  return xdp::hal::profiling_wrapper("xclExecWait", [handle, timeoutMilliSec] {
 
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
     return -EINVAL;
   return drv->xclExecWait(timeoutMilliSec);
+  }) ;
 }
 
 uint
@@ -2043,18 +2416,34 @@ xclGetDeviceClockFreqMHz(xclDeviceHandle handle)
 }
 
 double
-xclGetReadMaxBandwidthMBps(xclDeviceHandle handle)
+xclGetHostReadMaxBandwidthMBps(xclDeviceHandle handle)
 {
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
-  return drv ? drv->xclGetReadMaxBandwidthMBps() : 0.0;
+  return drv ? drv->xclGetHostReadMaxBandwidthMBps() : 0.0;
 }
 
 
 double
-xclGetWriteMaxBandwidthMBps(xclDeviceHandle handle)
+xclGetHostWriteMaxBandwidthMBps(xclDeviceHandle handle)
 {
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
-  return drv ? drv->xclGetWriteMaxBandwidthMBps() : 0.0;
+  return drv ? drv->xclGetHostWriteMaxBandwidthMBps() : 0.0;
+}
+
+
+double
+xclGetKernelReadMaxBandwidthMBps(xclDeviceHandle handle)
+{
+  ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
+  return drv ? drv->xclGetKernelReadMaxBandwidthMBps() : 0.0;
+}
+
+
+double
+xclGetKernelWriteMaxBandwidthMBps(xclDeviceHandle handle)
+{
+  ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
+  return drv ? drv->xclGetKernelWriteMaxBandwidthMBps() : 0.0;
 }
 
 
@@ -2086,7 +2475,7 @@ xclAIEPutCmd(xclDeviceHandle handle, xclAIECmd *cmd)
 }
 
 int
-xclSKCreate(xclDeviceHandle handle, unsigned int boHandle, uint32_t cu_idx)
+xclSKCreate(xclDeviceHandle handle, int *boHandle, uint32_t cu_idx)
 {
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   if (!drv)
@@ -2110,24 +2499,27 @@ xclSKReport(xclDeviceHandle handle, uint32_t cu_idx, xrt_scu_state state)
 int
 xclOpenContext(xclDeviceHandle handle, const uuid_t xclbinId, unsigned int ipIndex, bool shared)
 {
-#ifndef __HWEM__
-  OPEN_CONTEXT_CB;
-#endif
-
-  ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
-
-  return drv ? drv->xclOpenContext(xclbinId, ipIndex, shared) : -EINVAL;
+  return xdp::hal::profiling_wrapper("xclOpenContext",
+  [handle, xclbinId, ipIndex, shared] {
+    try {
+      ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
+      return drv ? drv->xclOpenContext(xclbinId, ipIndex, shared) : -EINVAL;
+    }
+    catch (const xrt_core::error& ex) {
+      xrt_core::send_exception_message(ex.what());
+      return ex.get_code();
+    }
+  }) ;
 }
 
 int
 xclCloseContext(xclDeviceHandle handle, const uuid_t xclbinId, unsigned ipIndex)
 {
-#ifndef __HWEM__
-  CLOSE_CONTEXT_CB;
-#endif
-
+  return xdp::hal::profiling_wrapper("xclCloseContext",
+  [handle, xclbinId, ipIndex] {
   ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
   return drv ? drv->xclCloseContext(xclbinId, ipIndex) : -EINVAL;
+  }) ;
 }
 
 size_t
@@ -2145,25 +2537,19 @@ xclDebugReadIPStatus(xclDeviceHandle handle, xclDebugReadType type,
     return -1;
   switch (type) {
   case XCL_DEBUG_READ_TYPE_LAPC:
-    return drv->xclDebugReadCheckers(reinterpret_cast<xclDebugCheckersResults*>(debugResults));
+    return drv->xclDebugReadCheckers(reinterpret_cast<xdp::LAPCCounterResults*>(debugResults));
   case XCL_DEBUG_READ_TYPE_AIM:
-    return drv->xclDebugReadCounters(reinterpret_cast<xclDebugCountersResults*>(debugResults));
+    return drv->xclDebugReadCounters(reinterpret_cast<xdp::AIMCounterResults*>(debugResults));
   case XCL_DEBUG_READ_TYPE_AM:
-    return drv->xclDebugReadAccelMonitorCounters(reinterpret_cast<xclAccelMonitorCounterResults*>(debugResults));
+    return drv->xclDebugReadAccelMonitorCounters(reinterpret_cast<xdp::AMCounterResults*>(debugResults));
   case XCL_DEBUG_READ_TYPE_ASM:
-    return drv->xclDebugReadStreamingCounters(reinterpret_cast<xclStreamingDebugCountersResults*>(debugResults));
+    return drv->xclDebugReadStreamingCounters(reinterpret_cast<xdp::ASMCounterResults*>(debugResults));
   case XCL_DEBUG_READ_TYPE_SPC:
-    return drv->xclDebugReadStreamingCheckers(reinterpret_cast<xclDebugStreamingCheckersResults*>(debugResults));
+    return drv->xclDebugReadStreamingCheckers(reinterpret_cast<xdp::SPCCounterResults*>(debugResults));
   default:
     ;
   }
   return -1 ;
-}
-
-int
-xclGetDebugProfileDeviceInfo(xclDeviceHandle handle, xclDebugProfileDeviceInfo* info)
-{
-  return 0;
 }
 
 int
@@ -2193,21 +2579,17 @@ xclReClock2(xclDeviceHandle handle, unsigned short region, const unsigned short 
 int
 xclLockDevice(xclDeviceHandle handle)
 {
-#ifndef __HWEM__
-  LOCK_DEVICE_CB;
-#endif
-
+  return xdp::hal::profiling_wrapper("xclLockDevice", [] {
   return 0;
+  }) ;
 }
 
 int
 xclUnlockDevice(xclDeviceHandle handle)
 {
-#ifndef __HWEM__
-  UNLOCK_DEVICE_CB;
-#endif
-
+  return xdp::hal::profiling_wrapper("xclUnlockDevice", [] {
   return 0;
+  }) ;
 }
 
 int
@@ -2244,76 +2626,24 @@ ssize_t
 xclUnmgdPread(xclDeviceHandle handle, unsigned flags, void *buf,
               size_t count, uint64_t offset)
 {
-#ifndef __HWEM__
-  UNMGD_PREAD_CB;
-#endif
-
+  return xdp::hal::profiling_wrapper("xclUnmgdPread", [] {
   return -ENOSYS;
+  }) ;
 }
 
 ssize_t
 xclUnmgdPwrite(xclDeviceHandle handle, unsigned flags, const void *buf,
                size_t count, uint64_t offset)
 {
-#ifndef __HWEM__
-  UNMGD_PWRITE_CB;
-#endif
-
+  return xdp::hal::profiling_wrapper("xclUnmgdPwrite", [] {
   return -ENOSYS;
+  }) ;
 }
 
 int
 xclRegisterInterruptNotify(xclDeviceHandle handle, unsigned int userInterrupt, int fd)
 {
   return 0;
-}
-
-int
-xclCreateWriteQueue(xclDeviceHandle handle, xclQueueContext *q_ctx, void **q_hdl)
-{
-  return -ENOSYS;
-}
-
-int
-xclCreateReadQueue(xclDeviceHandle handle, xclQueueContext *q_ctx, void **q_hdl)
-{
-  return -ENOSYS;
-}
-
-int
-xclDestroyQueue(xclDeviceHandle handle, void *q_hdl)
-{
-  return -ENOSYS;
-}
-
-int
-xclModifyQueue(xclDeviceHandle handle, void *q_hdl)
-{
-  return -ENOSYS;
-}
-
-int
-xclStartQueue(xclDeviceHandle handle, void *q_hdl)
-{
-  return -ENOSYS;
-}
-
-int
-xclStopQueue(xclDeviceHandle handle, void *q_hdl)
-{
-  return -ENOSYS;
-}
-
-ssize_t
-xclWriteQueue(xclDeviceHandle handle, void *q_hdl, xclQueueRequest *wr_req)
-{
-  return -ENOSYS;
-}
-
-ssize_t
-xclReadQueue(xclDeviceHandle handle, void *q_hdl, xclQueueRequest *wr_req)
-{
-  return -ENOSYS;
 }
 
 int
@@ -2393,6 +2723,13 @@ xclIPName2Index(xclDeviceHandle handle, const char *name)
 }
 
 int
+xclIPSetReadRange(xclDeviceHandle handle, uint32_t ipIndex, uint32_t start, uint32_t size)
+{
+    ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
+    return (drv) ? drv->xclIPSetReadRange(ipIndex, start, size) : -ENODEV;
+}
+
+int
 xclLogMsg(xclDeviceHandle handle, xrtLogMsgLevel level, const char* tag,
           const char* format, ...)
 {
@@ -2446,21 +2783,30 @@ xclP2pEnable(xclDeviceHandle handle, bool enable, bool force)
 }
 
 int
-xclUpdateSchedulerStat(xclDeviceHandle handle)
-{
-  return 1; // -ENOSYS;
-}
-
-int 
-xclResetDevice(xclDeviceHandle handle, xclResetKind kind)
+xclCmaEnable(xclDeviceHandle handle, bool enable, uint64_t force)
 {
   return -ENOSYS;
 }
 
 int
+xclUpdateSchedulerStat(xclDeviceHandle handle)
+{
+  return 1; // -ENOSYS;
+}
+
+int
+xclResetDevice(xclDeviceHandle handle, xclResetKind kind)
+{
+  return xclInternalResetDevice(handle, kind);
+}
+
+int
 xclInternalResetDevice(xclDeviceHandle handle, xclResetKind kind)
 {
-  return -ENOSYS;
+  // NOTE: until xclResetDevice is made completely internal,
+  // this wrapper is being used to limit the pragma use to this file
+  ZYNQ::shim *drv = ZYNQ::shim::handleCheck(handle);
+  return drv ? drv->resetDevice(kind) : -ENODEV;
 }
 
 int

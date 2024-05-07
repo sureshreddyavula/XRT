@@ -1,7 +1,7 @@
 /*
  * A GEM style device manager for PCIe based OpenCL accelerators.
  *
- * Copyright (C) 2016-2021 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2016-2022 Xilinx, Inc. All rights reserved.
  *
  * Authors:
  *
@@ -80,10 +80,7 @@
 #define NODE_MSIX_USER "ep_msix_user_00"
 #define NODE_MSIX_MGMT "ep_msix_mgmt_00"
 #define NODE_QDMA "ep_qdma_00"
-#define NODE_QDMA4 "ep_qdma4_00"
-#define NODE_QDMA4_CSR "ep_qdma4_csr_00"
-#define NODE_STM "ep_stream_traffic_manager_00"
-#define NODE_STM4 "ep_stream_traffic_manager4_00"
+#define NODE_QDMA_CSR "ep_qdma4_csr_00"
 #define NODE_CLK_SHUTDOWN "ep_aclk_shutdown_00"
 #define NODE_ERT_BASE "ep_ert_base_address_00"
 #define NODE_ERT_RESET "ep_ert_reset_00"
@@ -99,7 +96,9 @@
 #define NODE_MAILBOX_USER_TO_ERT "ep_mailbox_user_to_ert_00"
 #define NODE_PMC_INTR	"ep_pmc_intr_00"
 #define NODE_PMC_MUX	"ep_pmc_mux_00"
-#define NODE_ERT_UARTLITE "ep_ert_debug_uart_00"
+#define NODE_ERT_UARTLITE_00 "ep_ert_debug_uart_00"
+#define NODE_ERT_UARTLITE_01 "ep_ert_debug_uart_01"
+#define NODE_ERT_UARTLITE_02 "ep_ert_debug_uart_02"
 #define NODE_ERT_CFG_GPIO "ep_ert_config_00"
 #define NODE_INTC_CU_00 "ep_intc_cu_00"
 #define NODE_INTC_CU_01 "ep_intc_cu_01"
@@ -109,6 +108,15 @@
 #define NODE_RESERVED_PSMEM "ep_reserved_ps_mem"
 #define NODE_PS_RESET_CTRL "ep_reset_ps_00"
 #define NODE_ICAP_CONTROLLER "ep_iprog_ctrl_00"
+#define NODE_PCIE "pcie"
+#define NODE_BARS "bars"
+#define NODE_XGQ_SQ_BASE "ep_xgq_mgmt_to_rpu_sq_pi_00"
+#define NODE_XGQ_VMR_PAYLOAD_BASE "ep_xgq_payload_mgmt_00"
+#define NODE_XGQ_USR_SQ_00_BASE "ep_xgq_user_to_apu_sq_pi_00"
+#define NODE_XGQ_USR_SQ_01_BASE "ep_xgq_user_to_apu_sq_pi_01"
+#define NODE_XGQ_USR_SQ_02_BASE "ep_xgq_user_to_apu_sq_pi_02"
+#define NODE_XGQ_USR_SQ_03_BASE "ep_xgq_user_to_apu_sq_pi_03"
+#define NODE_XGQ_USR_RING_BASE "ep_xgq_payload_user_00"
 
 #define PROP_BARM_CTRL "axi_bram_ctrl"
 #define PROP_HWICAP "axi_hwicap"
@@ -149,6 +157,9 @@
 #define RESNAME_INTC_CU_01	NODE_INTC_CU_01
 #define RESNAME_INTC_CU_02	NODE_INTC_CU_02
 #define RESNAME_INTC_CU_03	NODE_INTC_CU_03
+#define RESNAME_ERT_CQ_USER    NODE_ERT_CQ_USER
+#define RESNAME_XGQ_USER_SQ	"ep_xgq_user_to_apu_sq_pi"
+#define RESNAME_XGQ_USER_RING	"ep_xgq_payload_user"
 
 #define ERT_SCHED_INTR_ALIAS_00	"interrupt_cu_bank_00"
 #define ERT_SCHED_INTR_ALIAS_01	"interrupt_cu_bank_01"

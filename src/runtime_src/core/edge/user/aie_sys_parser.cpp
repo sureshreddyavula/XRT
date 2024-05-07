@@ -16,8 +16,9 @@
 
 #include "aie_sys_parser.h"
 #include <boost/format.hpp>
-#include <boost/filesystem.hpp>
 #include <boost/property_tree/json_parser.hpp>
+
+#include <filesystem>
 
 std::fstream aie_sys_parser::sysfs_open_path(const std::string& path,
                                              bool write, bool binary)
@@ -143,9 +144,9 @@ aie_sys_parser::addrecursive(const int col, const int row, const std::string& ta
  * If present, reads and parse the content of each sysfs.
  */
 boost::property_tree::ptree
-aie_sys_parser::aie_sys_read(const int col,const int row)
+aie_sys_parser::aie_sys_read(const int col, const int row)
 {
-    const static std::vector<std::string> tags{"core","dma","lock","errors","event"};
+    const static std::vector<std::string> tags{"core","dma","lock","errors","event","bd"};
     std::vector<std::string> data;
     boost::property_tree::ptree pt;
     for(auto& tag:tags) {
@@ -159,10 +160,10 @@ aie_sys_parser::aie_sys_read(const int col,const int row)
     return pt;	
 }
 
-aie_sys_parser *aie_sys_parser::get_parser()
+aie_sys_parser *aie_sys_parser::get_parser(const std::string& aiepart)
 {
-    //TODO: get partition id from xclbin but its not supported currently.
-    static aie_sys_parser dev("/sys/class/aie/aiepart_0_50/");
+    const std::string sroot = "/sys/class/aie/aiepart_" + aiepart + "/";
+    static aie_sys_parser dev(sroot);
     return &dev;
 }
 

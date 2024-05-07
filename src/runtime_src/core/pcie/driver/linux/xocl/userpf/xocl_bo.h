@@ -44,6 +44,20 @@
 #define XOCL_BO_EXECBUF		(XOCL_HOST_MEM | XOCL_DRV_ALLOC | XOCL_DRM_SHMEM)
 #define XOCL_BO_CMA		(XOCL_HOST_MEM | XOCL_CMA_MEM)
 
+/*
+ * BO Usage stats stored in an array in drm_device.
+ * BO types are tracked: P2P, EXECBUF, etc
+ * BO usage stats to be shown in sysfs & with xbutil
+*/
+#define XOCL_BO_USAGE_TOTAL	7
+#define XOCL_BO_USAGE_NORMAL	0 //Array indexes
+#define XOCL_BO_USAGE_USERPTR	1
+#define XOCL_BO_USAGE_P2P	2
+#define XOCL_BO_USAGE_DEV_ONLY	3
+#define XOCL_BO_USAGE_IMPORT	4
+#define XOCL_BO_USAGE_EXECBUF	5
+#define XOCL_BO_USAGE_CMA	6
+
 #define XOCL_BO_DDR0 (1 << 0)
 #define XOCL_BO_DDR1 (1 << 1)
 #define XOCL_BO_DDR2 (1 << 2)
@@ -54,6 +68,17 @@
  * be accessed over ARE
  */
 #define XOCL_BO_ARE  (1 << 26)
+
+// Linux 5.18 uses iosys-map instead of dma-buf-map
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0) || defined(RHEL_8_7_GE) && !defined(RHEL_9_0)
+	#define XOCL_MAP_TYPE iosys_map
+	#define XOCL_MAP_SET_VADDR iosys_map_set_vaddr
+	#define XOCL_MAP_IS_NULL iosys_map_is_null
+#else
+	#define XOCL_MAP_TYPE dma_buf_map
+	#define XOCL_MAP_SET_VADDR dma_buf_map_set_vaddr
+	#define XOCL_MAP_IS_NULL dma_buf_map_is_null
+#endif
 
 static inline bool xocl_bo_userptr(const struct drm_xocl_bo *bo)
 {
@@ -103,7 +128,28 @@ static inline struct drm_xocl_dev *bo_xocl_dev(const struct drm_xocl_bo *bo)
 
 static inline unsigned xocl_bo_ddr_idx(unsigned user_flags)
 {
-        return user_flags & XRT_BO_FLAGS_MEMIDX_MASK;
+	struct xcl_bo_flags bo_flag = {};
+
+	bo_flag.flags = user_flags & XRT_BO_FLAGS_MEMIDX_MASK;
+	return bo_flag.bank; 
+}
+
+static inline unsigned xocl_bo_slot_idx(unsigned user_flags)
+{
+	struct xcl_bo_flags bo_flag = {};
+
+	bo_flag.flags = user_flags & XRT_BO_FLAGS_MEMIDX_MASK;
+	return bo_flag.slot; 
+}
+
+static inline uint32_t xocl_bo_set_slot_idx(unsigned user_flags, uint32_t slot_id)
+{
+	struct xcl_bo_flags bo_flag = {};
+
+	bo_flag.flags = user_flags & XRT_BO_FLAGS_MEMIDX_MASK;
+	bo_flag.slot = slot_id;
+
+	return bo_flag.flags; 
 }
 
 static inline unsigned xocl_bo_type(unsigned user_flags)
@@ -141,6 +187,8 @@ static inline bool xocl_bo_sync_able(unsigned bo_flags)
 		|| (bo_flags & XOCL_CMA_MEM) || (bo_flags & XOCL_P2P_MEM);
 }
 
+void xocl_bo_get_usage_stat(struct xocl_drm *drm_p, u32 bo_idx,
+	struct drm_xocl_mm_stat *pstat);
 int xocl_create_bo_ioctl(struct drm_device *dev, void *data,
 	struct drm_file *filp);
 int xocl_userptr_bo_ioctl(struct drm_device *dev, void *data,
@@ -178,8 +226,15 @@ int xocl_sync_bo_callback_ioctl(struct drm_device *dev, void *data,
 struct sg_table *xocl_gem_prime_get_sg_table(struct drm_gem_object *obj);
 struct drm_gem_object *xocl_gem_prime_import_sg_table(struct drm_device *dev,
 	struct dma_buf_attachment *attach, struct sg_table *sgt);
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0) && !defined(RHEL_8_5_GE)
 void *xocl_gem_prime_vmap(struct drm_gem_object *obj);
 void xocl_gem_prime_vunmap(struct drm_gem_object *obj, void *vaddr);
+#else
+int xocl_gem_prime_vmap(struct drm_gem_object *obj, struct XOCL_MAP_TYPE *map);
+void xocl_gem_prime_vunmap(struct drm_gem_object *obj, struct XOCL_MAP_TYPE *map);
+#endif
+
 int xocl_gem_prime_mmap(struct drm_gem_object *obj, struct vm_area_struct *vma);
 int xocl_copy_import_bo(struct drm_device *dev, struct drm_file *filp,
 	struct ert_start_copybo_cmd *cmd);

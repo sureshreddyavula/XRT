@@ -1,5 +1,6 @@
 /**
- * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2016-2022 Xilinx, Inc
+ * Copyright (C) 2023-2024 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -17,19 +18,21 @@
 #ifndef HAL_DEVICE_OFFLOAD_PLUGIN_DOT_H
 #define HAL_DEVICE_OFFLOAD_PLUGIN_DOT_H
 
-#include <vector>
 #include <map>
+#include <memory>
+#include <vector>
 
 #include "xdp/profile/plugin/device_offload/device_offload_plugin.h"
+
+namespace xrt {
+  class device;
+}
 
 namespace xdp {
 
   // This plugin should be completely agnostic of what the host code profiling
   //  plugin is.  So, this should work with HAL profiling, OpenCL profiling, 
   //  LOP profiling, user events, and any other plugin.
-  // 
-  // This plugin is only responsible for trace.  It has no responsibility
-  //  to read counters unless it is in the service of trace.
   class HALDeviceOffloadPlugin : public DeviceOffloadPlugin
   {
   private:
@@ -37,21 +40,23 @@ namespace xdp {
     //  from a device at any time (even if the user has closed their
     //  handles) we need to open all the devices and keep our own handles
     //  to them.
-    std::vector<void*> deviceHandles ;
+    std::vector<std::unique_ptr<xrt::device>> xrtDevices ;
     std::map<uint64_t, void*> deviceIdToHandle ;
 
-    XDP_EXPORT virtual void readTrace() ;
+    virtual void readTrace() ;
+
+    // When trying to determine the path to the debug_ip_layout file,
+    //  we need to call the C-interface function xclGetDebugIPlayoutPath
+    //  function, which takes a preallocated char* and size.
+    constexpr static int maxPathLength = 512 ;
 
   public:
-    XDP_EXPORT HALDeviceOffloadPlugin() ;
-    XDP_EXPORT ~HALDeviceOffloadPlugin() ;
-
-    // Virtual functions from XDPPlugin
-    XDP_EXPORT virtual void writeAll(bool openNewFiles) ;
+    HALDeviceOffloadPlugin() ;
+    ~HALDeviceOffloadPlugin() ;
 
     // Virtual functions from DeviceOffloadPlugin
-    XDP_EXPORT virtual void flushDevice(void* device) ;
-    XDP_EXPORT virtual void updateDevice(void* device) ;
+    virtual void flushDevice(void* device) ;
+    virtual void updateDevice(void* device) ;
   } ;
 
 } // end namespace xdp

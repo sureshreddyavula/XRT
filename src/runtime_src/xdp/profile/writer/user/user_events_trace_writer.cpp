@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2020 Xilinx, Inc
+ * Copyright (C) 2022 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -25,9 +26,9 @@ namespace xdp {
 
   UserEventsTraceWriter::UserEventsTraceWriter(const char* filename) :
     VPTraceWriter(filename,
-		  "1.1",
-		  getCurrentDateTime(),
-		  9 /* ns */),
+                  "1.1",
+                  getCurrentDateTime(),
+                  9 /* ns */),
     bucketId(1)
   {
   }
@@ -45,10 +46,10 @@ namespace xdp {
   void UserEventsTraceWriter::writeStructure()
   {
     fout << "STRUCTURE" << std::endl ;
-    fout << "Group_Start,User Events" << std::endl ;
-    fout << "Dynamic_Row," << bucketId << ",General,User Events from APIs"
-	 << std::endl ;
-    fout << "Group_End,User Events" << std::endl ;
+    fout << "Group_Start,User and Internal Events" << std::endl ;
+    fout << "Dynamic_Row," << bucketId << ",General,User Events from APIs and Internally Generated Events"
+         << std::endl ;
+    fout << "Group_End,User and Internal Events" << std::endl ;
   }
 
   void UserEventsTraceWriter::writeStringTable()
@@ -59,17 +60,15 @@ namespace xdp {
 
   void UserEventsTraceWriter::writeTraceEvents()
   {
-    fout << "EVENTS" << std::endl ;
+    fout << "EVENTS\n";
     std::vector<VTFEvent*> userEvents = 
-      (db->getDynamicInfo()).filterEvents( [](VTFEvent* e)
-					   {
-					     return e->isUserEvent() ;
-					   }
-					 ) ;
+      db->getDynamicInfo().copySortedHostEvents( [](VTFEvent* e)
+                                                 {
+                                                   return e->isUserEvent();
+                                                 }
+                                               );
     for (auto e : userEvents)
-    {
       e->dump(fout, bucketId) ;
-    }
   }
 
   void UserEventsTraceWriter::writeDependencies()

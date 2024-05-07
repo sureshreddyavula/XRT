@@ -1,6 +1,6 @@
 /**
- * Copyright (C) 2018, 2020-2021 Xilinx, Inc
- *
+ * Copyright (C) 2018, 2020-2023 Xilinx, Inc. All rights reserved.
+ * Copyright (C) 2023-2024 Advanced Micro Devices, Inc. All rights reserved.
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
  * License is located at
@@ -19,17 +19,33 @@
 #include "Section.h"                           // TODO: REMOVE SECTION INCLUDE
 #include "XclBinClass.h"
 
-#include <iostream>
-#include <fstream>
-#include <iomanip>
-#include <memory>
-#include <string.h>
-#include <inttypes.h>
-#include <vector>
+#include <boost/algorithm/string/join.hpp>
+#include <boost/format.hpp>
+#include <boost/property_tree/json_parser.hpp>
 #include <boost/uuid/uuid.hpp>          // for uuid
 #include <boost/uuid/uuid_io.hpp>       // for to_string
-#include <boost/property_tree/json_parser.hpp>
+#include <boost/version.hpp>
+#include <filesystem>
+#include <fstream>
+#include <inttypes.h>
+#include <iomanip>
+#include <iostream>
+#include <memory>
+#include <vector>
 
+#if (BOOST_VERSION >= 106400)
+
+#ifdef _WIN32
+#define _WIN32_WINNT 0x0501
+#pragma warning (disable : 4244) // Addresses Boost conversion Windows build warnings
+#endif  
+
+#include <boost/asio/io_service.hpp>
+#include <boost/process.hpp>
+#include <boost/process/child.hpp>
+#include <boost/process/env.hpp>
+#include <boost/process/search_path.hpp>
+#endif
 
 
 #ifdef _WIN32
@@ -39,6 +55,7 @@
 #endif
 
 namespace XUtil = XclBinUtilities;
+namespace fs = std::filesystem;
 
 static bool m_bVerbose = false;
 static bool m_bQuiet = false;
@@ -71,6 +88,10 @@ void XclBinUtilities::QUIET(const std::string &_msg) {
   }
 }
 
+void XclBinUtilities::QUIET(const boost::format& fmt) {
+  QUIET(boost::str(fmt));
+}
+
 
 void
 XclBinUtilities::TRACE(const std::string& _msg, bool _endl) {
@@ -81,6 +102,11 @@ XclBinUtilities::TRACE(const std::string& _msg, bool _endl) {
 
   if (_endl)
     std::cout << std::endl << std::flush;
+}
+
+void 
+XclBinUtilities::TRACE(const boost::format &fmt, bool endl) {
+  TRACE(boost::str(fmt), endl);
 }
 
 
@@ -297,7 +323,7 @@ XclBinUtilities::hexStringToBinaryBuffer(const std::string& _inputString,
 
   if (_inputString.length() != _bufferSize * 2) {
     std::string errMsg = "Error: hexStringToBinaryBuffer - Input string is not the same size as the given buffer";
-    XUtil::TRACE(XUtil::format("InputString: %d (%s), BufferSize: %d", _inputString.length(), _inputString.c_str(), _bufferSize));
+    XUtil::TRACE(boost::format("InputString: %d (%s), BufferSize: %d") %  _inputString.length() % _inputString % _bufferSize);
     throw std::runtime_error(errMsg);
   }
 
@@ -311,57 +337,22 @@ XclBinUtilities::hexStringToBinaryBuffer(const std::string& _inputString,
   }
 }
 
-#ifdef _WIN32
 uint64_t
 XclBinUtilities::stringToUInt64(const std::string& _sInteger, bool _bForceHex) {
-  uint64_t value = 0;
-
   // Is it a hex value
-  if ( _bForceHex || 
-       ((_sInteger.length() > 2) &&
-        (_sInteger[0] == '0') && (_sInteger[1] == 'x'))) {
-    if (1 == sscanf_s(_sInteger.c_str(), "%" PRIx64 "", &value)) {
-      return value;
-    }
-  } else {
-    if (1 == sscanf_s(_sInteger.c_str(), "%" PRId64 "", &value)) {
-      return value;
-    }
+  if (_bForceHex) {
+    return std::stoul(_sInteger, nullptr, 16);
   }
 
-  std::string errMsg = "ERROR: Invalid integer string in JSON file: '" + _sInteger + "'";
-  throw std::runtime_error(errMsg);
+  return std::stoul(_sInteger, nullptr, 0); // Allow standard library to determine the base
 }
-#else
-uint64_t
-XclBinUtilities::stringToUInt64(const std::string& _sInteger, bool _bForceHex) {
-  uint64_t value = 0;
-
-  // Is it a hex value
-  if (_bForceHex || 
-      ((_sInteger.length() > 2) &&
-       (_sInteger[0] == '0') && (_sInteger[1] == 'x'))) {
-    if (1 == sscanf(_sInteger.c_str(), "%" PRIx64 "", &value)) {
-      return value;
-    }
-  } else {
-    if (1 == sscanf(_sInteger.c_str(), "%" PRId64 "", &value)) {
-      return value;
-    }
-  }
-
-  std::string errMsg = "ERROR: Invalid integer string in JSON file: '" + _sInteger + "'";
-  throw std::runtime_error(errMsg);
-}
-#endif
 
 void
 XclBinUtilities::printKinds() {
-  std::vector< std::string > kinds;
-  Section::getKinds(kinds);
+  auto supportedKinds = Section::getSupportedKinds();
   std::cout << "All supported section names supported by this tool:\n";
-  for (auto & kind : kinds) {
-    std::cout << "  " << kind << "\n";
+  for (auto & entry : supportedKinds) {
+    std::cout << "  " << entry << "\n";
   }
 }
 
@@ -432,7 +423,7 @@ XclBinUtilities::getSignature(std::fstream& _istream, std::string& _sSignature,
   }
 
   // We have a signature read it in
-  XUtil::SignatureHeader signature = {0};
+  XUtil::SignatureHeader signature = {};
 
   _istream.seekg(signatureOffset);
   _istream.read((char*)&signature, sizeof(XUtil::SignatureHeader));
@@ -441,7 +432,7 @@ XclBinUtilities::getSignature(std::fstream& _istream, std::string& _sSignature,
   if (signature.signedBySize != 0)
   {
     _istream.seekg(signatureOffset + signature.signedByOffset);
-    std::unique_ptr<char> data( new char[ signature.signedBySize ] );
+    std::unique_ptr<char[]> data( new char[ signature.signedBySize ] );
     _istream.read( data.get(), signature.signedBySize );
     _sSignedBy = std::string(data.get(), signature.signedBySize);
   }
@@ -450,7 +441,7 @@ XclBinUtilities::getSignature(std::fstream& _istream, std::string& _sSignature,
   if (signature.signatureSize != 0)
   {
     _istream.seekg(signatureOffset + signature.signatureOffset);
-    std::unique_ptr<char> data( new char[ signature.signatureSize ] );
+    std::unique_ptr<char[]> data( new char[ signature.signatureSize ] );
     _istream.read( data.get(), signature.signatureSize );
     _sSignature = std::string(data.get(), signature.signatureSize);
   }
@@ -533,7 +524,7 @@ XclBinUtilities::removeSignature(const std::string& _sInputFile, const std::stri
 void
 createSignatureBufferImage(std::ostringstream& _buf, const std::string & _sSignature, const std::string & _sSignedBy)
 {
-  XUtil::SignatureHeader signature = {0};
+  XUtil::SignatureHeader signature = {};
   std::string magicValue = getSignatureMagicValue();
 
   // Initialize the structure
@@ -635,9 +626,9 @@ static void addConnection( std::vector<boost::property_tree::ptree> & groupConne
                            unsigned int argIndex, unsigned int ipLayoutIndex, unsigned int memIndex)
 {
   boost::property_tree::ptree ptConnection;
-  ptConnection.put("arg_index", XUtil::format("%d", argIndex).c_str());
-  ptConnection.put("m_ip_layout_index", XUtil::format("%d", ipLayoutIndex).c_str());
-  ptConnection.put("mem_data_index", XUtil::format("%d", memIndex).c_str());
+  ptConnection.put("arg_index", (boost::format("%d") % argIndex).str());
+  ptConnection.put("m_ip_layout_index", (boost::format("%d") % ipLayoutIndex).str());
+  ptConnection.put("mem_data_index", (boost::format("%d") % memIndex).str());
 
   groupConnectivity.push_back(ptConnection);
 }
@@ -766,9 +757,9 @@ createMemoryBankGroupEntries( std::vector<WorkingConnection> & workingConnection
     {
       const boost::optional<std::string> sSizeBytes = ptGroupMemory.get_optional<std::string>("m_size");
       if (sSizeBytes.is_initialized()) 
-        ptGroupMemory.put("m_size", XUtil::format("0x%lx", groupSize).c_str());
+        ptGroupMemory.put("m_size", (boost::format("0x%lx") % groupSize).str());
       else 
-        ptGroupMemory.put("m_sizeKB", XUtil::format("0x%lx", groupSize / 1024).c_str());
+        ptGroupMemory.put("m_sizeKB", (boost::format("0x%lx") % (groupSize / 1024)).str());
 
       // Add a tag value to indicate that this entry was the result of grouping memories
       std::vector<int> memIndexVector;
@@ -852,18 +843,18 @@ validateMemoryBankGroupEntries( const unsigned int startGroupMemIndex,
         // Do we have a duplicate entry
         const unsigned int searchMemIndex = groupConnectivity[searchIndex].get<unsigned int>("mem_data_index");
         if (searchMemIndex == memIndex) {
-          std::string errMsg = XUtil::format("ERROR: Connection indexes at %d and %d in the GROUP_CONNECTIVITY section are duplicates of each other.", index, searchIndex);
-          throw std::runtime_error(errMsg);
+          auto errMsg = boost::format("ERROR: Connection indexes at %d and %d in the GROUP_CONNECTIVITY section are duplicates of each other.") % index % searchIndex;
+          throw std::runtime_error(errMsg.str());
         }
 
         // Memory connectivity is not continuous (when using grouped memories)
-        std::string errMsg = XUtil::format("ERROR: Invalid memory grouping (not continuous).\n"
-                                           "       Connection:\n"
-                                           "           arg_index       : %d\n"
-                                           "           ip_layout_index : %d\n"
-                                           "           mem_data_index  : %d (group)\n"
-                                           "       is also connected to mem_data_index %d.\n", argIndex, ipLayoutIndex, memIndex, searchMemIndex);
-        throw std::runtime_error(errMsg);
+        auto errMsg = boost::format("ERROR: Invalid memory grouping (not continuous).\n"
+                                    "       Connection:\n"
+                                    "           arg_index       : %d\n"
+                                    "           ip_layout_index : %d\n"
+                                    "           mem_data_index  : %d (group)\n"
+                                    "       is also connected to mem_data_index %d.\n") % argIndex % ipLayoutIndex % memIndex % searchMemIndex;
+        throw std::runtime_error(errMsg.str());
       }
     }
   }
@@ -888,7 +879,7 @@ transformMemoryBankGroupingCollections(const std::vector<boost::property_tree::p
 
     // Determine if the connection is a valid grouping connection
     // Algorithm: Look at the memory type and if the memory is used
-    std::string memType = groupTopology[memIndex].get<std::string>("m_type");
+    auto memType = groupTopology[memIndex].get<std::string>("m_type");
     if (memType.compare("MEM_DRAM") == 0)
         memType = "MEM_HBM";
 
@@ -937,7 +928,7 @@ XclBinUtilities::createMemoryBankGrouping(XclBin & xclbin)
 
   boost::property_tree::ptree ptMemTopology;
   pMemTopology->getPayload(ptMemTopology);
-  const std::vector<boost::property_tree::ptree> memTopology = XUtil::as_vector<boost::property_tree::ptree>(ptMemTopology.get_child("mem_topology"), "m_mem_data");
+  const auto memTopology = XUtil::as_vector<boost::property_tree::ptree>(ptMemTopology.get_child("mem_topology"), "m_mem_data");
   if ( memTopology.empty() ) {
     std::cout << "Info: MEM_TOPOLOGY section is empty.  No action will be taken to create the GROUP_TOPOLOGY section." << std::endl;
     return;
@@ -953,7 +944,7 @@ XclBinUtilities::createMemoryBankGrouping(XclBin & xclbin)
   if (pConnectivity != nullptr) {
     boost::property_tree::ptree ptConnectivity;
     pConnectivity->getPayload(ptConnectivity);
-    const std::vector<boost::property_tree::ptree> connectivity = XUtil::as_vector<boost::property_tree::ptree>(ptConnectivity.get_child("connectivity"), "m_connection");
+    const auto connectivity = XUtil::as_vector<boost::property_tree::ptree>(ptConnectivity.get_child("connectivity"), "m_connection");
     if ( connectivity.empty() ) {
       std::cout << "Info: CONNECTIVITY section is empty.  No action taken regarding creating the GROUP_CONNECTIVITY section." << std::endl;
     } else {
@@ -961,8 +952,8 @@ XclBinUtilities::createMemoryBankGrouping(XclBin & xclbin)
       for (unsigned int index = 0; index < connectivity.size(); ++index) {
         const unsigned int memIndex = connectivity[index].get<unsigned int>("mem_data_index");
         if (memIndex >= groupTopology.size()) {
-          std::string errMsg = XUtil::format("ERROR: Connectivity section 'mem_data_index' (%d) at index %d exceeds the number of 'mem_topology' elements (%d).  This is usually an indication of corruption in the xclbin archive.", memIndex, index, groupTopology.size());
-          throw std::runtime_error(errMsg);
+          auto errMsg = boost::format("ERROR: Connectivity section 'mem_data_index' (%d) at index %d exceeds the number of 'mem_topology' elements (%d).  This is usually an indication of corruption in the xclbin archive.") % memIndex % index % groupTopology.size();
+          throw std::runtime_error(errMsg.str());
         }
       }
 
@@ -981,7 +972,7 @@ XclBinUtilities::createMemoryBankGrouping(XclBin & xclbin)
       {
         boost::property_tree::ptree ptConnection;
         for (const auto & connection : groupConnectivity) 
-          ptConnection.push_back(std::make_pair("", connection));
+          ptConnection.push_back({"", connection});
     
         boost::property_tree::ptree ptGroupConnection;
         ptGroupConnection.add_child("m_connection", ptConnection);
@@ -1002,7 +993,7 @@ XclBinUtilities::createMemoryBankGrouping(XclBin & xclbin)
   {
     boost::property_tree::ptree ptMemData;
     for (const auto & mem_data : groupTopology) 
-      ptMemData.push_back(std::make_pair("", mem_data));
+      ptMemData.push_back({"", mem_data});
 
     boost::property_tree::ptree ptGroupTopology;
     ptGroupTopology.add_child("m_mem_data", ptMemData);
@@ -1018,8 +1009,216 @@ XclBinUtilities::createMemoryBankGrouping(XclBin & xclbin)
   }
 }
 
+#ifndef _WIN32
+// pdi_transform is only available on Linux
+// pdi_transform is defined in libtransformcdo.a
+extern "C" int pdi_transform(char* pdi_file, char* pdi_file_out, const char* out_file);
+
+int transform_PDI_file(std::string fileName)
+{
+  // pdi_transform prints lots of messages, these messages go to
+  // the third argument of pdi_transform
+  // pdi_transform can either return 0 or ‐1
+  int ret = pdi_transform(fileName.data(), fileName.data(), "transform_out");
+  if (ret != 0) {
+    std::string errMsg = "ERROR: --transform-pdi is specified, but pdi transformation failed, please make sure the pdi files are valid";
+    throw std::runtime_error(errMsg);
+  }
+
+  return ret;
+}
+
+void 
+XclBinUtilities::transformAiePartitionPDIs(XclBin & xclbin)
+{
+  // find all sections with type "AIE_PARTITION" in xclbin
+  // create a temp empty folder on disk, e.g. "ap_temp"
+  // for each section
+  //   dump the content (pdi files) to the temp folder
+  //      <index name>/
+  //          orig/
+  //             aie_partition.json
+  //             1.pdi, 2.pdi ...
+  //   copy orig/ to transform/          
+  //   for each pdi in transform/, call transform_static
+  //      <index name>/
+  //          transform/
+  //             aie_partition.json
+  //             transformed 1.pdi, 2.pdi ...
+  //   construct the string for sections to be removed, add to container A
+  //   construct PSD for the sections in <temp>/<index name>/transform, add to container B
+  // }
+  // for each section in container A
+  //   removeSection(PSD)
+  // for each PSD in container B
+  //   addSection(PSD)
+  // delete the temp dir
+
+  // create a temp directory
+  // fs::current_path or fs::temp_directory_path?
+  std::string apJson = "aie_partition.json";
+  // ap: aie_partition
+  fs::path tempDir = fs::current_path() / "ap_temp";
+
+  std::vector<std::string> removeSections;
+  std::vector<std::string> addSections;
+  std::vector<Section*> sections = xclbin.findSection(AIE_PARTITION, true);
+  for (const auto& pSection : sections) {
+    // get the section name, index
+    std::string sSectionKind = pSection->getSectionKindAsString();
+    std::string sSectionIndex = pSection->getSectionIndexName();
+    std::string sSectionName = pSection->getName();
+    // std::cout << "sSectionKind = " << sSectionKind << std::endl;
+    // std::cout << "sSectionIndex = " << sSectionIndex << std::endl;
+    // std::cout << "sSectionName = " << sSectionName << std::endl;
+
+    // note sSectionIndex could be an empty string
+    fs::path origDir = tempDir / sSectionIndex / "orig";
+    fs::path transformDir = tempDir / sSectionIndex / "transform";
+    fs::path origApJsonPath = origDir / apJson;
+    fs::path tranApJsonPath = transformDir / apJson;
+    // std::cout << "origDir = " << origDir.string() << std::endl;
+
+    try {
+      fs::create_directories(origDir);
+    }
+    catch (std::exception& e) { // Not using fs::filesystem_error since std::bad_alloc can throw too.
+      // if we couldn't create directory, usually something fundamental is wrong (e.g. user has no permission) 
+      std::string errMsg = "ERROR: couldn't create directory: " + std::string(e.what());
+      throw std::runtime_error(errMsg);
+    }
+    // std::cout << "Temporary directory created: " << origDir << std::endl;
+
+    // construct the PSD for dumpЅection
+    std::string sDumpSection = sSectionKind + "[" + sSectionIndex + "]:JSON:" + origApJsonPath.string();
+    // std::cout << "sDumpSection = " << sDumpSection << std::endl;
+    ParameterSectionData dumpPsd(sDumpSection);
+    xclbin.dumpSection(dumpPsd);
+
+    std::string sRemoveSection = sSectionKind + "[" + sSectionIndex + "]";
+    removeSections.push_back(sRemoveSection);
+
+    // after dumpSection, <temp>/<index name>/orig/ should be populated with pdi files
+    // copy it to <temp>/<index name>/transform/
+    fs::copy(origDir, transformDir);
+
+    // transform the pdi in the transform/ folder
+    // Iterate over the files in the directory
+    for (const auto& entry : fs::directory_iterator(transformDir)) {
+      if (!fs::is_regular_file(entry) || entry.path().extension() != ".pdi")
+        continue;
+
+      // std::cout << "pdi file found: " << entry.path() << std::endl;
+      // if transform_static fails, exec() throws, so no need to
+      // check the return value
+      transform_PDI_file(entry.path().string());
+      XUtil::TRACE("pdi file transformed: " + entry.path().string());
+    }
+
+    // construct the PSD for addЅection
+    std::string sAddSection = sSectionKind + "[" + sSectionIndex + "]:JSON:" + tranApJsonPath.string();
+    // std::cout << "sAddSection = " << sAddSection << std::endl;
+    addSections.push_back(sAddSection);
+  }
+
+  // remove the sections in removeSections
+  for (const auto& sectionToRemove : removeSections)
+    // std::cout << "remove section " << sectionToRemove << std::endl;
+    xclbin.removeSection(sectionToRemove);
+
+  // add the sections in transform folder
+  for (const auto& sAddSection : addSections) {
+    // std::cout << "add section " << sAddSection << std::endl;
+    ParameterSectionData addPsd(sAddSection);
+    xclbin.addSection(addPsd);
+  }
+
+  // delete the temp dir
+  fs::remove_all(tempDir);
+}
+#endif
 
 
+#if (BOOST_VERSION >= 106400)
+int 
+XclBinUtilities::exec(const fs::path &cmd,
+                      const std::vector<std::string> &args,
+                      bool bThrow,
+                      std::ostringstream & os_stdout,
+                      std::ostringstream & os_stderr)
+{
+  //boost::process::ipstream ip_stdout;
+  //boost::process::ipstream ip_stderr;
+  std::future<std::string> data_stdout;
+  std::future<std::string> data_stderr;
 
+  boost::asio::io_service svc;
+  boost::process::child runningProcess( cmd.string(), 
+                                        args, 
+                                        boost::process::std_out > data_stdout,
+                                        boost::process::std_err > data_stderr,
+                                        boost::this_process::environment(),
+                                        svc);
+  svc.run();   
+  runningProcess.wait();
+
+  // Update the return buffers
+  os_stdout << data_stdout.get();
+  os_stderr << data_stderr.get();
+
+  // Obtain the exit code from the running process
+  int exitCode = runningProcess.exit_code();
+
+  if (exitCode != 0) {
+    auto errMsg = boost::format("Error: Shell command exited with a non-zero value (%d)\n"
+                                "     Cmd: %s %s\n"
+                                "  StdOut: %s\n"
+                                "  StdErr: %s\n")
+                                % exitCode 
+                                % cmd.string() % boost::algorithm::join(args, " ")
+                                % os_stdout.str()
+                                % os_stderr.str();
+    if (bThrow) 
+      throw std::runtime_error(errMsg.str());
+  }
+
+  return exitCode;
+}
+
+#else
+int 
+XclBinUtilities::exec(const fs::path &cmd,
+                      const std::vector<std::string> &args,
+                      bool bThrow,
+                      std::ostringstream & os_stdout,
+                      std::ostringstream & os_stderr)
+{
+  // Build the command line
+  const std::string cmdLine = cmd.string() + " " + boost::algorithm::join(args, " ");
+
+  std::array<char, 128> buffer;
+  std::string result;
+  std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(cmdLine.c_str(), "r"), pclose);
+  if (!pipe) {
+    auto errMsg = boost::format("Error: Shell command failed\n"
+                                "       Cmd: %s %s\n")
+                                % cmd.string() % boost::algorithm::join(args, " ");
+                                      
+    if (bThrow) 
+      throw std::runtime_error(errMsg.str());
+
+    return 1;
+  }
+
+  while (fgets(buffer.data(), buffer.size(), pipe.get()) != nullptr) 
+    result += buffer.data();
+
+  os_stdout << result;
+
+  return 0;                   
+}
+
+
+#endif
 
 

@@ -2,13 +2,14 @@
 /*
  * Xilinx Alveo CU Sub-device Driver
  *
- * Copyright (C) 2020 Xilinx, Inc.
+ * Copyright (C) 2020-2022 Xilinx, Inc.
  *
  * Authors: min.ma@xilinx.com
  */
 
 #include "xocl_drv.h"
 #include "xrt_cu.h"
+#include "cu_xgq.h"
 
 #define XCU_INFO(xcu, fmt, arg...) \
 	xocl_info(&xcu->pdev->dev, fmt "\n", ##arg)
@@ -25,32 +26,38 @@ struct xocl_cu {
 	struct platform_device	*pdev;
 	DECLARE_BITMAP(flag, 1);
 	spinlock_t		 lock;
+	/*
+	 * This RW lock is to protect the cu sysfs nodes exported
+	 * by xocl driver.
+	 */
+	rwlock_t		 attr_rwlock;
 };
 
 static ssize_t debug_show(struct device *dev,
 	struct device_attribute *attr, char *buf)
 {
-#if 0
 	struct platform_device *pdev = to_platform_device(dev);
 	struct xocl_cu *cu = platform_get_drvdata(pdev);
 	struct xrt_cu *xcu = &cu->base;
-#endif
-	/* Place holder for now. */
-	return 0;
+
+	return sprintf(buf, "%d\n", xcu->debug);
 }
 
 static ssize_t debug_store(struct device *dev,
 	struct device_attribute *da, const char *buf, size_t count)
 {
-#if 0
 	struct platform_device *pdev = to_platform_device(dev);
 	struct xocl_cu *cu = platform_get_drvdata(pdev);
 	struct xrt_cu *xcu = &cu->base;
-#endif
-	/* Place holder for now. */
+	u32 debug;
+
+	if (kstrtou32(buf, 10, &debug) == -EINVAL)
+		return -EINVAL;
+
+	xcu->debug = debug;
+
 	return count;
 }
-
 static DEVICE_ATTR_RW(debug);
 
 static ssize_t
@@ -159,15 +166,97 @@ size_show(struct device *dev, struct device_attribute *attr, char *buf)
 }
 static DEVICE_ATTR_RO(size);
 
-static ssize_t
-stat_show(struct device *dev, struct device_attribute *attr, char *buf)
+static ssize_t 
+stats_begin_show(struct device *dev, struct device_attribute *attr, char *buf)
 {
+	ssize_t sz = 0;
+
 	struct platform_device *pdev = to_platform_device(dev);
 	struct xocl_cu *cu = platform_get_drvdata(pdev);
 
-	return show_formatted_cu_stat(&cu->base, buf);
+	read_lock(&cu->attr_rwlock);
+	sz = show_stats_begin(&cu->base, buf);
+	read_unlock(&cu->attr_rwlock);
+
+	return sz;
+}
+static DEVICE_ATTR_RO(stats_begin);
+
+static ssize_t 
+stats_end_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	ssize_t sz = 0;
+
+	struct platform_device *pdev = to_platform_device(dev);
+	struct xocl_cu *cu = platform_get_drvdata(pdev);
+
+	read_lock(&cu->attr_rwlock);
+	sz = show_stats_end(&cu->base, buf);
+	read_unlock(&cu->attr_rwlock);
+
+	return sz;
+}
+static DEVICE_ATTR_RO(stats_end);
+
+static ssize_t
+stat_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	ssize_t sz = 0;
+
+	struct platform_device *pdev = to_platform_device(dev);
+	struct xocl_cu *cu = platform_get_drvdata(pdev);
+
+	read_lock(&cu->attr_rwlock);
+	sz = show_formatted_cu_stat(&cu->base, buf);
+	read_unlock(&cu->attr_rwlock);
+
+	return sz;
 }
 static DEVICE_ATTR_RO(stat);
+
+static ssize_t
+is_ucu_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct xocl_cu *cu = platform_get_drvdata(pdev);
+	int is_ucu;
+
+	is_ucu = test_bit(0, cu->base.is_ucu);
+	return sprintf(buf, "%d\n", is_ucu);
+}
+static DEVICE_ATTR_RO(is_ucu);
+
+static ssize_t
+crc_buf_show(struct file *filp, struct kobject *kobj,
+	     struct bin_attribute *attr, char *buf,
+	     loff_t offset, size_t count)
+{
+	struct device *dev = container_of(kobj, struct device, kobj);
+	struct xocl_cu *cu = (struct xocl_cu *)dev_get_drvdata(dev);
+	struct xrt_cu *xcu;
+
+	if (!cu)
+		return 0;
+
+	xcu = &cu->base;
+	return xrt_cu_circ_consume_all(xcu, buf, count);
+}
+
+static ssize_t
+read_range_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct xocl_cu *cu = platform_get_drvdata(pdev);
+	u32 start = 0;
+	u32 end = 0;
+
+	mutex_lock(&cu->base.read_regs.xcr_lock);
+	start = cu->base.read_regs.xcr_start;
+	end = cu->base.read_regs.xcr_end;
+	mutex_unlock(&cu->base.read_regs.xcr_lock);
+	return sprintf(buf, "0x%x 0x%x\n", start, end);
+}
+static DEVICE_ATTR_RO(read_range);
 
 static struct attribute *cu_attrs[] = {
 	&dev_attr_debug.attr,
@@ -178,18 +267,39 @@ static struct attribute *cu_attrs[] = {
 	&dev_attr_name.attr,
 	&dev_attr_base_paddr.attr,
 	&dev_attr_size.attr,
+	&dev_attr_stats_begin.attr,
+	&dev_attr_stats_end.attr,
 	&dev_attr_stat.attr,
+	&dev_attr_is_ucu.attr,
+	&dev_attr_read_range.attr,
+	NULL,
+};
+
+static struct bin_attribute crc_buf_attr = {
+	.attr = {
+		.name = "crc_buf",
+		.mode = 0444
+	},
+	.read = crc_buf_show,
+	.write = NULL,
+	.size = 0,
+};
+
+static struct bin_attribute *cu_bin_attrs[] = {
+	&crc_buf_attr,
 	NULL,
 };
 
 static const struct attribute_group cu_attrgroup = {
 	.attrs = cu_attrs,
+	.bin_attrs = cu_bin_attrs,
 };
 
 irqreturn_t cu_isr(int irq, void *arg)
 {
 	struct xocl_cu *xcu = arg;
 
+	xrt_cu_circ_produce(&xcu->base, CU_LOG_STAGE_ISR, 0);
 	xrt_cu_clear_intr(&xcu->base);
 
 	up(&xcu->base.sem_cu);
@@ -256,6 +366,19 @@ static int configure_irq(struct xrt_cu *xrt_cu, bool enable)
 	struct xrt_cu_info *info = &xrt_cu->info;
 	unsigned long flags;
 
+	if (!test_bit(0, xrt_cu->is_ucu)) {
+		if (enable) {
+			xocl_intc_cu_request(xdev, info->intr_id, cu_isr, xcu);
+			xocl_intc_cu_config(xdev, info->intr_id, true);
+		} else {
+			xocl_intc_cu_config(xdev, info->intr_id, false);
+			xocl_intc_cu_request(xdev, info->intr_id, NULL, NULL);
+		}
+
+		return 0;
+	}
+
+	/* User manage interrupt */
 	spin_lock_irqsave(&xcu->lock, flags);
 	if (enable) {
 		if (__test_and_clear_bit(IRQ_DISABLED, xcu->flag))
@@ -269,56 +392,16 @@ static int configure_irq(struct xrt_cu *xrt_cu, bool enable)
 	return 0;
 }
 
-static int cu_add_args(struct xocl_cu *xcu, struct kernel_info *kinfo)
-{
-	struct xrt_cu_arg *args = NULL;
-	int i;
-
-	/* If there is no detail kernel information, maybe it is a manualy
-	 * created xclbin. Print warning and let it go through
-	 */
-	if (!kinfo) {
-		XCU_WARN(xcu, "CU %s metadata not found, xclbin maybe corrupted",
-			 xcu->base.info.iname);
-		xcu->base.info.num_args = 0;
-		xcu->base.info.args = NULL;
-		return 0;
-	}
-
-	args = vmalloc(sizeof(struct xrt_cu_arg) * kinfo->anums);
-	if (!args)
-		return -ENOMEM;
-
-	if (kinfo) {
-		for (i = 0; i < kinfo->anums; i++) {
-			strcpy(args[i].name, kinfo->args[i].name);
-			args[i].offset = kinfo->args[i].offset;
-			args[i].size = kinfo->args[i].size;
-			args[i].dir = kinfo->args[i].dir;
-		}
-		xcu->base.info.num_args = kinfo->anums;
-		xcu->base.info.args = args;
-	}
-
-	return 0;
-}
-
-static void cu_del_args(struct xocl_cu *xcu)
-{
-	if (xcu->base.info.args)
-		vfree(xcu->base.info.args);
-}
-
 static int cu_probe(struct platform_device *pdev)
 {
 	xdev_handle_t xdev = xocl_get_xdev(pdev);
-	struct xocl_cu *xcu;
-	struct resource **res;
-	struct xrt_cu_info *info;
-	struct kernel_info *krnl_info;
+	struct xocl_cu *xcu = NULL;
+	struct resource **res = NULL;
+	struct xrt_cu_info *info = NULL;
 	struct xrt_cu_arg *args = NULL;
+	uint32_t subdev_inst_idx = 0;
 	int err = 0;
-	int i;
+	int i = 0;
 
 	/* Not using xocl_drvinst_alloc here. Because it would quickly run out
 	 * of memory when there are a lot of cards. Since user cannot open CU
@@ -333,48 +416,34 @@ static int cu_probe(struct platform_device *pdev)
 
 	info = XOCL_GET_SUBDEV_PRIV(&pdev->dev);
 	BUG_ON(!info);
-	memcpy(&xcu->base.info, info, sizeof(struct xrt_cu_info));
 
-	switch (info->protocol) {
-	case CTRL_HS:
-	case CTRL_CHAIN:
-	case CTRL_NONE:
-		xcu->base.info.model = XCU_HLS;
-		break;
-	case CTRL_FA:
-		xcu->base.info.model = XCU_FA;
-		break;
-	default:
-		XCU_ERR(xcu, "Unknown protocol");
+	subdev_inst_idx = XOCL_SUBDEV_INST_IDX(&pdev->dev);
+	if (subdev_inst_idx == INVALID_INST_INDEX) {
+		XCU_ERR(xcu, "Unknown Instance index");
 		return -EINVAL;
 	}
 
-	if (!xcu->base.info.is_m2m) {
-		krnl_info = xocl_query_kernel(xdev, info->kname);
-		err = cu_add_args(xcu, krnl_info);
-		if (err)
-			goto err;
-	} else {
-		/* M2M CU has 3 arguments */
-		args = vmalloc(sizeof(struct xrt_cu_arg) * 3);
+	/* Store subdevice instance index with this CU info.
+	 * This will be required to destroy this subdevice.
+	 */
+	info->inst_idx = subdev_inst_idx;
 
-		strcpy(args[0].name, "src_addr");
-		args[0].offset = 0x10;
-		args[0].size = 8;
-		args[0].dir = DIR_INPUT;
+	memcpy(&xcu->base.info, info, sizeof(struct xrt_cu_info));
 
-		strcpy(args[1].name, "dst_addr");
-		args[1].offset = 0x1C;
-		args[1].size = 8;
-		args[1].dir = DIR_INPUT;
-
-		strcpy(args[2].name, "size");
-		args[2].offset = 0x28;
-		args[2].size = 4;
-		args[2].dir = DIR_INPUT;
-
-		xcu->base.info.num_args = 3;
-		xcu->base.info.args = args;
+	if (xcu->base.info.model == XCU_AUTO) {
+		switch (info->protocol) {
+		case CTRL_HS:
+		case CTRL_CHAIN:
+		case CTRL_NONE:
+			xcu->base.info.model = XCU_HLS;
+			break;
+		case CTRL_FA:
+			xcu->base.info.model = XCU_FA;
+			break;
+		default:
+			XCU_ERR(xcu, "Unknown protocol");
+			return -EINVAL;
+		}
 	}
 
 	res = vzalloc(sizeof(struct resource *) * xcu->base.info.num_res);
@@ -403,11 +472,11 @@ static int cu_probe(struct platform_device *pdev)
 	case XCU_HLS:
 		err = xrt_cu_hls_init(&xcu->base);
 		break;
-	case XCU_PLRAM:
-		err = xrt_cu_plram_init(&xcu->base);
-		break;
 	case XCU_FA:
 		err = xrt_cu_fa_init(&xcu->base);
+		break;
+	case XCU_XGQ:
+		err = xrt_cu_xgq_init(&xcu->base, 0 /* fast path */);
 		break;
 	default:
 		err = -EINVAL;
@@ -417,9 +486,6 @@ static int cu_probe(struct platform_device *pdev)
 		goto err2;
 	}
 
-	/* If mb_scheduler is enable, the intc subdevic would not be created.
-	 * In this case, the err would be -ENODEV. Don't print error message.
-	 */
 	if (info->intr_enable) {
 		err = xocl_intc_cu_request(xdev, info->intr_id, cu_isr, xcu);
 		if (!err)
@@ -432,6 +498,7 @@ static int cu_probe(struct platform_device *pdev)
 			XCU_ERR(xcu, "xocl_intc_cu_config failed, err: %d", err);
 	}
 
+	rwlock_init(&xcu->attr_rwlock);
 	if (sysfs_create_group(&pdev->dev.kobj, &cu_attrgroup))
 		XCU_ERR(xcu, "Not able to create CU sysfs group");
 
@@ -463,7 +530,9 @@ static int cu_remove(struct platform_device *pdev)
 		return -EINVAL;
 
 	(void) sysfs_remove_group(&pdev->dev.kobj, &cu_attrgroup);
+	write_lock(&xcu->attr_rwlock);
 	info = &xcu->base.info;
+	write_unlock(&xcu->attr_rwlock);
 
 	if (info->intr_enable) {
 		err = xocl_intc_cu_config(xdev, info->intr_id, false);
@@ -476,11 +545,11 @@ static int cu_remove(struct platform_device *pdev)
 	case XCU_HLS:
 		xrt_cu_hls_fini(&xcu->base);
 		break;
-	case XCU_PLRAM:
-		xrt_cu_plram_fini(&xcu->base);
-		break;
 	case XCU_FA:
 		xrt_cu_fa_fini(&xcu->base);
+		break;
+	case XCU_XGQ:
+		xrt_cu_xgq_fini(&xcu->base);
 		break;
 	}
 
@@ -488,8 +557,6 @@ static int cu_remove(struct platform_device *pdev)
 
 	if (xcu->base.res)
 		vfree(xcu->base.res);
-
-	cu_del_args(xcu);
 
 	platform_set_drvdata(pdev, NULL);
 

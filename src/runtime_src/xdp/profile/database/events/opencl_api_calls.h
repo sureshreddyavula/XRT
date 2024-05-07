@@ -1,5 +1,6 @@
 /**
  * Copyright (C) 2016-2020 Xilinx, Inc
+ * Copyright (C) 2023 Advanced Micro Devices, Inc. - All rights reserved
  *
  * Licensed under the Apache License, Version 2.0 (the "License"). You may
  * not use this file except in compliance with the License. A copy of the
@@ -27,17 +28,19 @@ namespace xdp {
   {
   private:
     uint64_t queueAddress ;
+    bool isLOP ;
 
     OpenCLAPICall() = delete ;
   public:
-    XDP_EXPORT OpenCLAPICall(uint64_t s_id, double ts, uint64_t f_id, uint64_t name, uint64_t q);
-    XDP_EXPORT ~OpenCLAPICall() ;
+    XDP_CORE_EXPORT OpenCLAPICall(uint64_t s_id, double ts, uint64_t f_id, uint64_t name, uint64_t q, bool l = false);
+    XDP_CORE_EXPORT ~OpenCLAPICall() ;
 
     inline uint64_t getQueueAddress() { return queueAddress ; } 
 
     virtual bool isOpenCLAPI() { return true ; }
-    virtual bool isOpenCLHostEvent() { return true ; }
-    XDP_EXPORT virtual void dump(std::ofstream& fout, uint32_t bucket) ;
+    virtual bool isLOPAPI() { return isLOP ; }
+    virtual bool isOpenCLHostEvent() { return !isLOP ; }
+    XDP_CORE_EXPORT virtual void dump(std::ofstream& fout, uint32_t bucket) ;
   } ;
 
 } // end namespace xdp

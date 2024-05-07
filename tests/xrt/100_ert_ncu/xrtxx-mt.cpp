@@ -1,18 +1,6 @@
-/**
- * Copyright (C) 2020 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2021-2022 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
 
 ////////////////////////////////////////////////////////////////
 // This test uses push scheduling on multiple threads threads that
@@ -22,30 +10,32 @@
 ////////////////////////////////////////////////////////////////
 
 #include "xrt.h"
-#include "xrt/xrt_kernel.h"
+#include "xclbin.h"
 #include "xrt/xrt_bo.h"
 #include "xrt/xrt_device.h"
-#include "xclbin.h"
+#include "xrt/xrt_kernel.h"
 
+#include <atomic>
+#include <cstdlib>
 #include <fstream>
+#include <future>
+#include <iostream>
 #include <list>
 #include <thread>
-#include <atomic>
-#include <iostream>
 #include <vector>
-#include <cstdlib>
 
 #ifdef _WIN32
 # pragma warning ( disable : 4267 )
 #endif
 
-const size_t ELEMENTS = 16;
-const size_t ARRAY_SIZE = 8;
-const size_t MAXCUS = 8;
+static constexpr size_t ELEMENTS = 16;
+static constexpr size_t ARRAY_SIZE = 8;
+static constexpr size_t MAXCUS = 8;
 
-size_t compute_units = MAXCUS;
+static size_t compute_units = MAXCUS;
 
-static void usage()
+static void
+usage()
 {
   std::cout << "usage: %s [options] \n\n";
   std::cout << "  -k <bitstream>\n";
@@ -156,7 +146,7 @@ run_async(const xrt::device& device, const xrt::kernel& kernel)
   return job.runs;
 }
 
-static int
+static void
 run(const xrt::device& device, const xrt::kernel& kernel, size_t num_jobs, size_t seconds)
 {
   std::vector<std::future<size_t>> jobs;
@@ -183,11 +173,10 @@ run(const xrt::device& device, const xrt::kernel& kernel, size_t num_jobs, size_
             << compute_units << " "
             << seconds << " "
             << total << "\n";
-
-  return 0;
 }
 
-int run(int argc, char** argv)
+static int
+run(int argc, char** argv)
 {
   std::vector<std::string> args(argv+1,argv+argc);
 
@@ -239,8 +228,7 @@ int
 main(int argc, char* argv[])
 {
   try {
-    run(argc,argv);
-    return 0;
+    return run(argc,argv);
   }
   catch (const std::exception& ex) {
     std::cout << "TEST FAILED: " << ex.what() << "\n";

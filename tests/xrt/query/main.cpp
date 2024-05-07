@@ -1,31 +1,19 @@
-/**
- * Copyright (C) 2021 Xilinx, Inc
- *
- * Licensed under the Apache License, Version 2.0 (the "License"). You may
- * not use this file except in compliance with the License. A copy of the
- * License is located at
- *
- *     http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
- * WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
- * License for the specific language governing permissions and limitations
- * under the License.
- */
-
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (C) 2021 Xilinx, Inc. All rights reserved.
+// Copyright (C) 2022 Advanced Micro Devices, Inc. All rights reserved.
 #include <iostream>
 #include <stdexcept>
 #include <string>
 
 #include "xrt/xrt_device.h"
 
-/**
- * Exercise some xrt::info::device query parameters as defined in
- * xrt_device.h
- */
+// Exercise some xrt::info::device query parameters as defined in
+// xrt_device.h
+//
+// % g++ -g -std=c++17 -I$XILINX_XRT/include -L$XILINX_XRT/lib -o query.exe main.cpp -lxrt_coreutil -luuid -pthread
 
-static void usage()
+static void
+usage()
 {
     std::cout << "usage: %s [options] -k <bitstream>\n\n";
     std::cout << "  -k <bitstream>\n";
@@ -36,7 +24,8 @@ static void usage()
     std::cout << "* Bitstream is required\n";
 }
 
-int run(int argc, char** argv)
+static int
+run(int argc, char** argv)
 {
   if (argc < 3) {
     usage();
@@ -111,10 +100,23 @@ int run(int argc, char** argv)
     std::cout << device.get_info<xrt::info::device::host>();
   }
 
+  // Equality implemented in 2.14
+  auto device2 = xrt::device{device_index};
+  if (device2 != device) {
+#if XRT_VERSION_CODE >= XRT_VERSION(2,14)
+    throw std::runtime_error("Equality check failed");
+#else
+    std::cout << "device equality not implemented in XRT("
+              << XRT_MAJOR(XRT_VERSION_CODE) << ","
+              << XRT_MINOR(XRT_VERSION_CODE) << ")\n";
+#endif
+  }
+
   return 0;
 }
 
-int main(int argc, char** argv)
+int
+main(int argc, char** argv)
 {
   try {
     auto ret = run(argc, argv);
