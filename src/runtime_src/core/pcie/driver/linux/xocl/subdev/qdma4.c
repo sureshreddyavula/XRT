@@ -1313,10 +1313,18 @@ static ssize_t queue_write_iter(struct kiocb *kiocb, struct iov_iter *io)
 	}
 
 	if (!is_sync_kiocb(kiocb)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
+		return queue_aio_write(kiocb, io->__iov, nr, io->iov_offset);
+#else
 		return queue_aio_write(kiocb, io->iov, nr, io->iov_offset);
+#endif
 	}
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
+	return queue_rw(qdma, queue, true, io->__iov, nr, NULL);
+#else
 	return queue_rw(qdma, queue, true, io->iov, nr, NULL);
+#endif
 }
 
 static ssize_t queue_read_iter(struct kiocb *kiocb, struct iov_iter *io)
@@ -1335,9 +1343,17 @@ static ssize_t queue_read_iter(struct kiocb *kiocb, struct iov_iter *io)
 	}
 
 	if (!is_sync_kiocb(kiocb)) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
+		return queue_aio_read(kiocb, io->__iov, nr, io->iov_offset);
+#else
 		return queue_aio_read(kiocb, io->iov, nr, io->iov_offset);
+#endif
 	}
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
+	return queue_rw(qdma, queue, false, io->__iov, nr, NULL);
+#else
 	return queue_rw(qdma, queue, false, io->iov, nr, NULL);
+#endif
 }
 #endif
 

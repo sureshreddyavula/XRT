@@ -1835,7 +1835,11 @@ static int __init xocl_init(void)
 {
 	int		ret, i = 0;
 
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
 	xrt_class = class_create(THIS_MODULE, "xrt_user");
+#else
+	xrt_class = class_create("xrt_user");
+#endif
 	if (IS_ERR(xrt_class)) {
 		ret = PTR_ERR(xrt_class);
 		goto err_class_create;
@@ -1890,3 +1894,6 @@ MODULE_VERSION(XRT_DRIVER_VERSION);
 MODULE_DESCRIPTION(XOCL_DRIVER_DESC);
 MODULE_AUTHOR("Lizhi Hou <lizhi.hou@xilinx.com>");
 MODULE_LICENSE("GPL v2");
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0)  || defined(RHEL_9_0_GE)
+MODULE_IMPORT_NS(DMA_BUF);
+#endif
