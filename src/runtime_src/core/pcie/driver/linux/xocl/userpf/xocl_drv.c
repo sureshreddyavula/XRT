@@ -1152,7 +1152,7 @@ static void xocl_cma_mem_free(struct xocl_dev *xdev, uint32_t idx)
 
 	if (cma_mem->regular_page) {
 		dma_unmap_page(&xdev->core.pdev->dev, cma_mem->paddr,
-			cma_mem->size, PCI_DMA_BIDIRECTIONAL);
+			cma_mem->size, DMA_BIDIRECTIONAL);
 		__free_pages(cma_mem->regular_page, get_order(cma_mem->size));
 		cma_mem->regular_page = NULL;
 	} else if (cma_mem->pages) {
@@ -1401,7 +1401,7 @@ static int xocl_cma_mem_alloc_by_idx(struct xocl_dev *xdev, uint64_t size, uint3
 	}
 
 	dma_addr = dma_map_page(dev, page, 0, size,
-		PCI_DMA_BIDIRECTIONAL);
+		DMA_BIDIRECTIONAL);
 	if (unlikely(dma_mapping_error(dev, dma_addr))) {
 		DRM_ERROR("Unable to dma map pages");
 		__free_pages(page, order);
@@ -1412,7 +1412,7 @@ static int xocl_cma_mem_alloc_by_idx(struct xocl_dev *xdev, uint64_t size, uint3
 		roundup(PAGE_SIZE, size) >> PAGE_SHIFT);
 
 	if (!cma_mem->pages) {
-		dma_unmap_page(dev, dma_addr, size, PCI_DMA_BIDIRECTIONAL);
+		dma_unmap_page(dev, dma_addr, size, DMA_BIDIRECTIONAL);
 		__free_pages(page, order);
 		return -ENOMEM;
 	}
