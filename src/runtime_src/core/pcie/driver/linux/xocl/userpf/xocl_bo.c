@@ -1250,8 +1250,6 @@ void xocl_gem_prime_vunmap(struct drm_gem_object *obj, struct iosys_map *map)
 }
 #endif
 
-
-
 int xocl_gem_prime_mmap(struct drm_gem_object *obj, struct vm_area_struct *vma)
 {
 	struct drm_xocl_bo *xobj = to_xocl_bo(obj);

@@ -408,7 +408,7 @@ zocl_gem_mmap(struct file *filp, struct vm_area_struct *vma)
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 3, 0)
 	vma->vm_flags &= ~VM_PFNMAP;
 #else
-    vm_flags_clear(vma, VM_PFNMAP);
+	vm_flags_clear(vma, VM_PFNMAP);
 #endif
 
 	vma->vm_pgoff = 0;
