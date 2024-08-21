@@ -2312,7 +2312,7 @@ static int enable_msi_msix(struct xdma_dev *xdev, struct pci_dev *pdev)
 		int req_nvec = xdev->c2h_channel_max + xdev->h2c_channel_max +
 				 xdev->user_max;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 		dbg_init("Enabling MSI-X\n");
 		rv = pci_alloc_irq_vectors(pdev, req_nvec, req_nvec,
 					PCI_IRQ_MSIX);
@@ -2482,7 +2482,7 @@ static int irq_msix_channel_setup(struct xdma_dev *xdev)
 
 	engine = xdev->engine_h2c;
 	for (i = 0; i < xdev->h2c_channel_max; i++, engine++) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 		vector = pci_irq_vector(xdev->pdev, i);
 #else
 		vector = xdev->entry[i].vector;
@@ -2500,7 +2500,7 @@ static int irq_msix_channel_setup(struct xdma_dev *xdev)
 
 	engine = xdev->engine_c2h;
 	for (i = 0; i < xdev->c2h_channel_max; i++, j++, engine++) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 		vector = pci_irq_vector(xdev->pdev, j);
 #else
 		vector = xdev->entry[j].vector;
@@ -2530,7 +2530,7 @@ static void irq_msix_user_teardown(struct xdma_dev *xdev)
 	prog_irq_msix_user(xdev, 1);
 
 	for (i = 0; i < xdev->user_max; i++, j++) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 		u32 vector = pci_irq_vector(xdev->pdev, j);
 #else
 		u32 vector = xdev->entry[j].vector;
@@ -2553,7 +2553,7 @@ static int irq_msix_user_setup(struct xdma_dev *xdev)
 
 	/* vectors set in probe_scan_for_msi() */
 	for (i = 0; i < xdev->user_max; i++, j++) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 		u32 vector = pci_irq_vector(xdev->pdev, j);
 #else
 		u32 vector = xdev->entry[j].vector;
@@ -2572,7 +2572,7 @@ static int irq_msix_user_setup(struct xdma_dev *xdev)
 	/* If any errors occur, free IRQs that were successfully requested */
 	if (rv) {
 		for (i--, j--; i >= 0; i--, j--) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4,12,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0)
 			u32 vector = pci_irq_vector(xdev->pdev, j);
 #else
 			u32 vector = xdev->entry[j].vector;
@@ -3619,7 +3619,7 @@ static int probe_engines(struct xdma_dev *xdev)
 	return 0;
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,5,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
 static void pci_enable_capability(struct pci_dev *pdev, int cap)
 {
 	pcie_capability_set_word(pdev, PCI_EXP_DEVCTL, cap);
@@ -3647,7 +3647,7 @@ static int pci_check_extended_tag(struct xdma_dev *xdev, struct pci_dev *pdev)
 	void *__iomem reg;
 #endif
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,5,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 5, 0)
 	pcie_capability_read_word(pdev, PCI_EXP_DEVCTL, &cap);
 #else
 	int pos;
@@ -4097,7 +4097,7 @@ MODULE_AUTHOR("Xilinx, Inc.");
 MODULE_DESCRIPTION(DRV_MODULE_DESC);
 MODULE_VERSION(DRV_MODULE_VERSION);
 MODULE_LICENSE("GPL v2");
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0) || defined(RHEL_9_0_GE)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 16, 0) || defined(RHEL_9_0_GE)
 MODULE_IMPORT_NS(DMA_BUF);
 #endif
 
