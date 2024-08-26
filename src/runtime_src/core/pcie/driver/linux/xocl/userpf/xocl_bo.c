@@ -1217,7 +1217,7 @@ void xocl_gem_prime_vunmap(struct drm_gem_object *obj, void *vaddr)
 
 }
 
-#elif LINUX_VERSION_CODE < KERNEL_VERSION(6,2,0)
+#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 2, 0)
 int xocl_gem_prime_vmap(struct drm_gem_object *obj, struct dma_buf_map *map)
 {
         struct drm_xocl_bo *xobj = to_xocl_bo(obj);

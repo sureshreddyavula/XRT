@@ -866,9 +866,9 @@ static void queue_req_free(struct qdma_stream_queue *queue,
 static void inline cmpl_aio(struct kiocb *kiocb, unsigned int done_bytes,
 		int error)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5,16,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 16, 0)
 	kiocb->ki_complete(kiocb, done_bytes);
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3,16,0)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
 	kiocb->ki_complete(kiocb, done_bytes, error);
 #else
 	struct qdma_stream_iocb *iocb;
@@ -1238,7 +1238,7 @@ static ssize_t queue_aio_write(struct kiocb *kiocb, const struct iovec *iov,
 	return queue_rw(qdma, queue, true, iov, nr, kiocb);
 }
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,16,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
 static ssize_t queue_write_iter(struct kiocb *kiocb, struct iov_iter *io)
 {
 	struct qdma_stream_queue *queue;
@@ -1255,14 +1255,14 @@ static ssize_t queue_write_iter(struct kiocb *kiocb, struct iov_iter *io)
 	}
 
 	if (!is_sync_kiocb(kiocb)) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 		return queue_aio_write(kiocb, io->__iov, nr, io->iov_offset);
 #else
 		return queue_aio_write(kiocb, io->iov, nr, io->iov_offset);
 #endif
 	}
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 	return queue_rw(qdma, queue, true, io->__iov, nr, NULL);
 #else
 	return queue_rw(qdma, queue, true, io->iov, nr, NULL);
@@ -1285,13 +1285,13 @@ static ssize_t queue_read_iter(struct kiocb *kiocb, struct iov_iter *io)
 	}
 
 	if (!is_sync_kiocb(kiocb)) {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 		return queue_aio_read(kiocb, io->__iov, nr, io->iov_offset);
 #else
 		return queue_aio_read(kiocb, io->iov, nr, io->iov_offset);
 #endif
 	}
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6,4,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 	return queue_rw(qdma, queue, false, io->__iov, nr, NULL);
 #else
 	return queue_rw(qdma, queue, false, io->iov, nr, NULL);
@@ -1409,7 +1409,7 @@ static int queue_close(struct inode *inode, struct file *file)
 
 static struct file_operations queue_fops = {
 		.owner = THIS_MODULE,
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(3,16,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(3, 16, 0)
 		.write_iter = queue_write_iter,
 		.read_iter = queue_read_iter,
 #else

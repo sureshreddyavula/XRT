@@ -305,7 +305,6 @@ xma_enc_session_destroy(XmaEncoderSession *session)
 
     std::lock_guard<std::mutex> guard1(g_xma_singleton->m_mutex);
     //Singleton lock acquired
-    int itr = 0, sess_id = session->base.session_id;
 
     if (session == NULL) {
         xma_logmsg(XMA_ERROR_LOG, XMA_ENCODER_MOD,
@@ -336,59 +335,13 @@ xma_enc_session_destroy(XmaEncoderSession *session)
     // Clean up the private data
     free(session->base.plugin_data);
 
-    // Free the session
-    //Let's not chnage in_use and num of encoders
-    //It is better to have different session_id for debugging
-    /*
-    delete (XmaHwSessionPrivate*)session->base.hw_session.private_do_not_use;
-    */
-    XmaHwSessionPrivate *priv1 = (XmaHwSessionPrivate*)session->base.hw_session.private_do_not_use;
-    if(priv1 != nullptr) {
-        priv1->CU_cmds.clear();
-        priv1->CU_error_cmds.clear();
-        priv1->execbo_lru.clear();
-        priv1->execbo_to_check.clear();
-        for(auto& kernel_bo: priv1->kernel_execbos)
-        {
-            xclUnmapBO(priv1->dev_handle, kernel_bo.handle, kernel_bo.data);
-            xclFreeBO(priv1->dev_handle, kernel_bo.handle);
-        }
-        priv1->kernel_execbos.clear();
-        priv1->buffer_pools.clear();
-        priv1->dev_handle = NULL;
-        priv1->kernel_info = NULL;
-        priv1->device = NULL;
-        delete priv1;
-    }
+    xma_core::utils::xma_session_destroy(&session->base);
 
-    session->base.hw_session.private_do_not_use = nullptr;
-    session->base.plugin_data = nullptr;
-    session->base.stats = NULL;
     session->encoder_plugin = NULL;
-    //do not change kernel in_use as it maybe in use by another plugin
-    session->base.hw_session.dev_index = -1;
-    session->base.session_signature = NULL;
-    session->base.channel_id = -1;
+    // Free the session
     free(session);
     session = nullptr;
 
-    //Free session from all_sessions_vec
-    int vec_size = g_xma_singleton->all_sessions_vec.size();
-    if(vec_size > 0) {
-        for(auto& itr1: g_xma_singleton->all_sessions_vec)
-        {
-            if(itr1.session_id == sess_id)
-            {
-                itr1.hw_session.dev_index = -1;
-                itr1.channel_id = -1;
-                g_xma_singleton->all_sessions_vec.erase(g_xma_singleton->all_sessions_vec.begin() + itr);
-                if(vec_size == 1)
-                    g_xma_singleton->all_sessions_vec.clear();
-                break;
-            }
-            itr += 1;
-        }
-    }
     return XMA_SUCCESS;
 }
 
